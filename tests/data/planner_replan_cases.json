@@ -1,0 +1,1570 @@
+{
+  "node": "Planner",
+  "cases_count": 34,
+  "cases": [
+    {
+      "id": "PLANNER_REPLAN_001",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"缺少关键数据文件 data.csv\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "缺少关键数据文件 data.csv",
+              "suggestion": "请上传 data.csv 文件"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_002",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"无法读取配置文件 config.json\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "无法读取配置文件 config.json",
+              "suggestion": "请检查文件路径"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_003",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"资源文件格式错误，需要 CSV\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "资源文件格式错误，需要 CSV",
+              "suggestion": "请转换文件格式"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_004",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"数据缺少 'timestamp' 列\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "数据缺少 'timestamp' 列",
+              "suggestion": "请补充数据列"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_005",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"图片资源缺失\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "图片资源缺失",
+              "suggestion": "请上传必要的图片"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_006",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"参考文档版本过旧\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "参考文档版本过旧",
+              "suggestion": "建议更新参考文档"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_007",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务顺序错误：先分析后清洗\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务顺序错误：先分析后清洗",
+              "suggestion": "请调整任务顺序"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_008",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务依赖缺失\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务依赖缺失",
+              "suggestion": "确保前置任务已定义"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_009",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务 T2 输出与 T3 输入不匹配\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务 T2 输出与 T3 输入不匹配",
+              "suggestion": "统一接口格式"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_010",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"存在循环依赖\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "存在循环依赖",
+              "suggestion": "解除任务间的循环依赖"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_011",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"步骤遗漏：未包含数据预处理\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "步骤遗漏：未包含数据预处理",
+              "suggestion": "增加预处理步骤"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_012",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务粒度不一致\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务粒度不一致",
+              "suggestion": "统一任务拆分粒度"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_013",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"用户意图与任务不符\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "用户意图与任务不符",
+              "suggestion": "澄清用户意图"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_014",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务描述含糊不清\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务描述含糊不清",
+              "suggestion": "细化任务描述"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_015",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"指令存在矛盾：既要详尽又要简略\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "指令存在矛盾：既要详尽又要简略",
+              "suggestion": "确认报告详细程度"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_016",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"未指定目标受众\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "未指定目标受众",
+              "suggestion": "明确报告受众"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_017",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"标题与内容侧重点不一致\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "标题与内容侧重点不一致",
+              "suggestion": "修改标题或调整重点"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_018",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"术语使用不规范\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "术语使用不规范",
+              "suggestion": "统一术语定义"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_019",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"背景章节内容过少\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "背景章节内容过少",
+              "suggestion": "扩充背景调研"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_020",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"缺少核心数据支撑\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "缺少核心数据支撑",
+              "suggestion": "补充关键数据分析"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_021",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"未包含风险评估\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "未包含风险评估",
+              "suggestion": "增加风险评估章节"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_022",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"结论缺乏建设性建议\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "结论缺乏建设性建议",
+              "suggestion": "深化结论部分"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_023",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"格式不符合学术规范\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "格式不符合学术规范",
+              "suggestion": "调整为学术风格"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_024",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"图表数量不足\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "图表数量不足",
+              "suggestion": "增加可视化图表"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_025",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"超出字数限制\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "超出字数限制",
+              "suggestion": "精简报告内容"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_026",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"任务数量超过系统限制\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "任务数量超过系统限制",
+              "suggestion": "合并小任务"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_027",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"不支持的输出格式\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "不支持的输出格式",
+              "suggestion": "更改输出格式为 PDF"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_028",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"段落过长\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "段落过长",
+              "suggestion": "优化段落结构"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_029",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"引用格式错误\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "引用格式错误",
+              "suggestion": "修正引用格式"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_030",
+      "flags": {
+        "trigger": "missing_resource",
+        "severity": "critical"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"缺少必要的环境参数\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "缺少必要的环境参数",
+              "suggestion": "补充环境参数文件"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_031",
+      "flags": {
+        "trigger": "logical_error",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"分析方法不适用于当前数据\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "分析方法不适用于当前数据",
+              "suggestion": "更换分析模型"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_032",
+      "flags": {
+        "trigger": "content_quality",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"摘要未覆盖所有章节\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "摘要未覆盖所有章节",
+              "suggestion": "重写摘要"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_033",
+      "flags": {
+        "trigger": "technical_constraint",
+        "severity": "minor"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"文件名包含非法字符\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "文件名包含非法字符",
+              "suggestion": "重命名文件"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_REPLAN_034",
+      "flags": {
+        "trigger": "ambiguous_instruction",
+        "severity": "major"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Intake\", \"to\": \"Planner\", \"type\": \"INTAKE_SUMMARY\", \"user_intent\": \"优化报告\", \"task_type\": \"工程项目报告\", \"title\": \"测试项目\", \"doc_length\": \"5000字\", \"resources\": [{\"name\": \"data.csv\", \"type\": \"csv\"}], \"sections\": [\"背景\", \"分析\", \"结论\"]}"
+          },
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Verifier\", \"to\": \"Planner\", \"type\": \"REPLAN\", \"reason\": \"截止日期不明确\"}"
+          }
+        ],
+        "feedback": {
+          "status": "BLOCKED",
+          "issues": [
+            {
+              "description": "截止日期不明确",
+              "suggestion": "设定明确的时间节点"
+            }
+          ]
+        },
+        "decision": "REPLAN",
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "编写背景"
+          },
+          {
+            "task_id": "T2",
+            "task_name": "分析",
+            "task_description": "编写分析"
+          },
+          {
+            "task_id": "T3",
+            "task_name": "结论",
+            "task_description": "编写结论"
+          }
+        ]
+      }
+    }
+  ]
+}

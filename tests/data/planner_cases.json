@@ -1,0 +1,622 @@
+{
+  "node": "Planner",
+  "cases_count": 32,
+  "cases": [
+    {
+      "id": "PLANNER_001",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "energy_optimization"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"基于2024-2025年数据撰写炼化装置能耗优化分析，输出完整工程报告\",\"task_type\":\"工程项目报告\",\"title\":\"炼化装置能耗优化分析\",\"doc_length\":\"5000字\",\"constraints\":[\"语言：中文\",\"遵循模板结构\"],\"style\":\"formal\",\"output_format\":\"PDF\",\"sections\":[\"摘要\",\"背景\",\"数据分析\",\"优化建议\"],\"core_content\":[\"能耗趋势\",\"瓶颈诊断\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_002",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "prediction_optimization"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写实时预测与优化技术研究的工程总结，突出算法评估\",\"task_type\":\"工程项目报告\",\"title\":\"基于大数据技术的炼化装置实时预测及优化技术研究\",\"doc_length\":\"3000字\",\"constraints\":[\"语言：中文\"],\"style\":\"academic\",\"output_format\":\"Word\",\"sections\":[\"技术原理\",\"模型训练\",\"验证与应用\",\"结论\"],\"core_content\":[\"预测方法\",\"优化算法\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_003",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "ethylene_efficiency"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"编写乙烯装置能效提升年度报告，包含趋势与高耗能节点分析\",\"task_type\":\"工程项目报告\",\"title\":\"乙烯装置能效提升年度报告\",\"doc_length\":\"8000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"Markdown\",\"sections\":[\"摘要\",\"背景\",\"生产数据分析\",\"热交换网络评估\",\"优化建议\",\"风险与经济性\"],\"core_content\":[\"能耗趋势\",\"高耗能节点\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_004",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "heater_efficiency"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写加热炉热效率诊断与改进方案，提供可实施措施\",\"task_type\":\"技术方案\",\"title\":\"加热炉热效率诊断与改进方案\",\"doc_length\":\"不限\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"PDF\",\"sections\":[\"背景\",\"数据诊断\",\"问题归因\",\"改进措施\",\"预期效益\"],\"core_content\":[\"热效率诊断\",\"措施与效益\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_005",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "heat_exchange_optimization"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"编写换热网络优化与节能评估报告，要求生成图表与表格\",\"task_type\":\"工程项目报告\",\"title\":\"换热网络优化与节能评估\",\"doc_length\":\"5000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"Word\",\"sections\":[\"摘要\",\"方法\",\"数据分析\",\"优化建议\",\"结论\"],\"core_content\":[\"趋势图\",\"对比表\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_006",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "benchmarking"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写装置能耗与行业对标分析，对比行业平均水平\",\"task_type\":\"工程项目报告\",\"title\":\"装置能耗与行业对标分析\",\"doc_length\":\"4000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"Markdown\",\"sections\":[\"背景\",\"数据处理\",\"对标结果\",\"差距分析\",\"改进建议\"],\"core_content\":[\"行业对标\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_007",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "catalyst_activity"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写催化剂活性评估与优化研究报告，重点活性衰减曲线\",\"task_type\":\"研究报告\",\"title\":\"催化剂活性评估与优化\",\"doc_length\":\"3000字\",\"constraints\":[\"语言：中文\"],\"style\":\"academic\",\"output_format\":\"PDF\",\"sections\":[\"摘要\",\"实验方法\",\"数据分析\",\"讨论\",\"结论\"],\"core_content\":[\"活性衰减曲线\",\"再生策略\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_008",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "wastewater_treatment"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写化工污水处理工艺优化与能耗控制报告\",\"task_type\":\"工程项目报告\",\"title\":\"化工污水处理工艺优化与能耗控制\",\"doc_length\":\"6000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"Word\",\"sections\":[\"背景\",\"工艺现状\",\"数据分析\",\"能耗控制策略\",\"实施计划\"],\"core_content\":[\"能耗控制策略\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_009",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "hazop"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写装置HAZOP安全评估与整改建议\",\"task_type\":\"安全评估\",\"title\":\"装置HAZOP安全评估与整改建议\",\"doc_length\":\"5000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"Markdown\",\"sections\":[\"方法\",\"节点分析\",\"危险识别\",\"建议措施\"],\"core_content\":[\"危险识别\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "PLANNER_010",
+      "flags": {
+        "class": "full",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "production_scheduling"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写化工生产调度优化与KPI提升报告，包含趋势图表\",\"task_type\":\"工程项目报告\",\"title\":\"化工生产调度优化与KPI提升\",\"doc_length\":\"4000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"PDF\",\"sections\":[\"摘要\",\"数据分析\",\"策略\",\"效果预测\"],\"core_content\":[\"KPI趋势\",\"调度建议\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"
+          }
+        ]
+      }
+    },
+
+    {
+      "id": "PLANNER_011",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "energy_optimization"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"编写装置能耗分析报告\",\"task_type\":\"工程项目报告\",\"title\":\"装置能耗分析\",\"doc_length\":\"不限\",\"sections\":[\"背景\",\"数据分析\",\"优化建议\"]}"}]}
+    },
+    {
+      "id": "PLANNER_012",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "wastewater_treatment"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"撰写污水处理能耗控制方案\",\"task_type\":\"技术方案\",\"title\":\"污水处理能耗控制方案\",\"doc_length\":\"不限\",\"output_format\":\"Markdown\",\"core_content\":[\"能耗控制策略\"]}"}]}
+    },
+    {
+      "id": "PLANNER_013",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": false,
+        "sections_present": false,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "heater_efficiency"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"加热炉效率提升技术报告\",\"task_type\":\"工程项目报告\",\"title\":\"加热炉效率提升\",\"doc_length\":\"3000字\",\"style\":\"formal\",\"core_content\":[\"效率提升策略\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_014",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "hazop"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"进行HAZOP安全评估\",\"task_type\":\"安全评估\",\"title\":\"HAZOP安全评估\",\"doc_length\":\"5000字\",\"style\":\"formal\",\"output_format\":\"Markdown\"}"}]}
+    },
+    {
+      "id": "PLANNER_015",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "distillation_optimization"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"精馏塔能耗优化与控制策略\",\"task_type\":\"工程项目报告\",\"title\":\"精馏塔能耗优化与控制策略\",\"doc_length\":\"6000字\",\"constraints\":[\"语言：中文\"],\"output_format\":\"PDF\",\"sections\":[\"背景\",\"数据处理\",\"控制参数分析\",\"优化方案\",\"实施计划\"]}"}]}
+    },
+    {
+      "id": "PLANNER_016",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "aromatics_risk"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"芳烃装置能耗优化与风险控制\",\"task_type\":\"工程项目报告\",\"title\":\"芳烃装置能耗优化与风险控制\",\"doc_length\":\"5000字\",\"style\":\"formal\",\"sections\":[\"背景\",\"数据分析\",\"风险识别\",\"优化建议\",\"实施路线\"],\"core_content\":[\"风险控制\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_017",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": true,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "algorithm_evaluation"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"装置实时预测与优化算法评估\",\"task_type\":\"工程项目报告\",\"title\":\"装置实时预测与优化算法评估\",\"doc_length\":\"8000字\",\"constraints\":[\"语言：中文\"],\"output_format\":\"Word\",\"core_content\":[\"ROC曲线\",\"RMSE结果\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_018",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "process_control"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"过程控制系统升级与能耗优化实施方案\",\"task_type\":\"实施方案\",\"title\":\"过程控制系统升级与能耗优化\",\"doc_length\":\"3000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"PDF\",\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+
+    {
+      "id": "PLANNER_019",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "energy_optimization"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"写装置能耗优化报告\",\"task_type\":\"工程项目报告\",\"title\":\"装置能耗优化报告\",\"doc_length\":\"不限\"}"}]}
+    },
+    {
+      "id": "PLANNER_020",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "heater_efficiency"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"加热炉效率提升报告\",\"task_type\":\"工程项目报告\",\"title\":\"加热炉效率提升\",\"doc_length\":\"不限\",\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_021",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "hazop"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"写HAZOP报告\",\"task_type\":\"安全评估\",\"title\":\"HAZOP报告\",\"doc_length\":\"不限\",\"output_format\":\"Markdown\"}"}]}
+    },
+    {
+      "id": "PLANNER_022",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "benchmarking"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"写能耗与行业对标分析\",\"task_type\":\"工程项目报告\",\"title\":\"能耗与行业对标\",\"doc_length\":\"不限\",\"style\":\"formal\",\"sections\":[\"背景\",\"数据处理\",\"对标结果\",\"改进建议\"]}"}]}
+    },
+    {
+      "id": "PLANNER_023",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "process_control"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"过程控制优化案例\",\"task_type\":\"工程项目报告\",\"title\":\"过程控制优化案例\",\"doc_length\":\"3500字\",\"sections\":[\"背景\",\"策略\",\"效果评估\"],\"core_content\":[\"KPI改善\"]}"}]}
+    },
+    {
+      "id": "PLANNER_024",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "ethylene_efficiency"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"乙烯装置能效提升建议\",\"task_type\":\"工程项目报告\",\"title\":\"乙烯装置能效提升建议\",\"doc_length\":\"3000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"PDF\"}"}]}
+    },
+    {
+      "id": "PLANNER_025",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": false,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "coking_control"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"裂解炉节能与结焦控制方案\",\"task_type\":\"技术方案\",\"title\":\"裂解炉节能与结焦控制\",\"doc_length\":\"3500字\",\"output_format\":\"Word\",\"sections\":[\"背景\",\"结焦诊断\",\"节能措施\",\"经济性评估\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_026",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": false,
+        "sections_present": false,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "fouling_analysis"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"换热器结垢与清洗策略评估\",\"task_type\":\"研究报告\",\"title\":\"换热器结垢评估\",\"doc_length\":\"5000字\",\"style\":\"academic\",\"core_content\":[\"趋势图\",\"对比表\"]}"}]}
+    },
+    {
+      "id": "PLANNER_027",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "distillation_optimization"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"精馏塔能耗优化与控制策略\",\"task_type\":\"工程项目报告\",\"title\":\"精馏塔能耗优化与控制策略\",\"doc_length\":\"6000字\",\"constraints\":[\"语言：中文\"],\"output_format\":\"PDF\",\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_028",
+      "flags": {
+        "class": "minimal",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "production_scheduling"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"生产调度优化与KPI提升\",\"task_type\":\"工程项目报告\",\"title\":\"生产调度优化与KPI提升\",\"doc_length\":\"4000字\",\"constraints\":[\"语言：中文\"],\"sections\":[\"摘要\",\"数据分析\",\"策略\",\"效果预测\"]}"}]}
+    },
+    {
+      "id": "PLANNER_029",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "energy_trend_bottleneck"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"年度能耗趋势与瓶颈分析\",\"task_type\":\"工程项目报告\",\"title\":\"年度能耗趋势与瓶颈分析\",\"doc_length\":\"5000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\",\"output_format\":\"PDF\",\"sections\":[\"摘要\",\"数据处理\",\"趋势分析\",\"瓶颈诊断\",\"改进建议\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_030",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": true,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": true,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "algorithm_evaluation"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"装置实时预测与优化算法评估\",\"task_type\":\"工程项目报告\",\"title\":\"算法评估\",\"doc_length\":\"8000字\",\"output_format\":\"Word\",\"sections\":[\"技术原理\",\"模型训练\",\"验证与应用\",\"结论\"],\"core_content\":[\"ROC\",\"RMSE\"],\"resources\":[{\"name\":\"/d:/Agent/tests/test_intake.csv\",\"type\":\"csv\"}]}"}]}
+    },
+    {
+      "id": "PLANNER_031",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": true,
+        "output_format_present": false,
+        "sections_present": false,
+        "core_content_present": false,
+        "constraints_present": true,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "wastewater_treatment"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"污水处理工艺优化与能耗控制\",\"task_type\":\"工程项目报告\",\"title\":\"污水处理优化\",\"doc_length\":\"6000字\",\"constraints\":[\"语言：中文\"],\"style\":\"formal\"}"}]}
+    },
+    {
+      "id": "PLANNER_032",
+      "flags": {
+        "class": "missing_optionals",
+        "required_fields_present": true,
+        "style_present": false,
+        "output_format_present": false,
+        "sections_present": true,
+        "core_content_present": true,
+        "constraints_present": false,
+        "resources_present": false,
+        "expected_tasks_range": "6-10",
+        "language": "zh",
+        "domain_tag": "hazop"
+      },
+      "state": {"messages": [{"role": "assistant", "content": "{\"from\":\"Intake\",\"to\":\"Planner\",\"type\":\"INTAKE_SUMMARY\",\"user_intent\":\"HAZOP评估\",\"task_type\":\"安全评估\",\"title\":\"HAZOP评估\",\"doc_length\":\"5000字\",\"sections\":[\"方法\",\"节点分析\",\"危险识别\",\"建议措施\"],\"core_content\":[\"危险识别\"]}"}]}
+    }
+  ]
+}

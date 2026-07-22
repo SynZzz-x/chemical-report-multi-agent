@@ -1,0 +1,804 @@
+{
+  "node": "Intake",
+  "cases_count": 32,
+  "cases": [
+    {
+      "id": "INTAKE_001",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "energy_optimization",
+        "language": "zh",
+        "expected_output_type": "engineering_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请基于2024-2025年装置运行数据写一份《炼化装置能耗优化分析》报告，5000字，风格正式，输出PDF。章节包含：摘要、背景、数据分析、优化建议。重点写能耗趋势与瓶颈诊断。已上传数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [
+          { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" }
+        ]
+      }
+    },
+    {
+      "id": "INTAKE_002",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "academic",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "prediction_optimization",
+        "language": "zh",
+        "expected_output_type": "engineering_summary"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请撰写《基于大数据技术的炼化装置实时预测及优化技术研究》工程总结，3000字，风格偏学术，输出Word格式。章节：技术原理、模型训练、验证与应用、结论。重点阐述预测方法与优化算法。已上传：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_003",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "ethylene_efficiency",
+        "language": "zh",
+        "expected_output_type": "annual_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《乙烯装置能效提升年度报告》，8000字，风格正式，输出Markdown。章节包括：摘要、背景、生产数据分析、热交换网络评估、优化建议、风险与经济性。请重点分析能耗趋势及高耗能节点。数据来源：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_004",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": false,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "heater_efficiency",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《加热炉热效率诊断与改进方案》，字数不限，风格正式，输出PDF。章节：背景、数据诊断、问题归因、改进措施、预期效益。分析所需运行数据已上传：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_005",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "heat_exchange_optimization",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《换热网络优化与节能评估》技术报告，5000字，风格正式，Word格式输出。需生成趋势图与对比表，章节：摘要、方法、数据分析、优化建议、结论。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_006",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "benchmarking",
+        "language": "zh",
+        "expected_output_type": "comparative_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《装置能耗与行业对标分析》，约4000字，风格正式，输出Markdown。需要与行业平均水平对比，章节：背景、数据处理、对标结果、差距分析、改进建议。数据文件：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_007",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "academic",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "catalyst_activity",
+        "language": "zh",
+        "expected_output_type": "research_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《催化剂活性评估与优化》研究报告，3000字，风格学术，PDF输出。重点写活性衰减曲线与再生策略。章节：摘要、实验方法、数据分析、讨论、结论。已上传数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_008",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "wastewater_treatment",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《化工污水处理工艺优化与能耗控制》报告，6000字，风格正式，Word格式。章节：背景、工艺现状、数据分析、能耗控制策略、实施计划。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_009",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "hazop",
+        "language": "zh",
+        "expected_output_type": "safety_assessment"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《装置HAZOP安全评估与整改建议》，5000字，风格正式，Markdown输出。章节：方法、节点分析、危险识别、建议措施。数据支持：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_010",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "production_scheduling",
+        "language": "zh",
+        "expected_output_type": "optimization_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《化工生产调度优化与KPI提升》报告，约4000字，风格正式，PDF输出。需包含生产负荷、能耗KPI趋势、调度建议。章节：摘要、数据分析、策略、效果预测。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_011",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "coking_control",
+        "language": "zh",
+        "expected_output_type": "technical_solution"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《乙烯裂解炉节能优化与结焦控制》技术方案，3500字，风格正式，Word格式。章节：背景、数据与现状、结焦诊断、节能措施、经济性评估。数据来源：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_012",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "academic",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "fouling_analysis",
+        "language": "zh",
+        "expected_output_type": "research_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《换热器结垢行为与清洗策略评估》，5000字，学术风格，Markdown输出。需包含趋势图与对比表。章节：文献综述、数据分析、机理讨论、策略建议。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_013",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "distillation_optimization",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《精馏塔能耗优化与控制策略》，6000字，风格正式，PDF输出。章节：背景、数据处理、控制参数分析、优化方案、实施计划。已上传数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_014",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "propylene_cost",
+        "language": "zh",
+        "expected_output_type": "economic_assessment"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《丙烯装置降本增效综合方案》，4500字，正式风格，Word输出。需包含经济性评估与KPI影响分析。章节：摘要、现状诊断、策略设计、经济性评估、结论。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_015",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "aromatics_risk",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "撰写《芳烃装置能耗优化与风险控制》技术报告，5000字，正式风格，Markdown输出。章节：背景、数据分析、风险识别、优化建议、实施路线。数据：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_016",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "process_control",
+        "language": "zh",
+        "expected_output_type": "implementation_plan"
+      },
+      "state": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "请写《过程控制系统升级与能耗优化》方案，3000字，正式风格，PDF输出。章节：背景、控制策略、数据分析、实施步骤、效果评估。数据文件：/d:/Agent/tests/test_intake.csv"
+          }
+        ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+
+    {
+      "id": "INTAKE_017",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_energy",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "写一份化工能耗优化的报告。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_018",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_summary",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "帮我做个总结，和能耗有点关系。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_019",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_summary",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "看看去年数据，写点东西。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_020",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "heater_efficiency",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "需要一份关于加热炉效率的报告。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_021",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "energy_optimization",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "写写节能建议吧。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_022",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_structure",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "数据分析、优化建议这两部分重点写。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_023",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_report",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "随便写个报告，越详细越好。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_024",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_energy",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "做个炼化的那个能量的东西报告。" } ],
+        "docs": []
+      }
+    },
+
+    {
+      "id": "INTAKE_025",
+      "flags": {
+        "class": "partial",
+        "constraints": "partial",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": true,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "energy_optimization",
+        "language": "zh",
+        "expected_output_type": "engineering_report"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "写《装置能耗分析》，章节：背景、数据分析、优化建议。长度不限制。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_026",
+      "flags": {
+        "class": "partial",
+        "constraints": "partial",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "Markdown",
+        "sections_specified": false,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "wastewater_treatment",
+        "language": "zh",
+        "expected_output_type": "technical_solution"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "写一份关于污水处理能耗控制的方案，Markdown输出。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_027",
+      "flags": {
+        "class": "partial",
+        "constraints": "partial",
+        "length_specified": false,
+        "style": "formal",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "ethylene_efficiency",
+        "language": "zh",
+        "expected_output_type": "recommendation"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "撰写乙烯装置能效提升建议，风格formal。" } ],
+        "docs": []
+      }
+    },
+    {
+      "id": "INTAKE_028",
+      "flags": {
+        "class": "partial",
+        "constraints": "partial",
+        "length_specified": true,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "heater_efficiency",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "写一份加热炉效率提升报告，约3000字。" } ],
+        "docs": []
+      }
+    },
+
+    {
+      "id": "INTAKE_029",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "PDF",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": false,
+        "resources_uploaded": true,
+        "domain_tag": "energy_trend_bottleneck",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [ {
+          "role": "user",
+          "content": "撰写《年度能耗趋势与瓶颈分析》报告，5000字，风格正式，PDF输出。必须生成趋势图和占比饼图。章节：摘要、数据处理、趋势分析、瓶颈诊断、改进建议。数据已上传：/d:/Agent/tests/test_intake.csv"
+        } ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_030",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "academic",
+        "output_format": "Word",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": true,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "algorithm_evaluation",
+        "language": "zh",
+        "expected_output_type": "technical_report"
+      },
+      "state": {
+        "messages": [ {
+          "role": "user",
+          "content": "请用中文撰写《装置实时预测与优化算法评估》技术报告，8000字，学术风格，Word格式。重点：预测方法与算法比较，包含ROC曲线与RMSE结果。数据文件：/d:/Agent/tests/test_intake.csv"
+        } ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_031",
+      "flags": {
+        "class": "complete",
+        "constraints": "full",
+        "length_specified": true,
+        "style": "formal",
+        "output_format": "Markdown",
+        "sections_specified": true,
+        "core_focus_specified": true,
+        "requires_figures": false,
+        "requires_tables": true,
+        "resources_uploaded": true,
+        "domain_tag": "process_control",
+        "language": "zh",
+        "expected_output_type": "case_study"
+      },
+      "state": {
+        "messages": [ {
+          "role": "user",
+          "content": "撰写《过程控制优化与能耗下降案例》，3500字，正式风格，Markdown输出。核心：控制策略调整、参数优化、能耗KPI改善。数据：/d:/Agent/tests/test_intake.csv"
+        } ],
+        "docs": [ { "name": "/d:/Agent/tests/test_intake.csv", "type": "csv" } ]
+      }
+    },
+    {
+      "id": "INTAKE_032",
+      "flags": {
+        "class": "ambiguous",
+        "constraints": "none",
+        "length_specified": false,
+        "style": "none",
+        "output_format": "none",
+        "sections_specified": false,
+        "core_focus_specified": false,
+        "requires_figures": false,
+        "requires_tables": false,
+        "resources_uploaded": false,
+        "domain_tag": "generic_request",
+        "language": "zh",
+        "expected_output_type": "unspecified"
+      },
+      "state": {
+        "messages": [ { "role": "user", "content": "需要一份报告，尽快。" } ],
+        "docs": []
+      }
+    }
+  ]
+}

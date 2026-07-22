@@ -1,0 +1,581 @@
+import os
+import json
+import re
+import logging
+from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.types import interrupt
+from typing import Dict, Any, List
+
+from ..state import State, merge_docs
+from ..llm import get_llm
+
+logger = logging.getLogger(__name__)
+
+"""
+Planner 节点：
+- 职责：读取最新一条发给 Planner 的指令（messages content 为 JSON，且 `to="Planner"`），
+  根据指令类型（INTAKE_SUMMARY / PROCEED / REPLAN）选择流程，生成任务列表与下游消息。
+- 输入：
+  - 来自 Intake 的 INTAKE_SUMMARY：初始化任务规划
+  - 来自 Verifier 的 PROCEED：根据决策推进 cursor
+  - 来自 Verifier 的 REPLAN：重新规划任务并重置 cursor=0
+- 输出：
+  - 更新 `tasks` 与 `cursor`
+  - 设置 `planner_action`
+  - 若为 PROCEED，生成发给 Worker 的 `PLAN_RESULT` 消息
+"""
+
+
+def _latest_to_planner(messages):
+    """获取 messages 中最新一条发给 Planner 的指令，解析其 JSON content。"""
+    for m in reversed(messages or []):
+        try:
+            c = str(getattr(m, "content", "") or "").strip()
+            parsed = json.loads(c)
+            if isinstance(parsed, dict) and parsed.get("to") == "Planner":
+                return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _read_prompt(rel_path: str) -> str:
+    """读取统一的 Prompt 文件内容（相对路径，供 ChatPromptTemplate 使用）。"""
+    base_dir = os.path.dirname(__file__)
+    path = os.path.join(base_dir, rel_path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return "你是 Planner 节点。严格输出 JSON 数组任务列表。"
+
+
+def _clean_json_fences(s: str) -> str:
+    """移除可能的 ```json ... ``` 包裹，返回清洗后的字符串。"""
+    s2 = re.sub(r"^```(json)?\s*", "", s.strip(), flags=re.IGNORECASE)
+    s2 = re.sub(r"\s*```$", "", s2)
+    return s2
+
+
+def _is_confirmation_feedback(user_feedback: str) -> bool:
+    """判断用户是否直接确认当前计划。"""
+    normalized = str(user_feedback or "").strip().lower()
+    return normalized in {
+        "",
+        "ok",
+        "okay",
+        "确认",
+        "通过",
+        "继续",
+        "开始",
+        "开始执行",
+        "按此执行",
+        "没问题",
+        "可以",
+        "同意",
+    }
+
+
+def _normalize_resources(resources):
+    result = []
+    for r in resources or []:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("name") or (os.path.basename(r.get("path", "")) if r.get("path") else None)
+        result.append({
+            "name": name,
+            "path": r.get("path"),
+            "type": r.get("type", "unknown"),
+        })
+    return result
+
+
+def _build_resource_index(resources):
+    index = {}
+    for r in resources or []:
+        if not isinstance(r, dict):
+            continue
+        path = r.get("path") or r.get("file_path")
+        name = r.get("name")
+        if path:
+            if name:
+                index[name] = path
+            basename = os.path.basename(path)
+            index[basename] = path
+            index[path] = path
+    return index
+
+
+def _ensure_use_resources_paths(tasks, resources):
+    index = _build_resource_index(resources)
+    for t in tasks or []:
+        raw_list = t.get("use_resources") or []
+        normalized = []
+        for item in raw_list:
+            if isinstance(item, dict):
+                path = item.get("path") or item.get("file_path")
+                name = item.get("name")
+                if path:
+                    normalized.append(path)
+                    continue
+                if name and name in index:
+                    normalized.append(index[name])
+                    continue
+            elif isinstance(item, str):
+                if item in index:
+                    normalized.append(index[item])
+                else:
+                    normalized.append(item)
+        t["use_resources"] = normalized
+        t.setdefault("use_rag", False)
+        t.setdefault("task_type", "analysis")
+        t.setdefault("query", "")
+    return tasks
+
+
+def _build_tasks_with_llm(intake_obj, config):
+    """初始规划：基于 Intake 摘要与统一 Prompt 生成任务列表。"""
+    resource_objs = intake_obj.get("resources", []) or []
+    resources = _normalize_resources(resource_objs)
+    resource_paths = []
+    for r in resource_objs:
+        if isinstance(r, dict):
+            p = r.get("path") or r.get("file_path") or r.get("name")
+            if p:
+                resource_paths.append(p)
+    sections = intake_obj.get("sections") or []
+    task_type = intake_obj.get("task_type") or "analysis"
+    title = intake_obj.get("title") or "未知项目"
+    intent = intake_obj.get("user_intent") or "无"
+    doc_length = intake_obj.get("doc_length") or 3000
+    constraints = intake_obj.get("constraints") or []
+    sys_prompt = _read_prompt("../prompts/planner_to_worker.md")
+    try:
+        model = get_llm(config)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", sys_prompt),
+            ("human", "请基于以上输入生成严格的 JSON 任务数组")
+        ])
+        messages = prompt.format_messages(
+            title=title,
+            user_intent=intent,
+            task_type=task_type,
+            constraints=constraints,
+            doc_length=doc_length,
+            sections=sections,
+            resources=resources,
+        )
+        resp = model.invoke(messages, config=config)
+        content_str = _clean_json_fences(str(resp.content).strip())
+        tasks = json.loads(content_str)
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError("bad tasks")
+        tasks = _ensure_use_resources_paths(tasks, resource_objs)
+        return tasks
+    except Exception as e:
+        logger.error(f"Error in _build_tasks_with_llm: {e}")
+        fallback = []
+        for i, sec in enumerate(sections or ["摘要", "背景与意义"]):
+            fallback.append({
+                "task_id": f"T{i+1}",
+                "task_name": sec,
+                "task_description": f"围绕 {sec} 生成占位内容。",
+                "generate_figure": False,
+                "generate_table": False,
+                "use_resources": resource_paths,
+            })
+        return fallback
+
+
+def _get_intake_data(state):
+    """从 messages 中寻找最新的 `type=INTAKE_SUMMARY` 作为背景数据。"""
+    for msg in reversed(state.get("messages", []) or []):
+        try:
+            c = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            data = json.loads(c) if isinstance(c, str) else c
+            if isinstance(data, dict) and data.get("type") == "INTAKE_SUMMARY":
+                return data
+        except Exception:
+            continue
+    return {"title": "未知项目", "user_intent": "无", "resources": []}
+
+
+def _build_tasks_from_replan_feedback(state, config, current_tasks):
+    """重做规划：依据 Verifier 反馈与统一 Prompt 生成任务列表。"""
+    intake_data = _get_intake_data(state)
+    resource_objs = intake_data.get("resources", []) or []
+    feedback_obj = state.get("feedback", {}) or {}
+    if isinstance(feedback_obj, str):
+        try:
+            feedback_obj = json.loads(feedback_obj)
+        except Exception:
+            feedback_obj = {"status": "BLOCKED", "issues": [{"description": feedback_obj}]}
+    issues = feedback_obj.get("issues", []) or []
+    reason = (issues[0].get("description") if issues else feedback_obj.get("status")) or "需要重新规划"
+    suggestion = (issues[0].get("suggestion") if issues else "请检查并重新规划")
+    sys_prompt = _read_prompt("../prompts/planner_replan.md")
+    try:
+        model = get_llm(config)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", sys_prompt),
+            ("human", "请根据反馈重新生成任务列表")
+        ])
+        messages = prompt.format_messages(
+            title=intake_data.get("title"),
+            user_intent=intake_data.get("user_intent"),
+            task_type=intake_data.get("task_type", "通用"),
+            constraints=intake_data.get("constraints"),
+            doc_length=intake_data.get("doc_length"),
+            blocked_reason=reason,
+            suggestion=suggestion,
+            prev_tasks=[t.get("task_name") for t in current_tasks or []],
+            resources=_normalize_resources(resource_objs),
+        )
+        resp = model.invoke(messages, config=config)
+        tasks = json.loads(_clean_json_fences(str(resp.content).strip()))
+        if not isinstance(tasks, list):
+            raise ValueError("bad tasks")
+        for i, t in enumerate(tasks):
+            t.setdefault("task_id", f"T{i+1}")
+            t.setdefault("generate_figure", False)
+            t.setdefault("generate_table", False)
+            t.setdefault("use_resources", [])
+        tasks = _ensure_use_resources_paths(tasks, resource_objs)
+        return tasks
+    except Exception:
+        if current_tasks:
+            return current_tasks
+
+        fallback = []
+        base = resource_objs
+        names = []
+        for r in base:
+            if isinstance(r, dict):
+                p = r.get("path") or r.get("file_path") or r.get("name")
+                if p:
+                    names.append(p)
+        for i, ct in enumerate([t.get("task_name", f"任务{i+1}") for t in current_tasks or []] or ["重做任务"]):
+            fallback.append({
+                "task_id": f"T{i+1}",
+                "task_name": ct,
+                "task_description": f"依据建议重做：{suggestion}",
+                "generate_figure": False,
+                "generate_table": False,
+                "use_resources": names,
+            })
+        return fallback
+
+
+def _resource_identity(resource: Dict[str, Any]) -> str:
+    return str(
+        resource.get("file_id")
+        or resource.get("resource_id")
+        or resource.get("path")
+        or (str(resource.get("name", "")) + str(resource.get("path", "")))
+    )
+
+
+def _refine_tasks(
+    state: State,
+    current_tasks,
+    user_feedback,
+    state_docs,
+    intake_data,
+    config,
+):
+    """依据计划确认反馈和本轮新增附件优化任务列表。"""
+    current_docs = merge_docs([], state_docs or [])
+    initial_resources = merge_docs([], intake_data.get("resources", []) or [])
+    initial_resource_ids = {
+        _resource_identity(resource)
+        for resource in initial_resources
+        if isinstance(resource, dict)
+    }
+
+    new_resources = []
+    for document in current_docs:
+        if not isinstance(document, dict):
+            continue
+        if _resource_identity(document) in initial_resource_ids:
+            continue
+
+        normalized = dict(document)
+        file_id = normalized.get("file_id") or normalized.get("resource_id")
+        if file_id:
+            normalized["file_id"] = file_id
+            normalized["resource_id"] = file_id
+        normalized.setdefault(
+            "name",
+            normalized.get("original_name")
+            or os.path.basename(normalized.get("path", "")),
+        )
+        normalized.setdefault("type", "unknown")
+        new_resources.append(normalized)
+
+    # 纯确认且没有新附件时，保持原计划，避免无意义地再次调用 LLM。
+    if _is_confirmation_feedback(user_feedback) and not new_resources:
+        return current_tasks
+
+    all_resources = merge_docs(initial_resources, new_resources)
+    previous_tasks = json.dumps(current_tasks, ensure_ascii=False)
+    system_prompt = _read_prompt("../prompts/planner_intake_replan.md")
+
+    try:
+        model = get_llm(config)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "请根据用户反馈和新增资源重新生成任务列表"),
+            ]
+        )
+        messages = prompt.format_messages(
+            title=intake_data.get("title"),
+            user_intent=intake_data.get("user_intent"),
+            task_type=intake_data.get("task_type", "通用"),
+            resources=_normalize_resources(initial_resources),
+            new_resources=_normalize_resources(new_resources),
+            prev_tasks=previous_tasks,
+            doc_length=intake_data.get("doc_length"),
+            constraints=intake_data.get("constraints"),
+            user_feedback=user_feedback,
+        )
+        response = model.invoke(messages, config=config)
+        tasks = json.loads(_clean_json_fences(str(response.content).strip()))
+        if not isinstance(tasks, list):
+            raise ValueError("Planner refined tasks must be a list")
+
+        for index, task in enumerate(tasks):
+            task.setdefault("task_id", f"T{index + 1}")
+            task.setdefault("generate_figure", False)
+            task.setdefault("generate_table", False)
+            task.setdefault("use_resources", [])
+
+        return _ensure_use_resources_paths(tasks, all_resources)
+    except Exception as exc:
+        logger.exception("Failed to refine tasks: %s", exc)
+        if current_tasks:
+            return current_tasks
+
+        resource_paths = []
+        for resource in all_resources:
+            if not isinstance(resource, dict):
+                continue
+            value = resource.get("path") or resource.get("file_path") or resource.get("name")
+            if value:
+                resource_paths.append(value)
+
+        return [
+            {
+                "task_id": "T1",
+                "task_name": "重做任务",
+                "task_description": f"依据用户反馈重做：{user_feedback}",
+                "generate_figure": False,
+                "generate_table": False,
+                "use_resources": resource_paths,
+            }
+        ]
+
+
+def _generate_plan_guidance(tasks: List[Dict[str, Any]], initial_resources: List[str], config: RunnableConfig) -> Dict[str, Any]:
+    """生成计划确认引导信息和资源映射关系"""
+    try:
+        model = get_llm(config)
+        sys_prompt = _read_prompt("../prompts/planner_resource_guide.md")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", sys_prompt),
+            ("human", "请生成引导信息和资源映射")
+        ])
+        messages = prompt.format_messages(
+            tasks=json.dumps(tasks, ensure_ascii=False),
+            initial_resources=json.dumps(initial_resources, ensure_ascii=False)
+        )
+        resp = model.invoke(messages, config=config)
+        
+        content = str(resp.content)
+        json_match = re.search(r"\{[\s\S]*\}", content)
+        if json_match:
+            return json.loads(json_match.group(0))
+    except Exception:
+        pass
+        
+    return {
+        "natural_language_guidance": "为您生成的任务计划如下，请您查阅。如果需要补充资料，请上传；如果您对计划满意，或者您也可以直接运行，我们将立即开始工作。",
+        "resource_mapping": {}
+    }
+
+
+def planner(state: State, config: RunnableConfig, **kwargs):
+    """Planner 主流程：
+    - 确定 Action (INTAKE_SUMMARY / REPLAN / PROCEED)
+    - 生成/更新任务列表
+    - 若 PROCEED，生成消息
+    - 若其他，推迟消息生成到 planner_confirm
+    """
+    parsed = _latest_to_planner(state.get("messages", []))
+    tasks = state.get("tasks", []) or []
+    cursor = state.get("cursor", 0)
+    decision = state.get("decision", "NEXT")
+    
+    # 确定 Action
+    if parsed and parsed.get("type") == "INTAKE_SUMMARY":
+        planner_action = "INTAKE_SUMMARY"
+    elif decision == "REPLAN" or (parsed and parsed.get("type") == "REPLAN"):
+        planner_action = "REPLAN"
+    else:
+        planner_action = "PROCEED"
+
+    # 执行逻辑
+    overview = "保持既有任务列表。"
+    
+    if planner_action == "INTAKE_SUMMARY":
+        tasks = _build_tasks_with_llm(parsed, config)
+        cursor = 0
+        overview = "初始规划已生成。"
+    
+    elif planner_action == "REPLAN":
+        tasks = _build_tasks_from_replan_feedback(state, config, tasks)
+        cursor = 0
+        overview = "因验证阻塞，已根据反馈重做任务列表。"
+    
+    elif planner_action == "PROCEED":
+        # 如果是 PROCEED 且有明确的 PROCEED 指令，移动 cursor
+        # 这里的逻辑可能需要根据实际 graph 流转调整，目前假设 PROCEED 时 Verifier 已决定 NEXT
+        if parsed and parsed.get("type") == "PROCEED" and decision == "NEXT":
+             cursor = min(cursor + 1, max(len(tasks) - 1, 0))
+        overview = "继续执行下一任务。"
+        
+        # 兜底：如果 tasks 为空
+        if not tasks:
+            tasks = _build_tasks_with_llm({"sections": ["摘要", "背景与意义"], "resources": []}, config)
+            cursor = 0
+            overview = "使用默认任务列表。"
+
+    # 返回结果
+    result = {
+        "tasks": tasks,
+        "cursor": cursor,
+        "planner_action": planner_action,
+        "decision": "NEXT" # 默认重置决策
+    }
+    
+    # 如果是 PROCEED，生成消息
+    if planner_action == "PROCEED":
+        content_obj = {
+            "from": "Planner",
+            "to": "Worker",
+            "type": "PLAN_RESULT",
+            "content": {
+                "tasks": tasks,
+                "cursor": cursor
+            },
+        }
+        msg = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
+        result["messages"] = [msg]
+    else:
+        # 准备 Guidance 数据供 Confirm 节点使用
+        intake_data = _get_intake_data(state)
+        initial_resources_names = [r.get("name") for r in intake_data.get("resources", []) if isinstance(r, dict)]
+        
+        guidance_result = _generate_plan_guidance(tasks, initial_resources_names, config)
+        result["guidance"] = guidance_result
+    
+    return result
+
+
+def planner_confirm(state: State, config: RunnableConfig, **kwargs):
+    """等待用户确认计划，并按反馈或新增附件调整任务。"""
+    tasks = state.get("tasks", []) or []
+    guidance_result = state.get("guidance") or {}
+
+    if not guidance_result:
+        intake_data = _get_intake_data(state)
+        initial_resource_names = [
+            resource.get("name")
+            for resource in intake_data.get("resources", [])
+            if isinstance(resource, dict) and resource.get("name")
+        ]
+        guidance_result = _generate_plan_guidance(
+            tasks,
+            initial_resource_names,
+            config,
+        )
+
+    structured_tasks = [
+        {
+            "task_name": task.get("task_name"),
+            "task_description": task.get("task_description"),
+        }
+        for task in tasks
+    ]
+    payload = {
+        "type": "confirm_plan_and_resources",
+        "guidance_text": guidance_result.get("natural_language_guidance"),
+        "structured_msg": {
+            "tasks": structured_tasks,
+            "resource_mapping": guidance_result.get("resource_mapping") or {},
+        },
+    }
+
+    resume_value = interrupt(payload)
+
+    if isinstance(resume_value, dict):
+        feedback_text = str(resume_value.get("text") or "").strip()
+        feedback_message_id = resume_value.get("message_id")
+        resumed_docs = resume_value.get("docs") or []
+    else:
+        feedback_text = str(resume_value or "").strip()
+        feedback_message_id = None
+        resumed_docs = []
+
+    if not feedback_text:
+        feedback_text = "继续"
+
+    feedback_message = HumanMessage(
+        id=feedback_message_id,
+        content=feedback_text,
+        additional_kwargs={
+            "message_type": "plan_confirmation",
+            "user_id": state.get("user_id"),
+            "conversation_id": state.get("conversation_id"),
+            "job_id": state.get("job_id"),
+            "attachment_ids": [
+                document.get("file_id") or document.get("resource_id")
+                for document in resumed_docs
+                if isinstance(document, dict)
+            ],
+        },
+    )
+
+    # 当前节点内需要完整资源视图；写回 State 时仍只返回 resumed_docs 增量。
+    combined_docs = merge_docs(state.get("docs") or [], resumed_docs)
+    intake_data = _get_intake_data(state)
+    tasks = _refine_tasks(
+        state,
+        tasks,
+        feedback_text,
+        combined_docs,
+        intake_data,
+        config,
+    )
+
+    content_obj = {
+        "from": "Planner",
+        "to": "Worker",
+        "type": "PLAN_RESULT",
+        "content": {
+            "tasks": tasks,
+            "cursor": 0,
+        },
+    }
+    message = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
+
+    return {
+        "messages": [feedback_message, message],
+        "tasks": tasks,
+        "cursor": 0,
+        # 只提交本轮新增附件，State.merge_docs 会负责合并。
+        "docs": resumed_docs,
+    }
+

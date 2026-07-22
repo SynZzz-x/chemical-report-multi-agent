@@ -1,0 +1,867 @@
+{
+  "node": "Verifier",
+  "cases_count": 31,
+  "cases": [
+    {
+      "id": "VERIFIER_001",
+      "flags": {
+        "status": "PASS",
+        "type": "text"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "现状分析",
+            "task_description": "分析当前装置能耗现状，字数不少于500字"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "本章节详细阐述了炼化装置的能耗现状。通过对2024年全年的数据监控，我们发现...</p>具体表现为：1. 加热炉热效率偏低... 2. 换热网络存在优化空间..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"现状分析\", \"task_description\": \"分析当前装置能耗现状，字数不少于500字\"}"
+          }
+        ]
+      },
+      "description": "High quality text content meeting length requirements"
+    },
+    {
+      "id": "VERIFIER_002",
+      "flags": {
+        "status": "PASS",
+        "type": "text_chart"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "趋势分析",
+            "task_description": "分析能耗趋势，并附带趋势图"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "下图展示了1-12月的能耗趋势...",
+          "images": [
+            "chart_energy_trend.png"
+          ]
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"趋势分析\", \"task_description\": \"分析能耗趋势，并附带趋势图\"}"
+          }
+        ]
+      },
+      "description": "High quality content with required chart"
+    },
+    {
+      "id": "VERIFIER_003",
+      "flags": {
+        "status": "PASS",
+        "type": "text_table"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "设备参数",
+            "task_description": "列出主要设备参数表"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "表1列出了主要设备的运行参数...",
+          "tables": [
+            "table_params.csv"
+          ]
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"设备参数\", \"task_description\": \"列出主要设备参数表\"}"
+          }
+        ]
+      },
+      "description": "High quality content with required table"
+    },
+    {
+      "id": "VERIFIER_004",
+      "flags": {
+        "status": "PASS",
+        "type": "comprehensive"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T4",
+            "task_name": "综合评估",
+            "task_description": "进行综合评估，包含图表数据"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "综合分析如下...",
+          "images": [
+            "fig1.png"
+          ],
+          "tables": [
+            "tab1.csv"
+          ]
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"综合评估\", \"task_description\": \"进行综合评估，包含图表数据\"}"
+          }
+        ]
+      },
+      "description": "Comprehensive high quality content"
+    },
+    {
+      "id": "VERIFIER_005",
+      "flags": {
+        "status": "PASS",
+        "type": "text_structured"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "背景",
+            "task_description": "撰写背景章节，结构清晰"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "# 1. 背景\n## 1.1 历史数据\n...\n## 1.2 问题定义\n..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"背景\", \"task_description\": \"撰写背景章节，结构清晰\"}"
+          }
+        ]
+      },
+      "description": "Well structured markdown text"
+    },
+    {
+      "id": "VERIFIER_006",
+      "flags": {
+        "status": "FAILED",
+        "issue": "too_short"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "现状分析",
+            "task_description": "详细分析能耗现状，不少于300字"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "能耗有点高。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"现状分析\", \"task_description\": \"详细分析能耗现状，不少于300字\"}"
+          }
+        ]
+      },
+      "description": "Content significantly shorter than required"
+    },
+    {
+      "id": "VERIFIER_007",
+      "flags": {
+        "status": "FAILED",
+        "issue": "vague"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "问题诊断",
+            "task_description": "具体诊断装置存在的问题"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "我们做了一些研究，发现了一些问题，可能会有一些改进的方法。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"问题诊断\", \"task_description\": \"具体诊断装置存在的问题\"}"
+          }
+        ]
+      },
+      "description": "Vague content without specific details"
+    },
+    {
+      "id": "VERIFIER_008",
+      "flags": {
+        "status": "FAILED",
+        "issue": "placeholder"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "深入分析",
+            "task_description": "进行深入分析"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "此处应有分析内容..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"深入分析\", \"task_description\": \"进行深入分析\"}"
+          }
+        ]
+      },
+      "description": "Placeholder content detected"
+    },
+    {
+      "id": "VERIFIER_009",
+      "flags": {
+        "status": "FAILED",
+        "issue": "repetitive"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "现状",
+            "task_description": "分析现状"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "能耗很高。能耗确实很高。我们发现能耗非常高。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"现状\", \"task_description\": \"分析现状\"}"
+          }
+        ]
+      },
+      "description": "Repetitive meaningless content"
+    },
+    {
+      "id": "VERIFIER_010",
+      "flags": {
+        "status": "FAILED",
+        "issue": "empty"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "开头",
+            "task_description": "写个开头"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": ""
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"开头\", \"task_description\": \"写个开头\"}"
+          }
+        ]
+      },
+      "description": "Empty content"
+    },
+    {
+      "id": "VERIFIER_011",
+      "flags": {
+        "status": "FAILED",
+        "issue": "unclear_meaning"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "装置简介",
+            "task_description": "介绍炼化装置"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "今天天气不错，炼化装置也很复杂，就像人生一样..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"装置简介\", \"task_description\": \"介绍炼化装置\"}"
+          }
+        ]
+      },
+      "description": "Rambling content with unclear focus"
+    },
+    {
+      "id": "VERIFIER_012",
+      "flags": {
+        "status": "FAILED",
+        "issue": "jargon_soup"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "机理分析",
+            "task_description": "分析物理机理"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "熵增焓变导致了PID控制的鲁棒性在神经网络的反向传播中失效..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"机理分析\", \"task_description\": \"分析物理机理\"}"
+          }
+        ]
+      },
+      "description": "Nonsensical jargon usage"
+    },
+    {
+      "id": "VERIFIER_013",
+      "flags": {
+        "status": "FAILED",
+        "issue": "disconnected"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "成本分析",
+            "task_description": "分析运营成本"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "第一段讲成本。第二段突然讲员工食堂。第三段讲国际形势。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"成本分析\", \"task_description\": \"分析运营成本\"}"
+          }
+        ]
+      },
+      "description": "Disconnected paragraphs"
+    },
+    {
+      "id": "VERIFIER_014",
+      "flags": {
+        "status": "FAILED",
+        "issue": "grammar"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T4",
+            "task_name": "总结",
+            "task_description": "总结运行情况"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "装置是好坏的运行在昨天明天..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"总结\", \"task_description\": \"总结运行情况\"}"
+          }
+        ]
+      },
+      "description": "Severe grammatical issues affecting meaning"
+    },
+    {
+      "id": "VERIFIER_015",
+      "flags": {
+        "status": "FAILED",
+        "issue": "wrong_format"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T5",
+            "task_name": "业务描述",
+            "task_description": "用自然语言描述业务"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "print('Hello World')"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"业务描述\", \"task_description\": \"用自然语言描述业务\"}"
+          }
+        ]
+      },
+      "description": "Code instead of natural language"
+    },
+    {
+      "id": "VERIFIER_016",
+      "flags": {
+        "status": "FAILED",
+        "issue": "off_topic"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "工艺流程",
+            "task_description": "描述炼化工艺流程"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "红烧肉的做法是先焯水，然后炒糖色..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"工艺流程\", \"task_description\": \"描述炼化工艺流程\"}"
+          }
+        ]
+      },
+      "description": "Completely off-topic (cooking recipe)"
+    },
+    {
+      "id": "VERIFIER_017",
+      "flags": {
+        "status": "FAILED",
+        "issue": "wrong_section"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "项目背景",
+            "task_description": "介绍项目发起的背景"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "综上所述，本项目取得了巨大成功，建议推广..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"项目背景\", \"task_description\": \"介绍项目发起的背景\"}"
+          }
+        ]
+      },
+      "description": "Writing conclusion in background section"
+    },
+    {
+      "id": "VERIFIER_018",
+      "flags": {
+        "status": "FAILED",
+        "issue": "off_topic_target"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "本装置分析",
+            "task_description": "分析本装置的优缺点"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "竞争对手B公司的装置非常先进..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"本装置分析\", \"task_description\": \"分析本装置的优缺点\"}"
+          }
+        ]
+      },
+      "description": "Analyzing wrong target"
+    },
+    {
+      "id": "VERIFIER_019",
+      "flags": {
+        "status": "FAILED",
+        "issue": "sensitive_irrelevant"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "技术分析",
+            "task_description": "分析技术路线"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "某某选举结果显示..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"技术分析\", \"task_description\": \"分析技术路线\"}"
+          }
+        ]
+      },
+      "description": "Irrelevant political content"
+    },
+    {
+      "id": "VERIFIER_020",
+      "flags": {
+        "status": "FAILED",
+        "issue": "advertising"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T4",
+            "task_name": "计算资源",
+            "task_description": "评估计算资源需求"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "买显卡就选NVIDIA..."
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"计算资源\", \"task_description\": \"评估计算资源需求\"}"
+          }
+        ]
+      },
+      "description": "Advertising content"
+    },
+    {
+      "id": "VERIFIER_021",
+      "flags": {
+        "status": "FAILED",
+        "issue": "contradiction"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "能耗分析",
+            "task_description": "分析能耗变化"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "本月能耗下降了50%。... 数据显示本月能耗同比上升了20%。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"能耗分析\", \"task_description\": \"分析能耗变化\"}"
+          }
+        ]
+      },
+      "description": "Direct numerical contradiction"
+    },
+    {
+      "id": "VERIFIER_022",
+      "flags": {
+        "status": "FAILED",
+        "issue": "logical_contradiction"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "运行状态",
+            "task_description": "评估运行状态"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "装置运行非常稳定。装置每天停机故障3次。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"运行状态\", \"task_description\": \"评估运行状态\"}"
+          }
+        ]
+      },
+      "description": "Logical contradiction"
+    },
+    {
+      "id": "VERIFIER_023",
+      "flags": {
+        "status": "FAILED",
+        "issue": "conclusion_mismatch"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "投资建议",
+            "task_description": "给出投资建议"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "分析表明项目亏损严重。结论：建议立即扩大投资。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"投资建议\", \"task_description\": \"给出投资建议\"}"
+          }
+        ]
+      },
+      "description": "Conclusion contradicts premises"
+    },
+    {
+      "id": "VERIFIER_024",
+      "flags": {
+        "status": "FAIL",
+        "issue": "temporal_contradiction"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T4",
+            "task_name": "数据概览",
+            "task_description": "概览当前数据"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "2025年的数据已经出来了... (当前时间2024年)"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"数据概览\", \"task_description\": \"概览当前数据\"}"
+          }
+        ]
+      },
+      "description": "Impossible temporal claim"
+    },
+    {
+      "id": "VERIFIER_025",
+      "flags": {
+        "status": "FAILED",
+        "issue": "fact_contradiction"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T5",
+            "task_name": "物理特性",
+            "task_description": "描述物理特性"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "水在100度结冰。"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"物理特性\", \"task_description\": \"描述物理特性\"}"
+          }
+        ]
+      },
+      "description": "Basic fact error"
+    },
+    {
+      "id": "VERIFIER_026",
+      "flags": {
+        "status": "BLOCKED",
+        "issue": "missing_resource"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T1",
+            "task_name": "趋势图",
+            "task_description": "绘制能耗趋势图"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "以下是能耗趋势分析... (无图)"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"趋势图\", \"task_description\": \"绘制能耗趋势图\"}"
+          }
+        ]
+      },
+      "description": "Missing required chart"
+    },
+    {
+      "id": "VERIFIER_027",
+      "flags": {
+        "quality": "low",
+        "issue": "missing_resource"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T2",
+            "task_name": "数据表",
+            "task_description": "提供详细数据表"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "详细数据请见下表... (无表)"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"数据表\", \"task_description\": \"提供详细数据表\"}"
+          }
+        ]
+      },
+      "description": "Missing required table"
+    },
+    {
+      "id": "VERIFIER_028",
+      "flags": {
+        "quality": "low",
+        "issue": "missing_resource"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T3",
+            "task_name": "结构图",
+            "task_description": "展示系统结构图"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "如图所示...",
+          "images": []
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"结构图\", \"task_description\": \"展示系统结构图\"}"
+          }
+        ]
+      },
+      "description": "Images list is empty when image is referenced"
+    },
+    {
+      "id": "VERIFIER_029",
+      "flags": {
+        "quality": "low",
+        "issue": "missing_resource"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T4",
+            "task_name": "统计表",
+            "task_description": "统计数据"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "表2显示...",
+          "tables": []
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"统计表\", \"task_description\": \"统计数据\"}"
+          }
+        ]
+      },
+      "description": "Tables list is empty when table is referenced"
+    },
+    {
+      "id": "VERIFIER_030",
+      "flags": {
+        "quality": "low",
+        "issue": "wrong_resource_type"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T5",
+            "task_name": "趋势图",
+            "task_description": "必须提供趋势图"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "这是趋势图...",
+          "tables": [
+            "data.csv"
+          ],
+          "images": []
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"趋势图\", \"task_description\": \"必须提供趋势图\"}"
+          }
+        ]
+      },
+      "description": "Provided table instead of chart"
+    },
+    {
+      "id": "VERIFIER_031",
+      "flags": {
+        "quality": "high",
+        "type": "perfect"
+      },
+      "state": {
+        "tasks": [
+          {
+            "task_id": "T6",
+            "task_name": "完整报告",
+            "task_description": "包含图文表的完整报告"
+          }
+        ],
+        "cursor": 0,
+        "current_result": {
+          "content": "针对要求的每一项都进行了详细阐述...",
+          "images": [
+            "chart1.png"
+          ],
+          "tables": [
+            "table1.csv"
+          ]
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "{\"from\": \"Planner\", \"to\": \"Worker\", \"type\": \"TASK\", \"task_name\": \"完整报告\", \"task_description\": \"包含图文表的完整报告\"}"
+          }
+        ]
+      },
+      "description": "Perfect execution"
+    }
+  ]
+}

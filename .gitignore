@@ -1,0 +1,48 @@
+# macOS and editor state
+.DS_Store
+.idea/
+.vscode/
+.trae/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+
+# Generated application state and artifacts
+cache/
+logs/
+output/
+outputs/
+report/
+reports/
+charts/
+worker_scrape_results/
+*.log
+
+# Runtime databases and indexes
+data/chemical_kb/
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary files
+tmp/
+*.tmp
+*.swp

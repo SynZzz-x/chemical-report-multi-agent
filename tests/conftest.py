@@ -1,0 +1,57 @@
+"""Test stubs for optional agent runtime dependencies.
+
+The unit tests in this suite exercise pure helper logic. They should run in a
+lightweight environment without importing real LangChain, LangGraph, or model
+clients.
+"""
+
+from __future__ import annotations
+
+import sys
+import types
+
+
+class _Message:
+    def __init__(self, content: str = "", **kwargs):
+        self.content = content
+        self.additional_kwargs = kwargs
+
+
+class _ChatPromptTemplate:
+    @classmethod
+    def from_messages(cls, messages):
+        return cls()
+
+    def format_messages(self, **kwargs):
+        return []
+
+    def __or__(self, other):
+        return other
+
+
+def _install_module(name: str) -> types.ModuleType:
+    module = types.ModuleType(name)
+    sys.modules[name] = module
+    return module
+
+
+langchain_openai = _install_module("langchain_openai")
+langchain_openai.ChatOpenAI = object
+
+langchain_core = _install_module("langchain_core")
+langchain_core.runnables = _install_module("langchain_core.runnables")
+langchain_core.runnables.RunnableConfig = dict
+langchain_core.messages = _install_module("langchain_core.messages")
+langchain_core.messages.AIMessage = _Message
+langchain_core.messages.SystemMessage = _Message
+langchain_core.messages.HumanMessage = _Message
+langchain_core.prompts = _install_module("langchain_core.prompts")
+langchain_core.prompts.ChatPromptTemplate = _ChatPromptTemplate
+
+langgraph = _install_module("langgraph")
+langgraph.types = _install_module("langgraph.types")
+langgraph.types.interrupt = lambda payload: None
+langgraph.graph = _install_module("langgraph.graph")
+langgraph.graph.message = _install_module("langgraph.graph.message")
+langgraph.graph.message.BaseMessage = _Message
+langgraph.graph.message.add_messages = lambda left, right: (left or []) + (right or [])
