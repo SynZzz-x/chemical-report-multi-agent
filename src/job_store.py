@@ -87,7 +87,13 @@ class JobStore:
         job_id: str,
         **changes: Any,
     ) -> dict[str, Any]:
-        immutable_fields = {"user_id", "job_id", "created_at"}
+        immutable_fields = {
+            "user_id",
+            "conversation_id",
+            "job_id",
+            "verifier_mode",
+            "created_at",
+        }
         immutable_changes = immutable_fields.intersection(changes)
         if immutable_changes:
             names = ", ".join(sorted(immutable_changes))

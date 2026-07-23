@@ -64,9 +64,10 @@ python run.py --auto-verify
 ### Local persistence
 
 LangGraph checkpoints and job history are stored under `cache/langgraph/`.
-Set `AGENT_USER_ID` to a stable authenticated identifier when moving beyond
-the default single-user `local-user` setup. Keep
-`LANGGRAPH_STRICT_MSGPACK=true` enabled.
+`AGENT_USER_ID` is a single-user local adapter whose default is `local-user`.
+In a shared deployment, derive a stable identity per authenticated session
+instead of setting one process-wide value. Keep `LANGGRAPH_STRICT_MSGPACK=true`
+enabled.
 
 Resume a CLI thread with:
 

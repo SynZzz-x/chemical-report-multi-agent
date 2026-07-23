@@ -259,6 +259,12 @@ def _restore_job(job_id: str) -> None:
         changes: dict[str, Any] = {"pending_interrupt": pending}
         if pending is not None:
             changes["status"] = "waiting"
+        elif record.get("status") in {"running", "waiting"}:
+            changes["status"] = (
+                "completed"
+                if not (getattr(snapshot, "next", ()) or ())
+                else "failed"
+            )
         JOBS.update_job(user_id, job_id, **changes)
     except Exception:
         for key, value in previous_state.items():
@@ -643,15 +649,30 @@ def _report_paths_from_state() -> list[Path]:
         except Exception:
             pass
 
+    try:
+        job_root = Path(
+            get_session_cache_dir(values, _graph_config())
+        ).resolve()
+    except Exception:
+        return []
+
+    allowed_suffixes = {".docx", ".pdf", ".md"}
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
-        normalized = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        resolved = candidate.expanduser().resolve()
+        try:
+            resolved.relative_to(job_root)
+        except ValueError:
+            continue
+        if resolved.suffix.lower() not in allowed_suffixes:
+            continue
+        normalized = str(resolved)
         if normalized in seen:
             continue
         seen.add(normalized)
-        if candidate.is_file():
-            unique.append(candidate)
+        if resolved.is_file():
+            unique.append(resolved)
     return unique
 
 

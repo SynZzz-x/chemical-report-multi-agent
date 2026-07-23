@@ -18,9 +18,13 @@ def _connect(path: Path) -> sqlite3.Connection:
         check_same_thread=False,
         isolation_level=None,
     )
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA busy_timeout=30000")
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 

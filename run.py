@@ -1,8 +1,13 @@
-import uuid
-import os
 import argparse
+import hashlib
+import json
 import logging
+import os
+import uuid
+from typing import Any
+
 from langgraph.types import Command
+
 from src.graph import WorkFlow, WorkFlowAuto
 from src.config import (
     configure_langsmith_from_env,
@@ -20,6 +25,139 @@ logger = logging.getLogger()
 if not os.path.exists("logs"):
     os.makedirs("logs")
 
+
+def _message_content(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    return str(getattr(message, "content", "") or "")
+
+
+def _message_role(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("role") or message.get("type") or "").lower()
+    return str(
+        getattr(message, "type", None)
+        or getattr(message, "role", None)
+        or ""
+    ).lower()
+
+
+def _is_internal_control_message(content: str) -> bool:
+    try:
+        parsed = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("from") and parsed.get("to") and parsed.get("type"):
+        return True
+    return parsed.get("type") in {
+        "INTAKE_SUMMARY",
+        "PLAN_RESULT",
+        "PROCEED",
+        "REPLAN",
+        "REWORK",
+        "SUMMARIZE",
+    }
+
+
+def _project_snapshot(
+    snapshot: Any,
+    *,
+    scope: dict[str, str],
+    existing_messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    values = dict(getattr(snapshot, "values", {}) or {})
+    messages = list(existing_messages)
+    known_ids = {str(item.get("id")) for item in messages if item.get("id")}
+
+    for index, message in enumerate(values.get("messages") or []):
+        role = _message_role(message)
+        if role not in {"ai", "assistant"}:
+            continue
+        content = _message_content(message).strip()
+        if not content or _is_internal_control_message(content):
+            continue
+
+        explicit_id = (
+            message.get("id")
+            if isinstance(message, dict)
+            else getattr(message, "id", None)
+        )
+        if explicit_id:
+            message_id = str(explicit_id)
+        else:
+            digest = hashlib.sha256(
+                f"{scope['job_id']}|{index}|{content}".encode("utf-8")
+            ).hexdigest()[:24]
+            message_id = f"cli_graph_{digest}"
+        if message_id in known_ids:
+            continue
+        known_ids.add(message_id)
+        messages.append(
+            {
+                "id": message_id,
+                "role": "assistant",
+                "kind": "text",
+                "content": content,
+                "payload": {},
+                **scope,
+            }
+        )
+
+    final_result = values.get("final_result") or {}
+    report_paths = [
+        str(path)
+        for path in final_result.get("attachments") or []
+        if path
+    ]
+    if final_result.get("path"):
+        report_paths.append(str(final_result["path"]))
+    report_paths = list(dict.fromkeys(report_paths))
+    return messages, report_paths
+
+
+def _interrupt_ui_message(
+    value: Any,
+    *,
+    scope: dict[str, str],
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        payload = value
+        content = str(
+            value.get("guidance_text")
+            or value.get("content_summary")
+            or json.dumps(value, ensure_ascii=False, default=str)
+        )
+        if value.get("type") == "verify_result":
+            kind = "verify"
+        elif (
+            value.get("type") == "confirm_plan_and_resources"
+            or "structured_msg" in value
+        ):
+            kind = "plan"
+        else:
+            kind = "text"
+    else:
+        payload = {}
+        content = str(value or "工作流已暂停，等待输入。")
+        kind = "text"
+
+    digest = hashlib.sha256(
+        f"{scope['job_id']}|{json.dumps(value, ensure_ascii=False, default=str)}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    return {
+        "id": f"cli_interrupt_{digest}",
+        "role": "assistant",
+        "kind": kind,
+        "content": content,
+        "payload": payload,
+        **scope,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent CLI Debugger")
     parser.add_argument("--auto-verify", action="store_true", help="Enable automatic verification")
@@ -29,7 +167,10 @@ def main():
     configure_langsmith_from_env()
 
     # 配置
-    thread_id = args.thread_id or f"job_{uuid.uuid4().hex}"
+    resume_requested = args.thread_id is not None
+    if resume_requested and not args.thread_id.strip():
+        parser.error("--thread-id must not be empty")
+    thread_id = args.thread_id if resume_requested else f"job_{uuid.uuid4().hex}"
     user_id = args.user_id or get_local_user_id()
     conversation_id = f"conv_cli_{thread_id}"
     safe_log_id = "".join(
@@ -52,6 +193,10 @@ def main():
     try:
         jobs = JobStore(persistence.store)
         existing_job = jobs.get_job(user_id, thread_id)
+        if resume_requested and existing_job is None:
+            logger.error("无法恢复：任务不存在或不属于当前用户。")
+            return
+
         if existing_job is not None:
             conversation_id = existing_job["conversation_id"]
             verifier_mode = existing_job.get("verifier_mode") or "manual"
@@ -77,18 +222,61 @@ def main():
                 "job_id": thread_id,
             },
         }
+        if (
+            resume_requested
+            and persistence.checkpointer.get_tuple(config) is None
+        ):
+            logger.error("无法恢复：任务记录存在，但对应 checkpoint 缺失。")
+            return
+
         snapshot = app.get_state(config)
         last_interrupt_value = interrupt_from_snapshot(snapshot)
         is_interrupted = last_interrupt_value is not None
         job_record_created = existing_job is not None
+        scope = {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "job_id": thread_id,
+        }
+        ui_messages = list(
+            existing_job.get("ui_messages") or []
+            if existing_job
+            else []
+        )
+        report_paths = list(
+            existing_job.get("report_paths") or []
+            if existing_job
+            else []
+        )
 
-        if is_interrupted and job_record_created:
-            jobs.update_job(
-                user_id,
-                thread_id,
-                status="waiting",
-                pending_interrupt=last_interrupt_value,
-            )
+        def persist_projection(current_snapshot: Any | None, **changes: Any) -> None:
+            nonlocal ui_messages, report_paths
+            if current_snapshot is not None:
+                projected_messages, projected_paths = _project_snapshot(
+                    current_snapshot,
+                    scope=scope,
+                    existing_messages=ui_messages,
+                )
+                ui_messages = projected_messages
+                if projected_paths:
+                    report_paths = projected_paths
+            changes["ui_messages"] = list(ui_messages)
+            changes["report_paths"] = list(report_paths)
+            jobs.update_job(user_id, thread_id, **changes)
+
+        if job_record_created:
+            restore_changes: dict[str, Any] = {
+                "pending_interrupt": last_interrupt_value,
+            }
+            if is_interrupted:
+                restore_changes["status"] = "waiting"
+            elif existing_job.get("status") in {"running", "waiting"}:
+                restore_changes["status"] = (
+                    "completed"
+                    if not (getattr(snapshot, "next", ()) or ())
+                    else "failed"
+                )
+            persist_projection(snapshot, **restore_changes)
 
         logger.info(f"=== Agent CLI Debugger (Thread: {thread_id}) ===")
         logger.info(f"User scope: {user_id}")
@@ -101,8 +289,10 @@ def main():
         def recover_after_failure(previous_interrupt):
             nonlocal is_interrupted, last_interrupt_value
 
+            recovered_snapshot = None
             try:
-                recovered = interrupt_from_snapshot(app.get_state(config))
+                recovered_snapshot = app.get_state(config)
+                recovered = interrupt_from_snapshot(recovered_snapshot)
             except Exception as state_exc:
                 logger.error(
                     f"[Recovery Error] Could not reload checkpoint state: {state_exc}"
@@ -120,16 +310,14 @@ def main():
 
             try:
                 if is_interrupted:
-                    jobs.update_job(
-                        user_id,
-                        thread_id,
+                    persist_projection(
+                        recovered_snapshot,
                         status="waiting",
                         pending_interrupt=last_interrupt_value,
                     )
                 else:
-                    jobs.update_job(
-                        user_id,
-                        thread_id,
+                    persist_projection(
+                        recovered_snapshot,
                         status="failed",
                         pending_interrupt=None,
                     )
@@ -155,6 +343,17 @@ def main():
                 if is_interrupted
                 else None
             )
+            ui_messages.append(
+                {
+                    "id": f"cli_user_{uuid.uuid4().hex}",
+                    "role": "user",
+                    "kind": "text",
+                    "content": user_input,
+                    "payload": {},
+                    **scope,
+                }
+            )
+
             try:
                 if not job_record_created:
                     jobs.create_job(
@@ -163,47 +362,48 @@ def main():
                         job_id=thread_id,
                         title=user_input,
                         verifier_mode=verifier_mode,
+                        ui_messages=list(ui_messages),
                     )
                     job_record_created = True
 
-                jobs.update_job(
-                    user_id,
-                    thread_id,
+                persist_projection(
+                    None,
                     status="running",
                     pending_interrupt=None,
                 )
+            except Exception as store_exc:
+                logger.error(
+                    f"[Persistence Error] Could not start job: {store_exc}"
+                )
+                continue
 
-                if is_interrupted:
-                    logger.info(f"[System] Resuming with input: {user_input}")
-                    inputs = Command(resume=user_input)
-                    is_interrupted = False
-                    last_interrupt_value = None
-                else:
-                    inputs = {"messages": [{"role": "user", "content": user_input}]}
+            if is_interrupted:
+                logger.info(f"[System] Resuming with input: {user_input}")
+                inputs = Command(resume=user_input)
+                is_interrupted = False
+                last_interrupt_value = None
+            else:
+                inputs = {"messages": [{"role": "user", "content": user_input}]}
 
-                logger.info("-" * 20 + " Stream Start " + "-" * 20)
+            logger.info("-" * 20 + " Stream Start " + "-" * 20)
+            try:
                 for chunk in app.stream(inputs, config=config):
                     logger.info(f"Chunk: {chunk}")
                     if "__interrupt__" in chunk:
                         is_interrupted = True
                         last_interrupt_value = chunk["__interrupt__"][0].value
-                        jobs.update_job(
-                            user_id,
-                            thread_id,
-                            status="waiting",
-                            pending_interrupt=last_interrupt_value,
+                        interrupt_message = _interrupt_ui_message(
+                            last_interrupt_value,
+                            scope=scope,
                         )
+                        if not any(
+                            item.get("id") == interrupt_message["id"]
+                            for item in ui_messages
+                        ):
+                            ui_messages.append(interrupt_message)
                         logger.info(
                             f"\n[System] Interrupted! Value: {last_interrupt_value}"
                         )
-
-                if not is_interrupted:
-                    jobs.update_job(
-                        user_id,
-                        thread_id,
-                        status="completed",
-                        pending_interrupt=None,
-                    )
             except RuntimeError as exc:
                 recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Config Error] {exc}")
@@ -211,6 +411,31 @@ def main():
             except Exception as exc:
                 recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Error] {exc}")
+            else:
+                completed_snapshot = None
+                try:
+                    completed_snapshot = app.get_state(config)
+                    last_interrupt_value = interrupt_from_snapshot(
+                        completed_snapshot
+                    )
+                    is_interrupted = last_interrupt_value is not None
+                except Exception as state_exc:
+                    logger.error(
+                        "[Recovery Error] Could not project final checkpoint "
+                        f"state: {state_exc}"
+                    )
+
+                try:
+                    persist_projection(
+                        completed_snapshot,
+                        status="waiting" if is_interrupted else "completed",
+                        pending_interrupt=last_interrupt_value,
+                    )
+                except Exception as store_exc:
+                    logger.error(
+                        "[Persistence Error] Graph execution completed, but "
+                        f"job metadata could not be saved: {store_exc}"
+                    )
 
             logger.info("-" * 20 + " Stream End " + "-" * 20)
     finally:
