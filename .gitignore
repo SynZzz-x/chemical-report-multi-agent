@@ -4,6 +4,7 @@
 .vscode/
 .trae/
 .worktrees/
+.superpowers/
 
 # Python environments and caches
 .venv/
