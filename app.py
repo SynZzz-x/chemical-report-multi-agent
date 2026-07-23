@@ -8,9 +8,8 @@ Phase-1 goals implemented here:
 5. Store uploads under user/conversation/job isolated directories with generated file IDs.
 
 Production note:
-- The guest user_id below is only a development placeholder. Replace it with the ID
-  issued by the real authentication system before multi-user deployment.
-- MemorySaver is process-local. Replace it with a persistent checkpointer later.
+- The default local user_id is only suitable for a single-user deployment.
+  Replace it with the authenticated user ID before multi-user deployment.
 """
 
 from __future__ import annotations
@@ -26,11 +25,12 @@ from typing import Any, Iterable
 
 import streamlit as st
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from src.config import get_cache_root, missing_key_message
+from src.config import get_cache_root, get_local_user_id, missing_key_message
 from src.graph import WorkFlow, WorkFlowAuto
+from src.job_store import JobStore, interrupt_from_snapshot
+from src.persistence import SQLitePersistence
 from src.utils.path_manager import get_session_cache_dir
 
 
@@ -48,6 +48,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CACHE_ROOT = get_cache_root()
 
 
+@st.cache_resource
+def _open_persistence() -> SQLitePersistence:
+    return SQLitePersistence.open()
+
+
+try:
+    PERSISTENCE = _open_persistence()
+    JOBS = JobStore(PERSISTENCE.store)
+except Exception as exc:
+    st.error(f"无法初始化 LangGraph SQLite 持久化：{exc}")
+    st.stop()
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
@@ -59,12 +72,12 @@ def _utc_now_iso() -> str:
 def _ensure_session_scope() -> None:
     """Initialize front-end scope identifiers.
 
-    user_id is a development-only guest identity. A production deployment must
-    replace it with an authenticated, stable user identifier.
+    A production deployment must replace the local default with an
+    authenticated, stable user identifier.
     """
 
     if "user_id" not in st.session_state:
-        st.session_state["user_id"] = _new_id("guest")
+        st.session_state["user_id"] = get_local_user_id()
 
     if "conversation_id" not in st.session_state:
         st.session_state["conversation_id"] = _new_id("conv")
@@ -83,6 +96,12 @@ def _ensure_session_scope() -> None:
 
     if "compiled_mode" not in st.session_state:
         st.session_state["compiled_mode"] = None
+
+    if "job_record_created" not in st.session_state:
+        st.session_state["job_record_created"] = False
+
+    if "last_run_failed" not in st.session_state:
+        st.session_state["last_run_failed"] = False
 
 
 _ensure_session_scope()
@@ -123,6 +142,47 @@ def _job_metadata() -> dict[str, Any]:
     }
 
 
+def _compile_workflow(mode: str) -> None:
+    workflow = WorkFlowAuto() if mode == "auto" else WorkFlow()
+    st.session_state["app"] = workflow.compile(
+        checkpointer=PERSISTENCE.checkpointer,
+        store=PERSISTENCE.store,
+    )
+    st.session_state["compiled_mode"] = mode
+
+
+def _current_job() -> dict[str, Any] | None:
+    scope = _scope()
+    return JOBS.get_job(scope["user_id"], scope["job_id"])
+
+
+def _ensure_job_record(title: str, verifier_mode: str) -> dict[str, Any]:
+    record = _current_job()
+    if record is not None:
+        st.session_state["job_record_created"] = True
+        return record
+
+    scope = _scope()
+    record = JOBS.create_job(
+        **scope,
+        title=title,
+        verifier_mode=verifier_mode,
+        ui_messages=st.session_state["ui_messages"],
+    )
+    st.session_state["job_record_created"] = True
+    return record
+
+
+def _update_job(**changes: Any) -> None:
+    if not st.session_state.get("job_record_created"):
+        return
+    scope = _scope()
+    try:
+        JOBS.update_job(scope["user_id"], scope["job_id"], **changes)
+    except Exception as exc:
+        st.warning(f"任务恢复信息保存失败：{exc}")
+
+
 def _snapshot_values() -> dict[str, Any]:
     app = st.session_state.get("app")
     if app is None:
@@ -138,12 +198,65 @@ def _start_new_job() -> None:
     st.session_state["active_job_id"] = _new_id("job")
     st.session_state["active_job_created_at"] = _utc_now_iso()
     st.session_state["pending_interrupt"] = None
+    st.session_state["ui_messages"] = []
+    st.session_state["job_record_created"] = False
+    st.session_state["last_run_failed"] = False
 
 
 def _start_new_conversation() -> None:
     st.session_state["conversation_id"] = _new_id("conv")
     _start_new_job()
-    st.session_state["ui_messages"] = []
+
+
+def _restore_job(job_id: str) -> None:
+    user_id = st.session_state["user_id"]
+    record = JOBS.get_job(user_id, job_id)
+    if record is None:
+        raise ValueError("任务不存在或不属于当前用户。")
+
+    mode = record.get("verifier_mode") or "manual"
+    previous_scope = {
+        "conversation_id": st.session_state["conversation_id"],
+        "active_job_id": st.session_state["active_job_id"],
+        "active_job_created_at": st.session_state["active_job_created_at"],
+        "ui_messages": st.session_state["ui_messages"],
+        "job_record_created": st.session_state["job_record_created"],
+        "pending_interrupt": st.session_state["pending_interrupt"],
+        "compiled_mode": st.session_state["compiled_mode"],
+    }
+    previous_app = st.session_state.get("app")
+
+    st.session_state["conversation_id"] = record["conversation_id"]
+    st.session_state["active_job_id"] = record["job_id"]
+    st.session_state["active_job_created_at"] = record["created_at"]
+    st.session_state["ui_messages"] = list(record.get("ui_messages") or [])
+    st.session_state["job_record_created"] = True
+    _compile_workflow(mode)
+
+    if PERSISTENCE.checkpointer.get_tuple(_graph_config()) is None:
+        st.session_state.update(previous_scope)
+        if previous_app is None:
+            st.session_state.pop("app", None)
+        else:
+            st.session_state["app"] = previous_app
+        raise ValueError("任务索引存在，但对应 checkpoint 缺失。")
+
+    snapshot = st.session_state["app"].get_state(_graph_config())
+    pending = interrupt_from_snapshot(snapshot)
+    st.session_state["pending_interrupt"] = pending
+    st.session_state["verifier_mode"] = mode
+    _update_job(pending_interrupt=pending)
+
+
+def _restore_job_from_sidebar(job_id: str) -> None:
+    try:
+        _restore_job(job_id)
+    except Exception as exc:
+        st.session_state["restore_error"] = str(exc)
+        st.session_state.pop("restore_success", None)
+    else:
+        st.session_state["restore_success"] = "任务已恢复。"
+        st.session_state.pop("restore_error", None)
 
 
 # -----------------------------------------------------------------------------
@@ -175,6 +288,7 @@ def _append_ui_message(
             **_scope(),
         }
     )
+    _update_job(ui_messages=list(st.session_state["ui_messages"]))
 
 
 def _render_plan(payload: dict[str, Any]) -> None:
@@ -393,9 +507,13 @@ def _safe_stream_updates(app: Any, stream_input: Any, config: dict[str, Any]):
     try:
         yield from app.stream(stream_input, config, stream_mode="updates")
     except RuntimeError as exc:
+        st.session_state["last_run_failed"] = True
+        _update_job(status="failed")
         st.error(str(exc))
         st.info(missing_key_message("OPENAI_API_KEY"))
     except Exception as exc:
+        st.session_state["last_run_failed"] = True
+        _update_job(status="failed")
         st.exception(exc)
 
 
@@ -406,6 +524,7 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
     interrupt_items = update.get("__interrupt__") or []
     payload = interrupt_items[0].value if interrupt_items else None
     st.session_state["pending_interrupt"] = payload
+    _update_job(status="waiting", pending_interrupt=payload)
 
     if not isinstance(payload, dict):
         text = str(payload or "工作流已暂停，等待输入。")
@@ -483,6 +602,10 @@ def _report_paths_from_state() -> list[Path]:
     if final_result.get("path"):
         candidates.append(Path(str(final_result["path"])))
 
+    record = _current_job()
+    if not candidates and record:
+        candidates.extend(Path(path) for path in record.get("report_paths") or [])
+
     # Compatibility fallback for the current Summarizer/path_manager.
     if not candidates and values:
         try:
@@ -558,11 +681,12 @@ with st.sidebar:
         ),
         language="text",
     )
-    st.caption("开发阶段 user_id 为临时访客 ID；正式部署时应由登录系统提供。")
+    st.caption("本地默认 user_id=local-user；多用户部署时应由登录系统提供。")
 
     verifier_mode = st.radio(
         "审核模式",
         options=["manual", "auto"],
+        key="verifier_mode",
         format_func=lambda value: "人工审核" if value == "manual" else "自动审核",
         horizontal=True,
     )
@@ -570,9 +694,7 @@ with st.sidebar:
     col_compile, col_clear = st.columns(2)
     with col_compile:
         if st.button("编译工作流", use_container_width=True):
-            workflow = WorkFlowAuto() if verifier_mode == "auto" else WorkFlow()
-            st.session_state["app"] = workflow.compile(checkpointer=MemorySaver())
-            st.session_state["compiled_mode"] = verifier_mode
+            _compile_workflow(verifier_mode)
             st.success("工作流已编译")
 
     with col_clear:
@@ -602,10 +724,39 @@ with st.sidebar:
 
     if st.button("清空页面消息", use_container_width=True):
         st.session_state["ui_messages"] = []
+        _update_job(ui_messages=[])
         st.rerun()
 
     if st.session_state.get("pending_interrupt"):
         st.warning("当前任务正在等待你的确认或审核意见。")
+
+    st.divider()
+    st.subheader("历史任务")
+    job_records = JOBS.list_jobs(st.session_state["user_id"])
+
+    if job_records:
+        job_by_id = {record["job_id"]: record for record in job_records}
+        selected_job_id = st.selectbox(
+            "选择任务",
+            options=list(job_by_id),
+            format_func=lambda job_id: (
+                f"{job_by_id[job_id].get('title', '未命名任务')} · "
+                f"{job_by_id[job_id].get('status', '-')}"
+            ),
+        )
+        st.button(
+            "恢复选中任务",
+            use_container_width=True,
+            on_click=_restore_job_from_sidebar,
+            args=(selected_job_id,),
+        )
+    else:
+        st.caption("暂无可恢复任务。")
+
+    if restore_error := st.session_state.pop("restore_error", None):
+        st.error(f"恢复失败：{restore_error}")
+    if restore_success := st.session_state.pop("restore_success", None):
+        st.success(restore_success)
 
     with st.expander("环境配置", expanded=False):
         st.caption("复制 .env.example 为 .env，并在启动前导出环境变量。")
@@ -664,6 +815,10 @@ if chat_value:
     if new_docs:
         names = ", ".join(doc["original_name"] for doc in new_docs)
         display_content = f"{display_content}\n\n已上传附件：{names}"
+
+    _ensure_job_record(graph_text, verifier_mode)
+    _update_job(status="running", pending_interrupt=None)
+    st.session_state["last_run_failed"] = False
 
     human_message_id = _new_id("msg")
     _append_ui_message(
@@ -750,8 +905,21 @@ if chat_value:
                 st.write(f"**{node}**{f' · {summary}' if summary else ''}")
                 _handle_node_delta(node, delta)
 
-        if st.session_state.get("pending_interrupt") is None:
+        if st.session_state.get("last_run_failed"):
+            status.update(label="本轮执行失败", state="error", expanded=True)
+        elif st.session_state.get("pending_interrupt") is None:
             status.update(label="本轮执行完成", state="complete", expanded=False)
+
+    if (
+        st.session_state.get("pending_interrupt") is None
+        and not st.session_state.get("last_run_failed")
+    ):
+        report_paths = [str(path) for path in _report_paths_from_state()]
+        _update_job(
+            status="completed",
+            pending_interrupt=None,
+            report_paths=report_paths,
+        )
 
     # Re-run so report download buttons and the complete UI history are rebuilt
     # from ui_messages and the latest graph state.
