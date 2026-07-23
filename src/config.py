@@ -32,6 +32,24 @@ def get_cache_root() -> Path:
     return root
 
 
+def get_local_user_id() -> str:
+    """Return the stable local identity used to namespace persisted jobs."""
+
+    return get_env("AGENT_USER_ID", "local-user") or "local-user"
+
+
+def get_langgraph_data_dir() -> Path:
+    """Return the private runtime directory for LangGraph SQLite files."""
+
+    directory = get_cache_root() / "langgraph"
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+    return directory
+
+
 def get_env(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name)
     if value is None or value.strip() == "":
