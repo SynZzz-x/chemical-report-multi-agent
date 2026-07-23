@@ -143,6 +143,10 @@ def _job_metadata() -> dict[str, Any]:
 
 
 def _compile_workflow(mode: str) -> None:
+    record = _current_job()
+    if record is not None and record.get("verifier_mode") != mode:
+        raise ValueError("已有任务不能切换审核模式，请先新建报告任务。")
+
     workflow = WorkFlowAuto() if mode == "auto" else WorkFlow()
     st.session_state["app"] = workflow.compile(
         checkpointer=PERSISTENCE.checkpointer,
@@ -159,6 +163,8 @@ def _current_job() -> dict[str, Any] | None:
 def _ensure_job_record(title: str, verifier_mode: str) -> dict[str, Any]:
     record = _current_job()
     if record is not None:
+        if record.get("verifier_mode") != verifier_mode:
+            raise ValueError("当前任务的审核模式与已编译工作流不一致。")
         st.session_state["job_record_created"] = True
         return record
 
@@ -215,37 +221,52 @@ def _restore_job(job_id: str) -> None:
         raise ValueError("任务不存在或不属于当前用户。")
 
     mode = record.get("verifier_mode") or "manual"
-    previous_scope = {
-        "conversation_id": st.session_state["conversation_id"],
-        "active_job_id": st.session_state["active_job_id"],
-        "active_job_created_at": st.session_state["active_job_created_at"],
-        "ui_messages": st.session_state["ui_messages"],
-        "job_record_created": st.session_state["job_record_created"],
-        "pending_interrupt": st.session_state["pending_interrupt"],
-        "compiled_mode": st.session_state["compiled_mode"],
+    missing = object()
+    restored_keys = (
+        "conversation_id",
+        "active_job_id",
+        "active_job_created_at",
+        "ui_messages",
+        "job_record_created",
+        "pending_interrupt",
+        "compiled_mode",
+        "last_run_failed",
+        "verifier_mode",
+        "app",
+    )
+    previous_state = {
+        key: st.session_state.get(key, missing)
+        for key in restored_keys
     }
-    previous_app = st.session_state.get("app")
 
-    st.session_state["conversation_id"] = record["conversation_id"]
-    st.session_state["active_job_id"] = record["job_id"]
-    st.session_state["active_job_created_at"] = record["created_at"]
-    st.session_state["ui_messages"] = list(record.get("ui_messages") or [])
-    st.session_state["job_record_created"] = True
-    _compile_workflow(mode)
+    try:
+        st.session_state["conversation_id"] = record["conversation_id"]
+        st.session_state["active_job_id"] = record["job_id"]
+        st.session_state["active_job_created_at"] = record["created_at"]
+        st.session_state["ui_messages"] = list(record.get("ui_messages") or [])
+        st.session_state["job_record_created"] = True
+        st.session_state["last_run_failed"] = False
+        _compile_workflow(mode)
 
-    if PERSISTENCE.checkpointer.get_tuple(_graph_config()) is None:
-        st.session_state.update(previous_scope)
-        if previous_app is None:
-            st.session_state.pop("app", None)
-        else:
-            st.session_state["app"] = previous_app
-        raise ValueError("任务索引存在，但对应 checkpoint 缺失。")
+        if PERSISTENCE.checkpointer.get_tuple(_graph_config()) is None:
+            raise ValueError("任务索引存在，但对应 checkpoint 缺失。")
 
-    snapshot = st.session_state["app"].get_state(_graph_config())
-    pending = interrupt_from_snapshot(snapshot)
-    st.session_state["pending_interrupt"] = pending
-    st.session_state["verifier_mode"] = mode
-    _update_job(pending_interrupt=pending)
+        snapshot = st.session_state["app"].get_state(_graph_config())
+        pending = interrupt_from_snapshot(snapshot)
+        st.session_state["pending_interrupt"] = pending
+        st.session_state["verifier_mode"] = mode
+
+        changes: dict[str, Any] = {"pending_interrupt": pending}
+        if pending is not None:
+            changes["status"] = "waiting"
+        JOBS.update_job(user_id, job_id, **changes)
+    except Exception:
+        for key, value in previous_state.items():
+            if value is missing:
+                st.session_state.pop(key, None)
+            else:
+                st.session_state[key] = value
+        raise
 
 
 def _restore_job_from_sidebar(job_id: str) -> None:
@@ -694,14 +715,17 @@ with st.sidebar:
     col_compile, col_clear = st.columns(2)
     with col_compile:
         if st.button("编译工作流", use_container_width=True):
-            _compile_workflow(verifier_mode)
-            st.success("工作流已编译")
+            try:
+                _compile_workflow(verifier_mode)
+            except Exception as exc:
+                st.error(f"工作流编译失败：{exc}")
+            else:
+                st.success("工作流已编译")
 
     with col_clear:
         if st.button("清除工作流", use_container_width=True):
             st.session_state.pop("app", None)
             st.session_state["compiled_mode"] = None
-            st.session_state["pending_interrupt"] = None
             st.rerun()
 
     if st.session_state.get("compiled_mode"):
@@ -781,6 +805,10 @@ if "app" not in st.session_state:
     st.warning("请先在左侧编译工作流。")
     st.stop()
 
+if st.session_state.get("compiled_mode") != verifier_mode:
+    st.warning("审核模式与已编译工作流不一致，请重新编译或恢复原模式。")
+    st.stop()
+
 
 chat_value = st.chat_input(
     "请输入报告需求、确认意见或审核反馈……",
@@ -816,7 +844,7 @@ if chat_value:
         names = ", ".join(doc["original_name"] for doc in new_docs)
         display_content = f"{display_content}\n\n已上传附件：{names}"
 
-    _ensure_job_record(graph_text, verifier_mode)
+    _ensure_job_record(graph_text, st.session_state["compiled_mode"])
     _update_job(status="running", pending_interrupt=None)
     st.session_state["last_run_failed"] = False
 
