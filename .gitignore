@@ -3,6 +3,7 @@
 .idea/
 .vscode/
 .trae/
+.worktrees/
 
 # Python environments and caches
 .venv/
