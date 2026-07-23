@@ -22,7 +22,7 @@ Update `main`, then create a focused feature branch. The SQLite checkpoint work 
 ```bash
 git switch main
 git pull --ff-only origin main
-git switch -c codex/sqlite-checkpoint
+git switch -c codex/sqlite-checkpoint-store
 ```
 
 Use the `codex/` prefix followed by a short description for later branches.
@@ -51,7 +51,7 @@ Use `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, or `chore:` as the commit ty
 ## Push and review
 
 ```bash
-git push -u origin codex/sqlite-checkpoint
+git push -u origin codex/sqlite-checkpoint-store
 ```
 
 Open a pull request into `main`. Merge only after the diff is reviewed and relevant checks pass.
@@ -61,6 +61,5 @@ Open a pull request into `main`. Merge only after the diff is reviewed and relev
 ```bash
 git switch main
 git pull --ff-only origin main
-git branch -d codex/sqlite-checkpoint
+git branch -d codex/sqlite-checkpoint-store
 ```
-

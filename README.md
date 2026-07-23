@@ -8,6 +8,7 @@ This project is a LangGraph-based multi-agent system that turns a user's natural
 - Human-in-the-loop plan confirmation and result verification.
 - Worker tools for CSV analysis, chart generation, web extraction, and domain knowledge retrieval.
 - Streamlit demo interface plus CLI debugger.
+- SQLite-backed checkpoint and Store persistence with historical job recovery.
 - Environment-based configuration with no hardcoded secrets.
 - Deterministic pytest checks for core helpers and security expectations.
 
@@ -60,6 +61,19 @@ Run the CLI debugger:
 python run.py --auto-verify
 ```
 
+### Local persistence
+
+LangGraph checkpoints and job history are stored under `cache/langgraph/`.
+Set `AGENT_USER_ID` to a stable authenticated identifier when moving beyond
+the default single-user `local-user` setup. Keep
+`LANGGRAPH_STRICT_MSGPACK=true` enabled.
+
+Resume a CLI thread with:
+
+```bash
+python run.py --thread-id job_<id>
+```
+
 ## Demo Workflow
 
 1. Start Streamlit and compile the workflow from the sidebar.
@@ -108,7 +122,6 @@ Use feature branches for team development. Before starting work, pull the latest
 
 ## Future Improvements
 
-- Add persistent checkpoint storage beyond in-memory debugging.
 - Add richer report evaluation metrics.
 - Add a small CI pipeline for tests and secret scanning.
 - Add a hosted demo with mocked LLM responses.

@@ -32,3 +32,15 @@ Manual verification interrupts the graph and asks the user to approve or revise 
 ## Design Tradeoffs
 
 The project favors explicit state and visible checkpoints over fully autonomous execution. That makes the system easier to debug, demo, and discuss in interviews.
+
+## Persistence
+
+`job_id` is the LangGraph `thread_id`. `SqliteSaver` stores thread-level graph
+state and interrupts in `cache/langgraph/checkpoints.sqlite`. `SqliteStore`
+stores user-scoped job records, UI messages, statuses, and report paths in
+`cache/langgraph/store.sqlite`.
+
+Streamlit restores historical jobs only after an explicit user selection.
+Checkpoint state is authoritative for workflow execution; Store records are
+the discovery and presentation layer. The CLI accepts `--thread-id` to reopen
+the same checkpoint.
