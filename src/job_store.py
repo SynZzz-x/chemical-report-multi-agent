@@ -15,10 +15,9 @@ def utc_now_iso() -> str:
 
 
 def job_namespace(user_id: str) -> tuple[str, str]:
-    normalized = user_id.strip()
-    if not normalized:
+    if not user_id.strip():
         raise ValueError("user_id must not be empty")
-    return normalized, "jobs"
+    return user_id, "jobs"
 
 
 def interrupt_from_snapshot(snapshot: Any) -> Any | None:
@@ -88,6 +87,12 @@ class JobStore:
         job_id: str,
         **changes: Any,
     ) -> dict[str, Any]:
+        immutable_fields = {"user_id", "job_id", "created_at"}
+        immutable_changes = immutable_fields.intersection(changes)
+        if immutable_changes:
+            names = ", ".join(sorted(immutable_changes))
+            raise ValueError(f"Cannot update immutable job fields: {names}")
+
         record = self.get_job(user_id, job_id)
         if record is None:
             raise KeyError(f"Unknown job_id for user {user_id}: {job_id}")
