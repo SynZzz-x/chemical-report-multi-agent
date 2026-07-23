@@ -98,6 +98,46 @@ def main():
         if is_interrupted:
             logger.info(f"[System] Restored pending interrupt: {last_interrupt_value}")
 
+        def recover_after_failure(previous_interrupt):
+            nonlocal is_interrupted, last_interrupt_value
+
+            try:
+                recovered = interrupt_from_snapshot(app.get_state(config))
+            except Exception as state_exc:
+                logger.error(
+                    f"[Recovery Error] Could not reload checkpoint state: {state_exc}"
+                )
+                recovered = (
+                    last_interrupt_value
+                    if is_interrupted
+                    else previous_interrupt
+                )
+
+            is_interrupted = recovered is not None
+            last_interrupt_value = recovered
+            if not job_record_created:
+                return
+
+            try:
+                if is_interrupted:
+                    jobs.update_job(
+                        user_id,
+                        thread_id,
+                        status="waiting",
+                        pending_interrupt=last_interrupt_value,
+                    )
+                else:
+                    jobs.update_job(
+                        user_id,
+                        thread_id,
+                        status="failed",
+                        pending_interrupt=None,
+                    )
+            except Exception as store_exc:
+                logger.error(
+                    f"[Persistence Error] Could not save failure state: {store_exc}"
+                )
+
         while True:
             try:
                 user_input = input(f"\nUser [{thread_id}]> ").strip()
@@ -110,6 +150,11 @@ def main():
             if not user_input:
                 continue
 
+            previous_interrupt = (
+                last_interrupt_value
+                if is_interrupted
+                else None
+            )
             try:
                 if not job_record_created:
                     jobs.create_job(
@@ -160,13 +205,11 @@ def main():
                         pending_interrupt=None,
                     )
             except RuntimeError as exc:
-                if job_record_created:
-                    jobs.update_job(user_id, thread_id, status="failed")
+                recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Config Error] {exc}")
                 logger.error(missing_key_message("OPENAI_API_KEY"))
             except Exception as exc:
-                if job_record_created:
-                    jobs.update_job(user_id, thread_id, status="failed")
+                recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Error] {exc}")
 
             logger.info("-" * 20 + " Stream End " + "-" * 20)
