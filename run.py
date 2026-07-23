@@ -121,6 +121,7 @@ def _interrupt_ui_message(
     value: Any,
     *,
     scope: dict[str, str],
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(value, dict):
         payload = value
@@ -143,10 +144,9 @@ def _interrupt_ui_message(
         content = str(value or "工作流已暂停，等待输入。")
         kind = "text"
 
+    identity = event_id or f"event_{uuid.uuid4().hex}"
     digest = hashlib.sha256(
-        f"{scope['job_id']}|{json.dumps(value, ensure_ascii=False, default=str)}".encode(
-            "utf-8"
-        )
+        f"{scope['job_id']}|{identity}".encode("utf-8")
     ).hexdigest()[:24]
     return {
         "id": f"cli_interrupt_{digest}",
@@ -343,16 +343,15 @@ def main():
                 if is_interrupted
                 else None
             )
-            ui_messages.append(
-                {
-                    "id": f"cli_user_{uuid.uuid4().hex}",
-                    "role": "user",
-                    "kind": "text",
-                    "content": user_input,
-                    "payload": {},
-                    **scope,
-                }
-            )
+            user_ui_message = {
+                "id": f"cli_user_{uuid.uuid4().hex}",
+                "role": "user",
+                "kind": "text",
+                "content": user_input,
+                "payload": {},
+                **scope,
+            }
+            candidate_ui_messages = [*ui_messages, user_ui_message]
 
             try:
                 if not job_record_created:
@@ -366,10 +365,13 @@ def main():
                     )
                     job_record_created = True
 
-                persist_projection(
-                    None,
+                jobs.update_job(
+                    user_id,
+                    thread_id,
                     status="running",
                     pending_interrupt=None,
+                    ui_messages=candidate_ui_messages,
+                    report_paths=list(report_paths),
                 )
             except Exception as store_exc:
                 logger.error(
@@ -377,13 +379,25 @@ def main():
                 )
                 continue
 
+            ui_messages = candidate_ui_messages
+            state_update = {
+                **scope,
+                "current_user_input": user_input,
+                "metadata": dict(scope),
+            }
             if is_interrupted:
                 logger.info(f"[System] Resuming with input: {user_input}")
-                inputs = Command(resume=user_input)
+                inputs = Command(
+                    resume=user_input,
+                    update=state_update,
+                )
                 is_interrupted = False
                 last_interrupt_value = None
             else:
-                inputs = {"messages": [{"role": "user", "content": user_input}]}
+                inputs = {
+                    **state_update,
+                    "messages": [{"role": "user", "content": user_input}],
+                }
 
             logger.info("-" * 20 + " Stream Start " + "-" * 20)
             try:
@@ -391,10 +405,29 @@ def main():
                     logger.info(f"Chunk: {chunk}")
                     if "__interrupt__" in chunk:
                         is_interrupted = True
-                        last_interrupt_value = chunk["__interrupt__"][0].value
+                        interrupt_item = chunk["__interrupt__"][0]
+                        last_interrupt_value = interrupt_item.value
+                        checkpoint_id = None
+                        try:
+                            interrupt_snapshot = app.get_state(config)
+                            snapshot_config = (
+                                getattr(interrupt_snapshot, "config", {}) or {}
+                            )
+                            checkpoint_id = (
+                                snapshot_config.get("configurable", {}) or {}
+                            ).get("checkpoint_id")
+                        except Exception:
+                            pass
+                        interrupt_id = getattr(interrupt_item, "id", None)
+                        event_id = (
+                            f"{interrupt_id}|{checkpoint_id}"
+                            if interrupt_id and checkpoint_id
+                            else interrupt_id or checkpoint_id
+                        )
                         interrupt_message = _interrupt_ui_message(
                             last_interrupt_value,
                             scope=scope,
+                            event_id=event_id,
                         )
                         if not any(
                             item.get("id") == interrupt_message["id"]

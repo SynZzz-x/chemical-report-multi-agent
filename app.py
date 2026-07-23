@@ -530,17 +530,43 @@ def _summarize_step(node: str, delta: dict[str, Any]) -> str:
     return ""
 
 
-def _safe_stream_updates(app: Any, stream_input: Any, config: dict[str, Any]):
+def _recover_stream_failure(
+    app: Any,
+    config: dict[str, Any],
+    fallback_interrupt: Any | None,
+) -> None:
+    try:
+        snapshot = app.get_state(config)
+        recovered_interrupt = interrupt_from_snapshot(snapshot)
+    except Exception:
+        recovered_interrupt = fallback_interrupt
+
+    st.session_state["last_run_failed"] = True
+    st.session_state["pending_interrupt"] = recovered_interrupt
+    if recovered_interrupt is not None:
+        _update_job(
+            status="waiting",
+            pending_interrupt=recovered_interrupt,
+        )
+    else:
+        _update_job(status="failed", pending_interrupt=None)
+
+
+def _safe_stream_updates(
+    app: Any,
+    stream_input: Any,
+    config: dict[str, Any],
+    *,
+    fallback_interrupt: Any | None = None,
+):
     try:
         yield from app.stream(stream_input, config, stream_mode="updates")
     except RuntimeError as exc:
-        st.session_state["last_run_failed"] = True
-        _update_job(status="failed")
+        _recover_stream_failure(app, config, fallback_interrupt)
         st.error(str(exc))
         st.info(missing_key_message("OPENAI_API_KEY"))
     except Exception as exc:
-        st.session_state["last_run_failed"] = True
-        _update_job(status="failed")
+        _recover_stream_failure(app, config, fallback_interrupt)
         st.exception(exc)
 
 
@@ -942,6 +968,7 @@ if chat_value:
             st.session_state["app"],
             stream_input,
             _graph_config(),
+            fallback_interrupt=pending_interrupt,
         ):
             if _handle_interrupt(update):
                 status.update(label="工作流等待输入", state="complete", expanded=True)
