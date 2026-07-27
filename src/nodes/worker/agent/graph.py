@@ -2,6 +2,7 @@ from typing import TypedDict, List, Dict, Any, Optional, Callable, Type
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
+from ....config import get_app_config
 from ....llm import get_llm
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
@@ -44,9 +45,21 @@ PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../../../"))
 @dataclass
 class WorkerConfig:
     """Worker配置类"""
-    API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-    BASE_URL: str = os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    LLM_MODEL: str = os.environ.get("OPENAI_MODEL", "deepseek-v3")
+    API_KEY: str = field(
+        default_factory=lambda: get_app_config().deepseek_api_key or ""
+    )
+    BASE_URL: str = field(
+        default_factory=lambda: get_app_config().deepseek_base_url
+    )
+    LLM_MODEL: str = field(
+        default_factory=lambda: get_app_config().deepseek_model
+    )
+    DASHSCOPE_API_KEY: str = field(
+        default_factory=lambda: get_app_config().dashscope_api_key or ""
+    )
+    DASHSCOPE_EMBEDDING_MODEL: str = field(
+        default_factory=lambda: get_app_config().dashscope_embedding_model
+    )
     TEMPERATURE: float = 0.7
     TIMEOUT: int = 60
     MAX_RETRIES: int = 3
@@ -320,7 +333,8 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
         try:
             from ..tools.ChemicalKnowledgeBase import ChemicalKnowledgeBase
             self.knowledge_base = ChemicalKnowledgeBase(
-                dashscope_api_key=self.config.API_KEY,
+                dashscope_api_key=self.config.DASHSCOPE_API_KEY,
+                embedding_model=self.config.DASHSCOPE_EMBEDDING_MODEL,
                 persist_directory=self.config.KNOWLEDGE_BASE_DIR
             )
             self._initialized = True

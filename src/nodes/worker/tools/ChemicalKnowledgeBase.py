@@ -354,6 +354,7 @@ class ChemicalKnowledgeBase:
 
     def __init__(self,
                  dashscope_api_key: str,
+                 embedding_model: str = "text-embedding-v1",
                  persist_directory: str = "./chemical_kb",
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200):
@@ -363,6 +364,7 @@ class ChemicalKnowledgeBase:
             raise ValueError("无效的DashScope API密钥")
 
         self.dashscope_api_key = dashscope_api_key
+        self.embedding_model = embedding_model
         self.persist_directory = persist_directory
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -372,7 +374,7 @@ class ChemicalKnowledgeBase:
         try:
             self.embeddings = DashScopeEmbeddings(
                 dashscope_api_key=self.dashscope_api_key,
-                model="text-embedding-v1"
+                model=self.embedding_model
             )
             print("✅ 嵌入模型初始化成功")
         except Exception as e:

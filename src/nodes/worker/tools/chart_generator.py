@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Union
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from src.config import get_app_config
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -663,11 +664,12 @@ class ChartGenerator:
                  model: str = None,
                  use_image_analysis: bool = True,
                  charts_dir: str = None):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self.model = model or os.environ.get("OPENAI_MODEL", "deepseek-v3")
+        app_config = get_app_config()
+        self.api_key = api_key or app_config.deepseek_api_key or ""
+        self.base_url = base_url or app_config.deepseek_base_url
+        self.model = model or app_config.deepseek_model
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY is required for chart generation")
+            raise ValueError("DEEPSEEK_API_KEY is required for chart generation")
         self.use_image_analysis = use_image_analysis  # 新增：是否使用图像分析
 
         # LLM客户端必用
