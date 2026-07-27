@@ -266,10 +266,10 @@ class BaseWorkerTool(ABC):
             return json.dumps(result, ensure_ascii=False, indent=2)
         if "text_output" in result:
             return str(result["text_output"])
-        if "content" in result:
-            return str(result["content"])
         if "summary" in result:
             return str(result["summary"])
+        if "content" in result:
+            return str(result["content"])
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     def create_langchain_tool(self, task: Task) -> BaseTool:

@@ -165,7 +165,7 @@ if not modules:
     print("\n或者运行单个命令：")
     print(
         "pip install langchain-community chromadb langchain-chroma dashscope langchain-text-splitters pypdf docx2txt unstructured pandas")
-    exit(1)
+    raise ImportError("化工知识库缺少必需依赖，请按上述提示安装。")
 
 # 现在导入具体的模块
 from langchain_core.documents import Document
