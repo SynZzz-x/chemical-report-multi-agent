@@ -7,11 +7,25 @@ errors actionable and prevents source files from carrying private keys.
 from __future__ import annotations
 
 import os
-from typing import Any
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/"
-DEFAULT_MODEL = "deepseek-v3"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v1"
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Provider configuration shared by every model consumer."""
+
+    deepseek_api_key: str | None
+    deepseek_base_url: str
+    deepseek_model: str
+    dashscope_api_key: str | None
+    dashscope_embedding_model: str
 
 def get_cache_root() -> Path:
     """
@@ -57,6 +71,31 @@ def get_env(name: str, default: str | None = None) -> str | None:
     return value
 
 
+@lru_cache(maxsize=1)
+def get_app_config() -> AppConfig:
+    """Load model-provider settings once for consistent process-wide access."""
+
+    return AppConfig(
+        deepseek_api_key=get_env("DEEPSEEK_API_KEY"),
+        deepseek_base_url=(
+            get_env("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL)
+            or DEFAULT_DEEPSEEK_BASE_URL
+        ),
+        deepseek_model=(
+            get_env("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+            or DEFAULT_DEEPSEEK_MODEL
+        ),
+        dashscope_api_key=get_env("DASHSCOPE_API_KEY"),
+        dashscope_embedding_model=(
+            get_env(
+                "DASHSCOPE_EMBEDDING_MODEL",
+                DEFAULT_DASHSCOPE_EMBEDDING_MODEL,
+            )
+            or DEFAULT_DASHSCOPE_EMBEDDING_MODEL
+        ),
+    )
+
+
 def missing_key_message(name: str) -> str:
     return (
         f"Missing required environment variable {name}. "
@@ -84,10 +123,11 @@ def _number(configurable: dict[str, Any], name: str, default: float | int) -> fl
 
 def get_llm_settings(configurable: dict[str, Any] | None = None) -> dict[str, Any]:
     configurable = configurable or {}
+    app_config = get_app_config()
     return {
-        "api_key": configurable.get("api_key") or get_env("OPENAI_API_KEY"),
-        "base_url": configurable.get("base_url") or get_env("OPENAI_BASE_URL", DEFAULT_BASE_URL),
-        "model_name": configurable.get("model_name") or get_env("OPENAI_MODEL", DEFAULT_MODEL),
+        "api_key": app_config.deepseek_api_key,
+        "base_url": app_config.deepseek_base_url,
+        "model_name": app_config.deepseek_model,
         "max_tokens": _number(configurable, "max_tokens", 2048),
         "temperature": _number(configurable, "temperature", 0.2),
         "top_p": _number(configurable, "top_p", 1.0),

@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.state import State
+from src.config import get_app_config
 from src.llm import get_llm
 
 
@@ -60,9 +61,11 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
     use_llm = False
     try:
         conf = config.get("configurable", {}) if config else {}
-        use_llm = bool(conf.get("use_llm")) or bool(os.environ.get("OPENAI_API_KEY"))
+        use_llm = bool(conf.get("use_llm")) or bool(
+            get_app_config().deepseek_api_key
+        )
     except Exception:
-        use_llm = bool(os.environ.get("OPENAI_API_KEY"))
+        use_llm = bool(get_app_config().deepseek_api_key)
 
     assessment = None
     llm_record = {}

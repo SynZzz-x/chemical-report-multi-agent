@@ -10,7 +10,7 @@ def get_llm(config: RunnableConfig, json_mode: bool = True) -> ChatOpenAI:
     settings = get_llm_settings(configurable)
     api_key = settings.pop("api_key", None)
     if not api_key:
-        raise RuntimeError(missing_key_message("OPENAI_API_KEY"))
+        raise RuntimeError(missing_key_message("DEEPSEEK_API_KEY"))
 
     model_kwargs = {}
     if json_mode:
