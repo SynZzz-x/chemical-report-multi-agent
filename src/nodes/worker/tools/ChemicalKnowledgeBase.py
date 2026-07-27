@@ -4,12 +4,9 @@
 """
 
 import os
-import json
-import re
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import hashlib
-import numpy as np
 
 print("🔧 正在检查依赖包...")
 
@@ -46,15 +43,6 @@ def check_and_import_dependencies():
             text_splitter_imported = True
         except ImportError:
             print("⚠️  无法导入 RecursiveCharacterTextSplitter，将使用自定义文本分割器")
-
-    # 尝试导入OpenAI
-    try:
-        from langchain_openai import ChatOpenAI
-        imported_modules['ChatOpenAI'] = ChatOpenAI
-        print("✅ 导入 langchain_openai.ChatOpenAI 成功")
-    except ImportError:
-        print("❌ 无法导入 ChatOpenAI")
-        return False
 
     # 尝试导入文档加载器
     try:
@@ -102,7 +90,13 @@ def check_and_import_dependencies():
         return False
 
     # 检查必要依赖
-    necessary_modules = ['Document', 'ChatOpenAI', 'chromadb', 'Settings', 'Chroma', 'DashScopeEmbeddings']
+    necessary_modules = [
+        'Document',
+        'chromadb',
+        'Settings',
+        'Chroma',
+        'DashScopeEmbeddings',
+    ]
     for module in necessary_modules:
         if module not in imported_modules:
             print(f"❌ 缺少必要模块: {module}")
@@ -164,13 +158,13 @@ modules = check_and_import_dependencies()
 if not modules:
     print("\n❌ 缺少依赖包！")
     print("\n请运行以下命令安装所有依赖：")
-    print("pip install langchain-openai langchain-community")
+    print("pip install langchain-community")
     print("pip install chromadb langchain-chroma dashscope")
     print("pip install langchain-text-splitters")  # 新增：文本分割器单独包
     print("pip install pypdf docx2txt unstructured pandas")
     print("\n或者运行单个命令：")
     print(
-        "pip install langchain-openai langchain-community chromadb langchain-chroma dashscope langchain-text-splitters pypdf docx2txt unstructured pandas")
+        "pip install langchain-community chromadb langchain-chroma dashscope langchain-text-splitters pypdf docx2txt unstructured pandas")
     exit(1)
 
 # 现在导入具体的模块
@@ -184,7 +178,7 @@ import chromadb
 from chromadb.config import Settings
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
-from src.llm import get_llm
+from src.config import get_app_config
 
 print("✅ 所有依赖检查通过，开始初始化化工知识库...")
 
@@ -391,27 +385,6 @@ class ChemicalKnowledgeBase:
         # 初始化ChromaDB
         self._init_chromadb()
 
-        # 初始化LLM（用于生成答案）
-        print("🔧 初始化LLM客户端...")
-        try:
-            if self.dashscope_api_key:
-                os.environ["OPENAI_API_KEY"] = self.dashscope_api_key
-                
-            llm_config = {
-                "configurable": {
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    "model_name": "qwen-max",
-                    "temperature": 0.3,
-                    "max_tokens": 1000
-                }
-            }
-            self.llm = get_llm(llm_config, json_mode=False)
-            print("✅ LLM客户端初始化成功")
-        except Exception as e:
-            print(f"❌ LLM客户端初始化失败: {str(e)}")
-            # 设置一个None值，稍后处理
-            self.llm = None
-
         print(f"✅ 化工知识库初始化完成")
         print(f"   存储路径: {os.path.abspath(self.persist_directory)}")
         print(f"   分块大小: {chunk_size} 字符")
@@ -530,9 +503,8 @@ class ChemicalKnowledgeBase:
               question: str,
               top_k: int = 5,
               doc_type_filter: Optional[str] = None,
-              similarity_threshold: float = 0.3,  # 降低阈值，因为余弦相似度可能返回负值
-              generate_answer: bool = True) -> Dict[str, Any]:
-        """查询知识库"""
+              similarity_threshold: float = 0.3) -> Dict[str, Any]:
+        """检索知识库并返回证据，不在工具内部生成答案。"""
         try:
             # 构建过滤器
             filter_dict = {}
@@ -569,16 +541,10 @@ class ChemicalKnowledgeBase:
                 }
                 results.append(result)
 
-            # 生成答案
-            answer = ""
-            if results and generate_answer and self.llm:
-                answer = self._generate_answer(question, results)
-
             return {
                 "question": question,
                 "total_results": len(results),
                 "average_score": sum(r["score"] for r in results) / len(results) if results else 0,
-                "answer": answer,
                 "results": results,
                 "timestamp": datetime.now().isoformat()
             }
@@ -591,39 +557,6 @@ class ChemicalKnowledgeBase:
                 "total_results": 0,
                 "results": []
             }
-
-    def _generate_answer(self, question: str, results: List[Dict[str, Any]]) -> str:
-        """使用LLM生成答案"""
-        try:
-            # 构建上下文
-            context = "\n\n".join([
-                f"[来源: {r['title']}, 相关度: {r['score']:.2f}]\n{r['content'][:500]}..."
-                if len(r['content']) > 500 else r['content']
-                for r in results[:3]
-            ])
-
-            prompt = f"""你是一个化工产业专家，请基于以下知识库内容回答问题。
-
-问题：{question}
-
-相关知识：
-{context}
-
-请生成专业、准确的回答，要求：
-1. 直接回答问题的核心内容
-2. 引用相关知识库内容作为支撑
-3. 提供化工产业的专业见解
-4. 回答语言：中文
-5. 回答长度：200-300字
-"""
-
-            print("💭 正在生成答案...")
-            response = self.llm.invoke(prompt)
-            return response.content
-
-        except Exception as e:
-            print(f"❌ 生成答案失败: {str(e)}")
-            return f"无法生成答案: {str(e)}"
 
     def get_stats(self) -> Dict[str, Any]:
         """获取知识库统计信息"""
@@ -655,9 +588,10 @@ def main():
 
     # ============ 配置参数 ============
 
-    # 1. 您的通义千问API密钥
-    DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
-    if not DASHSCOPE_API_KEY:
+    # 1. DashScope仅用于知识库嵌入
+    app_config = get_app_config()
+    dashscope_api_key = app_config.dashscope_api_key or ""
+    if not dashscope_api_key:
         print("DASHSCOPE_API_KEY is required to run this manual knowledge-base demo.")
         return
 
@@ -699,7 +633,8 @@ def main():
 
     try:
         kb = ChemicalKnowledgeBase(
-            dashscope_api_key=DASHSCOPE_API_KEY,
+            dashscope_api_key=dashscope_api_key,
+            embedding_model=app_config.dashscope_embedding_model,
             persist_directory="./chemical_kb_test",
             chunk_size=1000,
             chunk_overlap=200
@@ -749,8 +684,7 @@ def main():
 
                 result = kb.query(
                     question=user_input,
-                    top_k=3,
-                    generate_answer=True
+                    top_k=3
                 )
 
                 # 显示结果
@@ -763,11 +697,6 @@ def main():
                     continue
 
                 print(f"📊 找到 {result['total_results']} 个相关结果")
-                if result.get("answer"):
-                    print(f"\n💡 专业回答:")
-                    print("-" * 40)
-                    print(result["answer"])
-                    print("-" * 40)
 
                 # 显示来源
                 if result.get("results"):

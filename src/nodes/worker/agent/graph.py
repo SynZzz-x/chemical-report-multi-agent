@@ -351,7 +351,7 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
         return "chemical_knowledge_base_tool"
 
     def get_tool_description(self) -> str:
-        return """从化工专业知识库中检索相关技术资料、标准和规范。支持文档加载、知识检索和智能问答。"""
+        return """从化工专业知识库中检索相关技术资料、标准和规范，返回可供Worker分析和引用的证据。"""
 
     def get_args_schema(self) -> Type[BaseModel]:
         class KnowledgeBaseArgs(BaseModel):
@@ -367,7 +367,6 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
                 le=1.0,
                 description="相似度阈值，范围0.1-1.0"
             )
-            generate_answer: bool = Field(default=True, description="是否生成智能答案")
             doc_type_filter: Optional[str] = Field(
                 default=None,
                 description="文档类型过滤器：patent/safety/process/equipment/material/standard/data/report"
@@ -445,15 +444,13 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
 
         top_k = kwargs.get("top_k", 5)
         similarity_threshold = kwargs.get("similarity_threshold", 0.3)
-        generate_answer = kwargs.get("generate_answer", True)
         doc_type_filter = kwargs.get("doc_type_filter")
 
         result = self.knowledge_base.query(
             question=query,
             top_k=top_k,
             doc_type_filter=doc_type_filter,
-            similarity_threshold=similarity_threshold,
-            generate_answer=generate_answer
+            similarity_threshold=similarity_threshold
         )
 
         if result.get("error"):
@@ -469,17 +466,27 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
                 "content": r.get("content", ""),
                 "score": r.get("score", 0),
                 "source": r.get("source", ""),
-                "title": r.get("title", "")
+                "title": r.get("title", ""),
+                "doc_type": r.get("doc_type", ""),
+                "metadata": r.get("metadata", {})
             })
+
+        formatted_evidence = "\n\n".join(
+            (
+                f"[证据 {index}] 标题: {item['title']} | "
+                f"来源: {item['source']} | 类型: {item['doc_type']} | "
+                f"相关度: {item['score']:.2f}\n{item['content']}"
+            )
+            for index, item in enumerate(relevant_content, start=1)
+        )
 
         return {
             "success": True,
             "query": query,
             "results_count": len(relevant_content),
             "average_score": result.get("average_score", 0),
-            "answer": result.get("answer", ""),
-            "content": result.get("answer", "") if generate_answer else json.dumps(relevant_content, ensure_ascii=False,
-                                                                                   indent=2),
+            "content": formatted_evidence,
+            "evidence": relevant_content,
             "summary": f"从知识库中检索到 {len(relevant_content)} 条相关结果，平均相关度: {result.get('average_score', 0):.2f}",
             "raw_data": result
         }
