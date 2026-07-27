@@ -511,35 +511,37 @@ class ChemicalKnowledgeBase:
             if doc_type_filter:
                 filter_dict["doc_type"] = doc_type_filter
 
-            # 执行搜索 - 使用自定义的相似度计算
+            # 执行搜索并获取归一化相关度分数
             print(f"🔍 正在搜索: {question}")
             if filter_dict:
-                docs = self.vector_store.similarity_search(
+                scored_docs = self.vector_store.similarity_search_with_relevance_scores(
                     question,
                     k=top_k * 2,
                     filter=filter_dict
                 )
             else:
-                docs = self.vector_store.similarity_search(
+                scored_docs = self.vector_store.similarity_search_with_relevance_scores(
                     question,
                     k=top_k
                 )
 
-            # 手动计算相似度分数（如果可用）
             results = []
-            for i, doc in enumerate(docs[:top_k]):
-                # 这里我们使用简单的排名分数，因为实际相似度分数可能不正常
-                score = 1.0 - (i * 0.1)  # 基于排名的分数
+            for doc, raw_score in scored_docs:
+                score = max(0.0, min(1.0, float(raw_score)))
+                if score < similarity_threshold:
+                    continue
 
                 result = {
                     "content": doc.page_content,
-                    "score": float(score),
+                    "score": score,
                     "metadata": doc.metadata,
                     "source": doc.metadata.get("source", "unknown"),
                     "title": doc.metadata.get("title", "Untitled"),
                     "doc_type": doc.metadata.get("doc_type", "unknown"),
                 }
                 results.append(result)
+                if len(results) >= top_k:
+                    break
 
             return {
                 "question": question,
@@ -552,6 +554,7 @@ class ChemicalKnowledgeBase:
         except Exception as e:
             print(f"❌ 查询失败: {str(e)}")
             return {
+                "success": False,
                 "question": question,
                 "error": f"查询失败: {str(e)}",
                 "total_results": 0,

@@ -7,7 +7,7 @@ errors actionable and prevents source files from carrying private keys.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -21,10 +21,10 @@ DEFAULT_DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v1"
 class AppConfig:
     """Provider configuration shared by every model consumer."""
 
-    deepseek_api_key: str | None
+    deepseek_api_key: str | None = field(repr=False)
     deepseek_base_url: str
     deepseek_model: str
-    dashscope_api_key: str | None
+    dashscope_api_key: str | None = field(repr=False)
     dashscope_embedding_model: str
 
 def get_cache_root() -> Path:

@@ -259,6 +259,19 @@ class BaseWorkerTool(ABC):
             "required_resources": self.required_resources
         }
 
+    def format_result_for_model(self, result: Dict[str, Any]) -> str:
+        """Format a successful structured result for the Worker model."""
+
+        if "figures" in result:
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        if "text_output" in result:
+            return str(result["text_output"])
+        if "content" in result:
+            return str(result["content"])
+        if "summary" in result:
+            return str(result["summary"])
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
     def create_langchain_tool(self, task: Task) -> BaseTool:
         """创建LangChain兼容的工具"""
 
@@ -267,20 +280,15 @@ class BaseWorkerTool(ABC):
             try:
                 result = self.execute(task, **kwargs)
                 if isinstance(result, dict):
-                    if "figures" in result:
-                        return json.dumps(result, ensure_ascii=False, indent=2)
-                    elif "text_output" in result:
-                        return result["text_output"]
-                    elif "summary" in result:
-                        return result["summary"]
-                    elif "content" in result:
-                        return result["content"]
-                    else:
-                        return json.dumps(result, ensure_ascii=False, indent=2)
-                else:
-                    return str(result)
+                    if result.get("success") is False or result.get("error"):
+                        error = result.get("error") or "工具返回失败状态"
+                        raise ToolExecutionError(str(error))
+                    return self.format_result_for_model(result)
+                return str(result)
+            except ToolExecutionError:
+                raise
             except Exception as e:
-                return f"工具执行失败: {str(e)}"
+                raise ToolExecutionError(f"工具执行失败: {str(e)}") from e
 
         tool_function.__doc__ = self.description
 
@@ -326,10 +334,18 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
         super().__init__(config)
         self.knowledge_base = None
         self._initialized = False
+        self._initialization_error = None
         self._initialize_knowledge_base()
 
     def _initialize_knowledge_base(self):
         """初始化知识库"""
+        if not self.config.DASHSCOPE_API_KEY:
+            self._initialization_error = (
+                "缺少 DASHSCOPE_API_KEY；化工知识库检索需要 DashScope 嵌入服务。"
+            )
+            print(f"❌ 化工知识库初始化失败: {self._initialization_error}")
+            return
+
         try:
             from ..tools.ChemicalKnowledgeBase import ChemicalKnowledgeBase
             self.knowledge_base = ChemicalKnowledgeBase(
@@ -341,10 +357,12 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             print(f"✅ {self.name} 初始化成功")
             print(f"   知识库路径: {self.config.KNOWLEDGE_BASE_DIR}")
         except ImportError as e:
-            print(f"❌ 化工知识库工具导入失败: {e}")
+            self._initialization_error = f"化工知识库依赖导入失败: {e}"
+            print(f"❌ {self._initialization_error}")
             self._initialized = False
         except Exception as e:
-            print(f"❌ 化工知识库初始化失败: {e}")
+            self._initialization_error = f"化工知识库初始化失败: {e}"
+            print(f"❌ {self._initialization_error}")
             self._initialized = False
 
     def get_tool_name(self) -> str:
@@ -384,11 +402,30 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
     def get_required_resources(self) -> List[str]:
         return ["txt", "pdf", "docx", "md", "csv", "xlsx", "xls"]
 
+    def format_result_for_model(self, result: Dict[str, Any]) -> str:
+        """Send both readable and structured retrieval evidence to DeepSeek."""
+
+        if "evidence" not in result:
+            return super().format_result_for_model(result)
+        return json.dumps(
+            {
+                "query": result.get("query", ""),
+                "summary": result.get("summary", ""),
+                "content": result.get("content", ""),
+                "evidence": result.get("evidence", []),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
     def execute(self, task: Task, **kwargs) -> Dict[str, Any]:
         if not self._initialized or not self.knowledge_base:
             return {
-                "error": "化工知识库工具未初始化",
-                "suggestion": "请检查ChemicalKnowledgeBase模块是否正确安装"
+                "success": False,
+                "error": self._initialization_error or "化工知识库工具未初始化",
+                "suggestion": (
+                    "请配置 DASHSCOPE_API_KEY，并检查知识库依赖和向量存储。"
+                ),
             }
 
         try:
@@ -494,6 +531,11 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
     def _get_knowledge_base_stats(self) -> Dict[str, Any]:
         """获取知识库统计信息"""
         stats = self.knowledge_base.get_stats()
+        if stats.get("error"):
+            return {
+                "success": False,
+                "error": stats["error"],
+            }
         return {
             "success": True,
             "operation": "stats",
