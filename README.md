@@ -28,7 +28,8 @@ See [docs/architecture.md](docs/architecture.md) for the full workflow and state
 - Python, LangGraph, LangChain
 - Streamlit for the demo UI
 - pandas, matplotlib, python-docx, reportlab
-- ChromaDB and DashScope/OpenAI-compatible model APIs
+- DeepSeek official API for chat generation
+- ChromaDB with DashScope embeddings for chemical knowledge retrieval
 - pytest for deterministic checks
 
 ## Quick Start
@@ -48,6 +49,19 @@ set -a
 source .env
 set +a
 ```
+
+Provider configuration is centralized in `src/config.py`:
+
+- `DEEPSEEK_API_KEY` is required for all Agent chat generation.
+- `DEEPSEEK_BASE_URL` defaults to `https://api.deepseek.com`.
+- `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`.
+- `DASHSCOPE_API_KEY` is required only when loading or querying the chemical
+  knowledge base.
+- `DASHSCOPE_EMBEDDING_MODEL` defaults to `text-embedding-v1`.
+
+The chemical knowledge base is retrieval-only: it uses DashScope embeddings
+and ChromaDB to return sourced evidence. The Worker agent then uses the shared
+DeepSeek client to interpret that evidence and generate the task result.
 
 Run the Streamlit app:
 

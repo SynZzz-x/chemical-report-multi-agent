@@ -1269,9 +1269,7 @@ class AutonomousToolNode:
         # 统一使用 get_llm
         llm_config = {
             "configurable": {
-                "model_name": self.config.LLM_MODEL,
-                "temperature": self.config.TEMPERATURE,
-                "base_url": self.config.BASE_URL
+                "temperature": self.config.TEMPERATURE
             }
         }
         # Worker节点需要自主调用工具并生成文本报告，不强制JSON模式

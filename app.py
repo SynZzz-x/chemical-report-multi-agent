@@ -564,7 +564,7 @@ def _safe_stream_updates(
     except RuntimeError as exc:
         _recover_stream_failure(app, config, fallback_interrupt)
         st.error(str(exc))
-        st.info(missing_key_message("OPENAI_API_KEY"))
+        st.info(missing_key_message("DEEPSEEK_API_KEY"))
     except Exception as exc:
         _recover_stream_failure(app, config, fallback_interrupt)
         st.exception(exc)

@@ -440,7 +440,7 @@ def main():
             except RuntimeError as exc:
                 recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Config Error] {exc}")
-                logger.error(missing_key_message("OPENAI_API_KEY"))
+                logger.error(missing_key_message("DEEPSEEK_API_KEY"))
             except Exception as exc:
                 recover_after_failure(previous_interrupt)
                 logger.error(f"\n[Error] {exc}")
