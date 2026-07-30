@@ -96,20 +96,43 @@ Hybrid RAG persists its active-manifest data in `cache/rag/hybrid.sqlite` and
 its dense collections in `cache/rag/chroma/` (or the corresponding
 `AGENT_CACHE_ROOT`). Existing DashScope-built collections must be re-ingested:
 their vectors and character chunk boundaries are incompatible and are never
-silently reused. A changed index fingerprint likewise requires a rebuild and
-re-ingestion; the index uses cosine distance and has no compatibility guarantee
-across fingerprint changes.
+silently reused. Chroma collection names include a deterministic fingerprint
+generation, so incompatible vectors cannot be opened under the current name.
+A changed index fingerprint requires a safe rebuild and re-ingestion.
 
-At startup, the service cleans incomplete `building` and `failed` versions and
-their dense vectors. During queries, it degrades to BM25-only if TEI/dense
-retrieval is unavailable, or dense-only if the lexical backend is unavailable;
-diagnostics identify the active retrieval mode. If neither backend is available,
-the tool returns an error instead of generating an answer.
+Stop the Agent, then provide every source document to the rebuild command:
+
+```bash
+python -m src.rag.cli rebuild \
+  /srv/knowledge/process-standard.pdf \
+  /srv/knowledge/safety-manual.docx
+```
+
+The command builds and validates the replacement beneath a sibling staging
+directory. It switches `cache/rag` only after every source has an activated or
+already-complete version. The former active directory is moved, not deleted, to
+`cache/rag-archive/<timestamp>-<generation>-<id>`; the JSON result prints the
+exact `archive_path`. If staging fails, `activated` is `false`, the active index
+is unchanged, and `staging_path` is retained for diagnosis. To roll back after a
+successful switch, stop the Agent, move the new `cache/rag` aside, then move the
+reported `archive_path` back to `cache/rag`.
+
+At startup, the service cleans incomplete `building`/`failed` versions and
+idempotently retries every `cleanup_pending` retirement. If SQLite lacks FTS5,
+the ordinary manifest still opens so active filtering and parent expansion keep
+dense-only retrieval operational. During queries, the service degrades to
+BM25-only if TEI/dense retrieval is unavailable, or dense-only if the lexical
+backend is unavailable; diagnostics identify the active retrieval mode. If
+neither backend is available, the tool returns an error instead of generating
+an answer.
 
 The chemical knowledge-base Worker tool is retrieval-only. It returns parent
-evidence, child-match diagnostics, and source metadata to DeepSeek; DeepSeek
-must state that the knowledge base lacks sufficient support when the evidence
-does not directly answer the question.
+evidence, child-match diagnostics, and source metadata to DeepSeek. Retrieval
+errors and zero-result queries carry explicit fail-closed instructions: the
+Worker must state that support is unavailable or insufficient and must not fill
+the gap from model general knowledge. The former `similarity_threshold`
+parameter is deprecated because RRF scores are rank-only, not calibrated
+similarities.
 
 Run the Streamlit app:
 

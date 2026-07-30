@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from src.config import RAGSettings, get_rag_settings
 
-from .bm25_store import BM25Store
+from .bm25_store import BM25Store, index_fingerprint
 from .chunking import ChemicalDocumentLoader, StructureAwareChunker
 from .embeddings import TEIEmbeddings
 from .hybrid_retriever import HybridRetriever, _sanitize_exception
 from .tokenizer import ChemicalTokenizer
-from .vector_store import VectorStore
+from .vector_store import VectorStore, fingerprint_generation
 
 
 EMBEDDING_BATCH_SIZE = 64
@@ -43,13 +47,25 @@ class ChemicalRAGService:
                 self._bm25_store = BM25Store.open(
                     self._settings.storage_root, self._tokenizer, self._settings
                 )
+                if not self._bm25_store.lexical_available:
+                    self._startup_warnings.append(
+                        "bm25: "
+                        + (
+                            self._bm25_store.lexical_warning
+                            or "SQLite FTS5 lexical search is unavailable."
+                        )
+                    )
             except Exception as exc:
                 self._startup_warnings.append(f"bm25: {_sanitize_exception(exc)}")
-        if self._vector_store is None:
+        if self._vector_store is None and self._bm25_store is not None:
             try:
                 self._vector_store = VectorStore.open(self._settings.storage_root, self._settings)
             except Exception as exc:
                 self._startup_warnings.append(f"dense: {_sanitize_exception(exc)}")
+        elif self._vector_store is None:
+            self._startup_warnings.append(
+                "dense: canonical manifest is unavailable; vector retrieval was not opened."
+            )
         self._cleanup_incomplete_versions()
         self._retriever = HybridRetriever(
             self._bm25_store,
@@ -65,6 +81,102 @@ class ChemicalRAGService:
 
         if self._bm25_store is not None:
             self._bm25_store.close()
+
+    @classmethod
+    def rebuild(
+        cls,
+        file_paths: Iterable[str],
+        settings: RAGSettings | None = None,
+    ) -> dict[str, Any]:
+        """Build beside the active index, then atomically archive and replace it."""
+
+        sources = list(dict.fromkeys(file_paths))
+        if not sources:
+            return {
+                "success": False,
+                "activated": False,
+                "error": "Rebuild requires at least one source document.",
+            }
+        base_settings = settings or get_rag_settings()
+        storage_root = base_settings.storage_root
+        generation = fingerprint_generation(index_fingerprint(base_settings))
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        staging_root = storage_root.parent / (
+            f".{storage_root.name}.rebuild-{generation}-{uuid4().hex[:8]}"
+        )
+        staged_settings = replace(base_settings, storage_root=staging_root)
+        staged_service: ChemicalRAGService | None = None
+        try:
+            staged_service = cls(staged_settings)
+            ingestion = staged_service.ingest(sources)
+        except Exception as exc:
+            return {
+                "success": False,
+                "activated": False,
+                "generation": generation,
+                "staging_path": str(staging_root),
+                "error": _sanitize_exception(exc),
+            }
+        finally:
+            if staged_service is not None:
+                try:
+                    staged_service.close()
+                except Exception:
+                    pass
+
+        completed_files = int(ingestion.get("activated_files", 0)) + int(
+            ingestion.get("skipped_files", 0)
+        )
+        rebuild_complete = (
+            int(ingestion.get("failed_files", 0)) == 0
+            and completed_files == len(sources)
+            and int(ingestion.get("cleanup_pending_versions", 0)) == 0
+            and int(ingestion.get("incomplete_versions", 0)) == 0
+        )
+        if not rebuild_complete:
+            return {
+                "success": False,
+                "activated": False,
+                "generation": generation,
+                "staging_path": str(staging_root),
+                "error": (
+                    "Rebuild staging did not produce a complete searchable index; "
+                    "the active index was not changed."
+                ),
+                "ingestion": ingestion,
+            }
+
+        archive_path: Path | None = None
+        storage_root.parent.mkdir(parents=True, exist_ok=True)
+        if storage_root.exists():
+            archive_root = storage_root.parent / f"{storage_root.name}-archive"
+            archive_root.mkdir(parents=True, exist_ok=True)
+            archive_path = archive_root / (
+                f"{timestamp}-{generation}-{uuid4().hex[:8]}"
+            )
+            storage_root.rename(archive_path)
+        try:
+            staging_root.rename(storage_root)
+        except Exception as exc:
+            if archive_path is not None and not storage_root.exists():
+                archive_path.rename(storage_root)
+            return {
+                "success": False,
+                "activated": False,
+                "generation": generation,
+                "staging_path": str(staging_root),
+                "archive_path": str(archive_path) if archive_path else None,
+                "error": f"Index activation failed: {_sanitize_exception(exc)}",
+                "ingestion": ingestion,
+            }
+        return {
+            "success": True,
+            "activated": True,
+            "generation": generation,
+            "active_path": str(storage_root),
+            "archive_path": str(archive_path) if archive_path else None,
+            "ingestion": ingestion,
+        }
 
     def ingest(self, file_paths: Iterable[str]) -> dict[str, Any]:
         """Ingest each file independently, never activating incomplete versions."""
@@ -197,7 +309,17 @@ class ChemicalRAGService:
         vector_ids: list[str] = []
         try:
             document = ChemicalDocumentLoader.load(path)
+            if not document.blocks:
+                raise ValueError(
+                    "Document extraction produced no structural blocks; "
+                    "the current active version was preserved."
+                )
             parents, chunks = self._chunker.chunk(document)
+            if not parents or not chunks:
+                raise ValueError(
+                    "Document chunking produced no searchable parents or children; "
+                    "the current active version was preserved."
+                )
             try:
                 self._bm25_store.begin_version(document, parents, chunks)
             except ValueError as exc:
@@ -218,20 +340,16 @@ class ChemicalRAGService:
             warnings: list[str] = []
             cleanup_pending = False
             cleanup_tracking_failed = False
-            try:
-                self._vector_store.delete(sorted(prior_vector_ids))
-            except Exception as exc:
-                warnings.append(f"dense cleanup: {_sanitize_exception(exc)}")
-                if prior_version_id is not None:
-                    try:
-                        self._bm25_store.mark_cleanup_pending(prior_version_id)
-                        cleanup_pending = True
-                    except Exception as cleanup_exc:
-                        cleanup_tracking_failed = True
-                        warnings.append(
-                            "manifest cleanup: "
-                            f"{_sanitize_exception(cleanup_exc)}"
-                        )
+            if prior_version_id is not None:
+                try:
+                    self._vector_store.delete(sorted(prior_vector_ids))
+                    self._bm25_store.cleanup_incomplete(prior_version_id)
+                except Exception as exc:
+                    cleanup_pending = True
+                    warnings.append(
+                        "retired-version cleanup: "
+                        f"{_sanitize_exception(exc)}"
+                    )
             return {
                 "path": path,
                 "status": (
@@ -300,7 +418,7 @@ class ChemicalRAGService:
             self._vector_store.upsert(batch, embeddings)
 
     def _cleanup_incomplete_versions(self) -> None:
-        """Remove vectors first, then their building/failed SQLite manifest rows."""
+        """Idempotently retire every non-active incomplete or pending version."""
 
         if self._bm25_store is None:
             return

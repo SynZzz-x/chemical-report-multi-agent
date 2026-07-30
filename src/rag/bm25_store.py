@@ -91,10 +91,15 @@ class BM25Store:
         connection: sqlite3.Connection,
         tokenizer: ChemicalTokenizer,
         fingerprint: Mapping[str, str],
+        *,
+        lexical_available: bool,
+        lexical_warning: str | None = None,
     ) -> None:
         self._connection = connection
         self._tokenizer = tokenizer
         self._fingerprint = dict(fingerprint)
+        self._lexical_available = lexical_available
+        self._lexical_warning = lexical_warning
 
     @classmethod
     def open(
@@ -114,56 +119,67 @@ class BM25Store:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=30000")
         try:
-            cls._create_schema(connection)
+            lexical_available, lexical_warning = cls._create_schema(connection)
             expected = dict(fingerprint or index_fingerprint(settings))
             if set(expected) != INDEX_FINGERPRINT_KEYS:
                 raise ValueError("RAG index fingerprint must include every compatibility key.")
             cls._validate_fingerprint(connection, expected)
-            return cls(connection, tokenizer, expected)
+            store = cls(
+                connection,
+                tokenizer,
+                expected,
+                lexical_available=lexical_available,
+                lexical_warning=lexical_warning,
+            )
+            store._synchronize_fts()
+            return store
         except BaseException:
             connection.close()
             raise
 
     @staticmethod
-    def _create_schema(connection: sqlite3.Connection) -> None:
+    def _create_schema(connection: sqlite3.Connection) -> tuple[bool, str | None]:
+        """Create the canonical manifest even when this SQLite lacks FTS5."""
+
+        with connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS documents (
+                    doc_id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    active_version_id TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS document_versions (
+                    version_id TEXT PRIMARY KEY,
+                    doc_id TEXT NOT NULL REFERENCES documents(doc_id),
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS parents (
+                    parent_id TEXT PRIMARY KEY,
+                    section_id TEXT NOT NULL,
+                    version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                    content TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    parent_id TEXT NOT NULL REFERENCES parents(parent_id),
+                    version_id TEXT NOT NULL REFERENCES document_versions(version_id),
+                    content TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS rag_index_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                """
+            )
         try:
             with connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS documents (
-                        doc_id TEXT PRIMARY KEY,
-                        source TEXT NOT NULL,
-                        active_version_id TEXT,
-                        updated_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS document_versions (
-                        version_id TEXT PRIMARY KEY,
-                        doc_id TEXT NOT NULL REFERENCES documents(doc_id),
-                        content_hash TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        created_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS parents (
-                        parent_id TEXT PRIMARY KEY,
-                        section_id TEXT NOT NULL,
-                        version_id TEXT NOT NULL REFERENCES document_versions(version_id),
-                        content TEXT NOT NULL,
-                        metadata_json TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS chunks (
-                        chunk_id TEXT PRIMARY KEY,
-                        parent_id TEXT NOT NULL REFERENCES parents(parent_id),
-                        version_id TEXT NOT NULL REFERENCES document_versions(version_id),
-                        content TEXT NOT NULL,
-                        metadata_json TEXT NOT NULL,
-                        ordinal INTEGER NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS rag_index_meta (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL
-                    );
-                    """
-                )
                 connection.execute(
                     """
                     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -173,12 +189,31 @@ class BM25Store:
                     """
                 )
         except sqlite3.OperationalError as exc:
-            if "fts5" in str(exc).lower() or "virtual table" in str(exc).lower():
-                raise RuntimeError(
-                    "SQLite FTS5 is unavailable. Install or use a Python/SQLite build "
-                    "compiled with ENABLE_FTS5 before opening the RAG index."
-                ) from exc
+            error_text = str(exc).lower()
+            if (
+                "fts5" in error_text
+                or "virtual table" in error_text
+                or "no such module" in error_text
+            ):
+                return (
+                    False,
+                    "SQLite FTS5 is unavailable; lexical search is disabled and "
+                    "dense retrieval will continue through the canonical manifest.",
+                )
             raise
+        return True, None
+
+    @property
+    def lexical_available(self) -> bool:
+        """Whether FTS5 lexical reads and writes are available."""
+
+        return self._lexical_available
+
+    @property
+    def lexical_warning(self) -> str | None:
+        """Return the startup diagnostic for dense-only operation."""
+
+        return self._lexical_warning
 
     @staticmethod
     def _validate_fingerprint(
@@ -304,13 +339,16 @@ class BM25Store:
                     for chunk in chunks
                 ],
             )
-            self._connection.executemany(
-                """
-                INSERT INTO chunks_fts(title, section_path, clause_number, bm25_text, chunk_id)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [self._fts_row(document, chunk) for chunk in chunks],
-            )
+            if self._lexical_available:
+                self._connection.executemany(
+                    """
+                    INSERT INTO chunks_fts(
+                        title, section_path, clause_number, bm25_text, chunk_id
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [self._fts_row(document, chunk) for chunk in chunks],
+                )
 
     def activate_version(self, doc_id: str, version_id: str) -> tuple[str | None, set[str]]:
         """Atomically activate a staged version and return superseded vector IDs."""
@@ -332,6 +370,14 @@ class BM25Store:
             previous_version_id = document["active_version_id"]
             previous_chunk_ids: set[str] = set()
             if previous_version_id is not None:
+                previous_version = self._connection.execute(
+                    "SELECT status FROM document_versions WHERE version_id = ?",
+                    (previous_version_id,),
+                ).fetchone()
+                if previous_version is None or previous_version["status"] != "ready":
+                    raise ValueError(
+                        "The current active_version_id does not reference a ready version."
+                    )
                 previous_chunk_ids = {
                     row["chunk_id"]
                     for row in self._connection.execute(
@@ -340,7 +386,11 @@ class BM25Store:
                     )
                 }
                 self._connection.execute(
-                    "UPDATE document_versions SET status = 'inactive' WHERE version_id = ?",
+                    """
+                    UPDATE document_versions
+                    SET status = 'cleanup_pending'
+                    WHERE version_id = ? AND status = 'ready'
+                    """,
                     (previous_version_id,),
                 )
             self._connection.execute(
@@ -422,8 +472,15 @@ class BM25Store:
             """
             SELECT v.version_id, c.chunk_id
             FROM document_versions AS v
+            JOIN documents AS d ON d.doc_id = v.doc_id
             LEFT JOIN chunks AS c ON c.version_id = v.version_id
-            WHERE v.status IN ('building', 'failed', 'cleanup_pending')
+            WHERE v.status IN (
+                'building', 'failed', 'inactive', 'cleanup_pending'
+            )
+              AND (
+                  d.active_version_id IS NULL
+                  OR d.active_version_id <> v.version_id
+              )
             ORDER BY v.version_id, c.ordinal
             """
         )
@@ -439,11 +496,24 @@ class BM25Store:
 
         with self._connection:
             status = self._connection.execute(
-                "SELECT status FROM document_versions WHERE version_id = ?", (version_id,)
+                """
+                SELECT v.status, d.active_version_id
+                FROM document_versions AS v
+                JOIN documents AS d ON d.doc_id = v.doc_id
+                WHERE v.version_id = ?
+                """,
+                (version_id,),
             ).fetchone()
             if status is None:
                 return set()
-            if status["status"] not in {"building", "failed", "cleanup_pending"}:
+            if status["active_version_id"] == version_id:
+                raise ValueError("Cannot clean up the active document version.")
+            if status["status"] not in {
+                "building",
+                "failed",
+                "inactive",
+                "cleanup_pending",
+            }:
                 raise ValueError("Only recoverable document versions may be cleaned up.")
             chunk_ids = {
                 row["chunk_id"]
@@ -465,6 +535,10 @@ class BM25Store:
     ) -> list[RankedHit]:
         """Search only active chunks, applying document-type filtering before limit."""
 
+        if not self._lexical_available:
+            raise RuntimeError(
+                self._lexical_warning or "SQLite FTS5 lexical search is unavailable."
+            )
         if limit <= 0:
             return []
         match_query = self._match_query(query)
@@ -576,21 +650,30 @@ class BM25Store:
         )
         return [_child_from_row(row) for row in rows]
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         """Return compact manifest and FTS counts for the service façade."""
 
+        fts_rows_sql = (
+            "(SELECT count(*) FROM chunks_fts)"
+            if self._lexical_available
+            else "0"
+        )
         row = self._connection.execute(
-            """
+            f"""
             SELECT
                 (SELECT count(*) FROM documents) AS documents,
                 (SELECT count(*) FROM document_versions WHERE status = 'ready') AS ready_versions,
                 (SELECT count(*) FROM document_versions
                  WHERE status = 'cleanup_pending') AS cleanup_pending_versions,
                 (SELECT count(*) FROM chunks) AS chunks,
-                (SELECT count(*) FROM chunks_fts) AS fts_rows
+                {fts_rows_sql} AS fts_rows
             """
         ).fetchone()
-        return dict(row)
+        return {
+            **dict(row),
+            "lexical_available": self._lexical_available,
+            "lexical_warning": self._lexical_warning,
+        }
 
     def _fts_row(self, document: SourceDocument, chunk: ChildChunk) -> tuple[str, str, str, str, str]:
         metadata = chunk.metadata
@@ -601,6 +684,59 @@ class BM25Store:
             _indexed_text(self._tokenizer, title),
             _indexed_text(self._tokenizer, section_path),
             _indexed_text(self._tokenizer, clause_number),
+            _indexed_text(self._tokenizer, chunk.content),
+            chunk.chunk_id,
+        )
+
+    def _synchronize_fts(self) -> None:
+        """Backfill lexical rows after an index was used in dense-only mode."""
+
+        if not self._lexical_available:
+            return
+        mismatch = self._connection.execute(
+            """
+            SELECT EXISTS(
+                SELECT chunk_id FROM chunks
+                EXCEPT
+                SELECT chunk_id FROM chunks_fts
+            ) OR EXISTS(
+                SELECT chunk_id FROM chunks_fts
+                EXCEPT
+                SELECT chunk_id FROM chunks
+            )
+            """
+        ).fetchone()[0]
+        if not mismatch:
+            return
+        rows = self._connection.execute(
+            """
+            SELECT chunk_id, parent_id, version_id, content, metadata_json, ordinal
+            FROM chunks ORDER BY version_id, ordinal
+            """
+        )
+        chunks = [_child_from_row(row) for row in rows]
+        with self._connection:
+            self._connection.execute("DELETE FROM chunks_fts")
+            self._connection.executemany(
+                """
+                INSERT INTO chunks_fts(
+                    title, section_path, clause_number, bm25_text, chunk_id
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [self._fts_row_from_chunk(chunk) for chunk in chunks],
+            )
+
+    def _fts_row_from_chunk(
+        self, chunk: ChildChunk
+    ) -> tuple[str, str, str, str, str]:
+        metadata = chunk.metadata
+        return (
+            _indexed_text(self._tokenizer, str(metadata.get("title", ""))),
+            _indexed_text(self._tokenizer, str(metadata.get("section_path", ""))),
+            _indexed_text(
+                self._tokenizer, str(metadata.get("clause_no") or "")
+            ),
             _indexed_text(self._tokenizer, chunk.content),
             chunk.chunk_id,
         )
@@ -616,6 +752,16 @@ class BM25Store:
         parents: Sequence[ParentChunk],
         chunks: Sequence[ChildChunk],
     ) -> None:
+        if not document.blocks:
+            raise ValueError("Cannot stage a document version with no extracted blocks.")
+        if not parents:
+            raise ValueError("Cannot stage a document version with no parent chunks.")
+        if not chunks:
+            raise ValueError("Cannot stage a document version with no child chunks.")
+        if any(not parent.content.strip() for parent in parents):
+            raise ValueError("Every staged parent must contain non-empty text.")
+        if any(not chunk.content.strip() for chunk in chunks):
+            raise ValueError("Every staged child must contain non-empty text.")
         parent_ids = {parent.parent_id for parent in parents}
         if len(parent_ids) != len(parents):
             raise ValueError("Parent IDs must be unique within a staged version.")
@@ -635,7 +781,7 @@ class BM25Store:
                 "SELECT chunk_id FROM chunks WHERE version_id = ?", (version_id,)
             )
         ]
-        if chunk_ids:
+        if chunk_ids and self._lexical_available:
             placeholders = ", ".join("?" for _ in chunk_ids)
             self._connection.execute(
                 f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})", chunk_ids

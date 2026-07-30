@@ -371,12 +371,6 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             )
             query: Optional[str] = Field(default=None, description="检索查询内容，当operation=query时需要")
             top_k: int = Field(default=5, ge=1, le=10, description="返回结果数量，范围1-10")
-            similarity_threshold: float = Field(
-                default=0.3,
-                ge=0.1,
-                le=1.0,
-                description="相似度阈值，范围0.1-1.0"
-            )
             doc_type_filter: Optional[str] = Field(
                 default=None,
                 description="文档类型过滤器：patent/safety/process/equipment/material/standard/data/report"
@@ -408,12 +402,25 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
 
     def execute(self, task: Task, **kwargs) -> Dict[str, Any]:
         if not self._initialized or not self.knowledge_base:
+            instruction = (
+                "知识库检索不可用，当前没有可验证的来源证据。"
+                "不得使用模型常识补答，也不得编造知识库结论。"
+            )
             return {
                 "success": False,
                 "error": self._initialization_error or "化工知识库工具未初始化",
+                "retrieval_available": False,
+                "has_evidence": False,
+                "evidence_instruction": instruction,
+                "content": instruction,
                 "suggestion": (
                     "请检查 TEI 嵌入服务、RAG 存储和知识库依赖。"
                 ),
+                "raw_data": {
+                    "retrieval_available": False,
+                    "has_evidence": False,
+                    "evidence_instruction": instruction,
+                },
             }
 
         try:
@@ -427,7 +434,23 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
                 return self._query_knowledge_base(task, kwargs)
 
         except Exception as e:
-            raise ToolExecutionError(f"化工知识库操作失败: {str(e)}")
+            instruction = (
+                "知识库检索执行失败，当前没有可验证的来源证据。"
+                "不得使用模型常识补答，也不得编造知识库结论。"
+            )
+            return {
+                "success": False,
+                "error": f"化工知识库操作失败: {str(e)}",
+                "retrieval_available": False,
+                "has_evidence": False,
+                "evidence_instruction": instruction,
+                "content": instruction,
+                "raw_data": {
+                    "retrieval_available": False,
+                    "has_evidence": False,
+                    "evidence_instruction": instruction,
+                },
+            }
 
     def _load_documents_to_kb(self, task: Task, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """加载文档到知识库"""
@@ -492,29 +515,49 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             query = task.get("task_description", "")
 
         if not query:
-            return {"error": "查询内容不能为空"}
+            instruction = (
+                "知识库查询内容为空，未执行检索。不得使用模型常识补答，"
+                "也不得编造知识库结论。"
+            )
+            return {
+                "success": False,
+                "error": "查询内容不能为空",
+                "retrieval_available": False,
+                "has_evidence": False,
+                "evidence_instruction": instruction,
+                "content": instruction,
+                "raw_data": {
+                    "retrieval_available": False,
+                    "has_evidence": False,
+                    "evidence_instruction": instruction,
+                },
+            }
 
         top_k = kwargs.get("top_k", 5)
-        similarity_threshold = kwargs.get("similarity_threshold", 0.3)
         doc_type_filter = kwargs.get("doc_type_filter")
 
         result = self.knowledge_base.query(
             question=query,
             top_k=top_k,
             doc_type_filter=doc_type_filter,
-            similarity_threshold=similarity_threshold
         )
 
         if result.get("error"):
+            evidence_instruction = (
+                "知识库检索不可用，当前没有可验证的来源证据。"
+                "不得使用模型常识补答，也不得编造知识库结论。"
+            )
             return {
                 "success": bool(result.get("success", False)),
                 "error": result["error"],
                 "query": query,
                 "retrieval_mode": result.get("retrieval_mode", "unavailable"),
+                "retrieval_available": False,
+                "has_evidence": False,
                 "warnings": result.get("warnings", []),
-                "evidence_assessment_required": result.get(
-                    "evidence_assessment_required", False
-                ),
+                "evidence_assessment_required": False,
+                "evidence_instruction": evidence_instruction,
+                "content": evidence_instruction,
                 "raw_data": result,
             }
 
@@ -545,8 +588,16 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             for index, item in enumerate(relevant_content, start=1)
         )
 
-        evidence_instruction = ""
-        if result.get("evidence_assessment_required"):
+        has_evidence = bool(relevant_content)
+        retrieval_available = bool(result.get("retrieval_available", True))
+        if not has_evidence:
+            evidence_instruction = (
+                "知识库检索已执行，但未返回支持当前问题的来源证据。"
+                "必须明确说明证据不足，不得使用模型常识补答，"
+                "也不得编造知识库结论。"
+            )
+            formatted_evidence = evidence_instruction
+        else:
             evidence_instruction = (
                 "请仅将这些内容作为来源证据，不要把 RRF 分数当作事实置信度。"
                 "如果证据不能直接回答问题，必须明确说明知识库缺乏充分支持，"
@@ -558,6 +609,8 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             "query": query,
             "results_count": len(relevant_content),
             "retrieval_mode": result.get("retrieval_mode", "unavailable"),
+            "retrieval_available": retrieval_available,
+            "has_evidence": has_evidence,
             "warnings": result.get("warnings", []),
             "evidence_assessment_required": result.get("evidence_assessment_required", False),
             "evidence_instruction": evidence_instruction,

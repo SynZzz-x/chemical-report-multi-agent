@@ -1,0 +1,33 @@
+"""Operator commands for safe hybrid-RAG index maintenance."""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+from .service import ChemicalRAGService
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Hybrid chemical RAG maintenance")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        help="build a side-by-side index and activate it only after full ingestion",
+    )
+    rebuild_parser.add_argument(
+        "sources",
+        nargs="+",
+        help="source documents to ingest into the replacement index",
+    )
+    args = parser.parse_args()
+
+    if args.command == "rebuild":
+        result = ChemicalRAGService.rebuild(args.sources)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("success") else 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

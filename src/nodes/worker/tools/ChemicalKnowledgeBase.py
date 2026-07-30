@@ -24,9 +24,9 @@ class ChemicalKnowledgeBase:
         question: str,
         top_k: int = 5,
         doc_type_filter: str | None = None,
-        similarity_threshold: float = 0.3,
+        similarity_threshold: float | None = None,
     ) -> dict[str, Any]:
-        """Return retrieval-only evidence and its hybrid diagnostics."""
+        """Return evidence; ``similarity_threshold`` is deprecated for rank-only RRF."""
 
         return self._service.query(
             question,

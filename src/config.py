@@ -124,6 +124,17 @@ def _positive_int_from_env(name: str, default: int) -> int:
     return parsed
 
 
+def _non_negative_int_from_env(name: str, default: int) -> int:
+    value = get_env(name, str(default))
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative integer.") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    return parsed
+
+
 def _positive_float_from_env(name: str, default: float) -> float:
     value = get_env(name, str(default))
     try:
@@ -145,16 +156,19 @@ def get_app_config() -> AppConfig:
     child_max_tokens = _positive_int_from_env(
         "RAG_CHILD_MAX_TOKENS", DEFAULT_CHILD_MAX_TOKENS
     )
+    child_overlap_tokens = _non_negative_int_from_env(
+        "RAG_CHILD_OVERLAP_TOKENS", DEFAULT_CHILD_OVERLAP_TOKENS
+    )
     parent_target_tokens = _positive_int_from_env(
         "RAG_PARENT_TARGET_TOKENS", DEFAULT_PARENT_TARGET_TOKENS
     )
     parent_max_tokens = _positive_int_from_env(
         "RAG_PARENT_MAX_TOKENS", DEFAULT_PARENT_MAX_TOKENS
     )
-    if child_target_tokens > child_max_tokens:
+    if not child_overlap_tokens < child_target_tokens < child_max_tokens:
         raise ValueError(
-            "RAG_CHILD_TARGET_TOKENS must be less than or equal to "
-            "RAG_CHILD_MAX_TOKENS."
+            "RAG chunk settings must satisfy 0 <= RAG_CHILD_OVERLAP_TOKENS "
+            "< RAG_CHILD_TARGET_TOKENS < RAG_CHILD_MAX_TOKENS."
         )
     if parent_target_tokens > parent_max_tokens:
         raise ValueError(
@@ -194,9 +208,7 @@ def get_app_config() -> AppConfig:
             ),
             child_target_tokens=child_target_tokens,
             child_max_tokens=child_max_tokens,
-            child_overlap_tokens=_positive_int_from_env(
-                "RAG_CHILD_OVERLAP_TOKENS", DEFAULT_CHILD_OVERLAP_TOKENS
-            ),
+            child_overlap_tokens=child_overlap_tokens,
             parent_target_tokens=parent_target_tokens,
             parent_max_tokens=parent_max_tokens,
             bm25_top_k=_positive_int_from_env(

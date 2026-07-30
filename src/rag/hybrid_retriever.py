@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from src.config import RAGSettings, get_rag_settings
@@ -78,12 +79,15 @@ class HybridRetriever:
         if not isinstance(question, str) or not question.strip():
             return self._error_result(question, ["query: question must be a non-empty string."])
         if top_k is not None and top_k <= 0:
-            return self._empty_result(question, "unavailable", ["query: top_k must be positive."])
-        # Kept in the public signature for worker compatibility. RRF is rank-only,
-        # so a raw dense similarity cannot decide whether evidence is sufficient.
-        _ = similarity_threshold
-
+            return self._error_result(
+                question, ["query: top_k must be positive."]
+            )
         state = _QueryState(warnings=list(self._startup_warnings))
+        if similarity_threshold is not None:
+            state.warnings.append(
+                "query: similarity_threshold is deprecated and ignored because "
+                "rank-only RRF scores are not calibrated similarities."
+            )
         bm25_hits, bm25_available = self._bm25_hits(question, doc_type_filter, state)
         dense_hits, dense_available = self._dense_hits(question, doc_type_filter, state)
         retrieval_mode = _retrieval_mode(bm25_available, dense_available)
@@ -111,7 +115,16 @@ class HybridRetriever:
             "retrieval_mode": retrieval_mode,
             "total_results": len(results),
             "warnings": state.warnings,
+            "retrieval_available": True,
+            "has_evidence": bool(results),
             "evidence_assessment_required": bool(results),
+            "evidence_instruction": (
+                "Use only the returned source evidence. If it does not directly "
+                "support the answer, state that the knowledge base is insufficient."
+                if results
+                else "No supporting evidence was retrieved. Do not answer from "
+                "general knowledge or invent knowledge-base conclusions."
+            ),
             "results": results,
         }
 
@@ -120,6 +133,14 @@ class HybridRetriever:
     ) -> tuple[list[RankedHit], bool]:
         if self._bm25_store is None:
             state.warnings.append("bm25: backend is unavailable.")
+            return [], False
+        if not self._bm25_store.lexical_available:
+            warning = "bm25: " + (
+                self._bm25_store.lexical_warning
+                or "SQLite FTS5 lexical search is unavailable."
+            )
+            if warning not in state.warnings:
+                state.warnings.append(warning)
             return [], False
         try:
             return (
@@ -275,38 +296,60 @@ class HybridRetriever:
             state.warn("manifest", exc)
             return "", []
         siblings = [chunk for chunk in siblings if chunk.parent_id == parent.parent_id]
-        by_id = {chunk.chunk_id: chunk for chunk in siblings}
-        selected_order = [item.chunk_id for item in matches if item.chunk_id in by_id]
-        parts: list[str] = []
-        included_matches: list[_FusedHit] = []
-        matches_by_id = {item.chunk_id: item for item in matches}
-        for chunk_id in selected_order:
-            chunk = by_id[chunk_id]
-            candidate = _join_content([*rendered_contents, *parts, chunk.content])
+        selected_indexes = {
+            index
+            for index, sibling in enumerate(siblings)
+            if sibling.chunk_id in selected_ids
+        }
+        candidate_indexes = set(selected_indexes)
+        for index in selected_indexes:
+            if index:
+                candidate_indexes.add(index - 1)
+            if index + 1 < len(siblings):
+                candidate_indexes.add(index + 1)
+        ordered_candidates = [
+            siblings[index] for index in sorted(candidate_indexes)
+        ]
+
+        content = _collapse_ordered_chunks(ordered_candidates)
+        if (
+            content
+            and self._count_tokens(
+                _join_content([*rendered_contents, content]), state
+            )
+            <= self._settings.max_context_tokens
+        ):
+            return content, matches
+
+        ordered_matches = [
+            sibling for sibling in siblings if sibling.chunk_id in selected_ids
+        ]
+        content = _collapse_ordered_chunks(ordered_matches)
+        if (
+            content
+            and self._count_tokens(
+                _join_content([*rendered_contents, content]), state
+            )
+            <= self._settings.max_context_tokens
+        ):
+            return content, matches
+
+        included_ids: set[str] = set()
+        included_chunks: list[ChildChunk] = []
+        content = ""
+        for chunk in ordered_matches:
+            trial_chunks = [*included_chunks, chunk]
+            trial_content = _collapse_ordered_chunks(trial_chunks)
+            candidate = _join_content([*rendered_contents, trial_content])
             if self._count_tokens(candidate, state) > self._settings.max_context_tokens:
                 continue
-            parts.append(chunk.content)
-            included_matches.append(matches_by_id[chunk_id])
-
-        if not included_matches:
-            return "", []
-
-        ordered_ids: list[str] = []
-        for index, sibling in enumerate(siblings):
-            if sibling.chunk_id not in {item.chunk_id for item in included_matches}:
-                continue
-            for neighbor in (siblings[index - 1] if index else None, siblings[index + 1] if index + 1 < len(siblings) else None):
-                if neighbor is not None and neighbor.parent_id == parent.parent_id:
-                    ordered_ids.append(neighbor.chunk_id)
-        for chunk_id in dict.fromkeys(ordered_ids):
-            if chunk_id in selected_ids:
-                continue
-            chunk = by_id[chunk_id]
-            candidate = _join_content([*rendered_contents, *parts, chunk.content])
-            if self._count_tokens(candidate, state) > self._settings.max_context_tokens:
-                continue
-            parts.append(chunk.content)
-        return _join_content(parts), included_matches
+            included_chunks = trial_chunks
+            included_ids.add(chunk.chunk_id)
+            content = trial_content
+        included_matches = [
+            item for item in matches if item.chunk_id in included_ids
+        ]
+        return content, included_matches
 
     def _count_tokens(self, text: str, state: _QueryState) -> int:
         if state.tei_degraded:
@@ -355,7 +398,13 @@ class HybridRetriever:
             "retrieval_mode": mode,
             "total_results": 0,
             "warnings": warnings,
+            "retrieval_available": mode != "unavailable",
+            "has_evidence": False,
             "evidence_assessment_required": False,
+            "evidence_instruction": (
+                "No supporting evidence was retrieved. Do not answer from general "
+                "knowledge or invent knowledge-base conclusions."
+            ),
             "results": [],
         }
 
@@ -369,7 +418,13 @@ class HybridRetriever:
             "retrieval_mode": mode,
             "total_results": 0,
             "warnings": warnings,
+            "retrieval_available": False,
+            "has_evidence": False,
             "evidence_assessment_required": False,
+            "evidence_instruction": (
+                "Knowledge-base retrieval is unavailable. Do not answer from general "
+                "knowledge or invent knowledge-base conclusions."
+            ),
             "results": [],
             "error": "No retrieval backend is available.",
         }
@@ -395,6 +450,60 @@ def _join_content(parts: Iterable[str]) -> str:
     """Join exactly as evidence is rendered so separator tokens are budgeted."""
 
     return "\n\n".join(part for part in parts if part)
+
+
+def _collapse_ordered_chunks(chunks: Iterable[ChildChunk]) -> str:
+    """Render canonical ordinal order while removing adjacent copied overlap."""
+
+    parts: list[str] = []
+    previous = ""
+    for chunk in sorted(chunks, key=lambda item: (item.ordinal, item.chunk_id)):
+        content = chunk.content.strip()
+        if not content:
+            continue
+        piece = _strip_adjacent_overlap(previous, content)
+        if piece:
+            parts.append(piece)
+        previous = content
+    return _join_content(parts)
+
+
+def _strip_adjacent_overlap(previous: str, current: str) -> str:
+    if not previous:
+        return current
+    previous_normalized = _normalized_overlap_text(previous)
+    current_normalized = _normalized_overlap_text(current)
+    if not current_normalized:
+        return ""
+    if current_normalized in previous_normalized:
+        return ""
+    if _overlap_signature(current_normalized) == _overlap_signature(
+        previous_normalized
+    ):
+        return ""
+
+    previous_lines = [line.strip() for line in previous.splitlines() if line.strip()]
+    current_lines = [line.strip() for line in current.splitlines() if line.strip()]
+    max_lines = min(len(previous_lines), len(current_lines))
+    for size in range(max_lines, 0, -1):
+        if previous_lines[-size:] == current_lines[:size]:
+            return "\n".join(current_lines[size:]).strip()
+
+    max_overlap = min(len(previous), len(current))
+    for size in range(max_overlap, 23, -1):
+        if previous[-size:] == current[:size]:
+            return current[size:].lstrip()
+    return current
+
+
+def _normalized_overlap_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _overlap_signature(text: str) -> str:
+    """Ignore formatting only; preserve every chemical word, number, and unit."""
+
+    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE).casefold()
 
 
 def _sanitize_exception(exc: BaseException) -> str:

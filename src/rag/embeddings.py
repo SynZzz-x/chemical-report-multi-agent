@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import requests
@@ -53,17 +54,23 @@ class TEIEmbeddings:
     def count_tokens(self, text: str) -> int:
         """Return the TEI model's token count for ``text``."""
 
+        return self.count_tokens_batch([text])[0]
+
+    def count_tokens_batch(self, texts: Sequence[str]) -> list[int]:
+        """Return one token count per input using a single TEI request."""
+
+        inputs = list(texts)
+        if not inputs:
+            return []
+        if any(not isinstance(text, str) for text in inputs):
+            raise TypeError("TEI tokenization inputs must all be strings.")
         response = self._session.post(
             f"{self._base_url}/tokenize",
-            json={"inputs": text},
+            json={"inputs": inputs},
             timeout=self._settings.embedding_timeout_seconds,
         )
         response.raise_for_status()
-        payload = response.json()
-        tokens = payload.get("tokens") if isinstance(payload, dict) else payload
-        if not isinstance(tokens, list):
-            raise ValueError("TEI /tokenize response must be a token list.")
-        return len(tokens)
+        return _parse_token_counts(response.json(), len(inputs))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents without adding a retrieval instruction."""
@@ -114,3 +121,37 @@ class TEIEmbeddings:
             return [float(value) for value in vector]
         except (TypeError, ValueError) as exc:
             raise ValueError("TEI embedding values must be numeric.") from exc
+
+
+def _parse_token_counts(payload: Any, expected: int) -> list[int]:
+    """Accept TEI token arrays while preserving one result per batch input."""
+
+    rows = payload.get("tokens") if isinstance(payload, dict) else payload
+    if isinstance(payload, dict) and "results" in payload:
+        rows = payload["results"]
+    if expected == 1 and isinstance(rows, list):
+        if len(rows) == 1:
+            nested = _token_list(rows[0])
+            if nested is not None:
+                return [len(nested)]
+        return [len(rows)]
+    if not isinstance(rows, list) or len(rows) != expected:
+        raise ValueError(
+            "TEI /tokenize must return exactly one token list per input."
+        )
+    counts: list[int] = []
+    for row in rows:
+        tokens = _token_list(row)
+        if tokens is None:
+            raise ValueError("Each TEI /tokenize batch row must contain a token list.")
+        counts.append(len(tokens))
+    return counts
+
+
+def _token_list(row: Any) -> list[Any] | None:
+    if isinstance(row, list):
+        return row
+    if isinstance(row, dict):
+        tokens = row.get("tokens")
+        return tokens if isinstance(tokens, list) else None
+    return None

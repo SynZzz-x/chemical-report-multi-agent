@@ -279,17 +279,20 @@ chunks_fts USING fts5(title, section_path, clause_number, bm25_text, chunk_id UN
 rag_index_meta(key PRIMARY KEY, value)
 ```
 
-Fail with an actionable error if FTS5 table creation is unsupported. Validate
-the complete index fingerprint before opening existing data.
+Create the ordinary manifest tables even if FTS5 is unsupported. In that case,
+disable only lexical reads/writes, report dense-only degradation, and retain
+active filtering plus parent expansion. Validate the complete index fingerprint
+before opening existing data.
 
 - [ ] **Step 2: Implement staged version activation**
 
-`begin_version()` writes a `building` version plus parents, chunks, and FTS rows
-in one transaction without changing the active version. `activate_version()`
-performs only the `ready` status and active-version switch in a second
-transaction. Add incomplete-version discovery and cleanup interfaces. Return
-the prior version ID and its chunk IDs so Chroma cleanup occurs after
-activation.
+`begin_version()` writes a non-empty `building` version plus parents, chunks,
+and available FTS rows in one transaction without changing the active version.
+`activate_version()` performs the `ready` status and active-version switch in a
+second transaction while atomically marking the prior version
+`cleanup_pending`. Add idempotent incomplete/pending discovery and cleanup
+interfaces. Return the prior version ID and its chunk IDs so Chroma cleanup
+occurs after activation.
 
 - [ ] **Step 3: Implement BM25 retrieval and context lookup**
 
@@ -305,7 +308,7 @@ hits. Apply `doc_type` filtering before the final result limit.
 Use `chromadb.PersistentClient` directly, with collection:
 
 ```text
-chemical_documents_v3_qwen3_1024_cosine
+chemical_documents_<fingerprint-generation>
 ```
 
 Upsert explicit IDs, documents, compact metadata, and precomputed embeddings.
@@ -479,6 +482,8 @@ README must include:
 - BM25-only/dense-only query degradation;
 - startup cleanup for incomplete versions and the requirement to rebuild after
   an index-fingerprint change;
+- the exact `python -m src.rag.cli rebuild <sources...>` side-by-side rebuild
+  command, archived old-index path, and rollback sequence;
 - retrieval-only Worker responsibility.
 
 - [ ] **Step 5: Full static verification**

@@ -324,13 +324,15 @@ Ingestion follows a staged document-version flow:
    parents, chunks, and FTS rows without changing `active_version_id`.
 4. Batch-generate vectors and upsert them to the versioned Chroma collection.
 5. In a second SQLite transaction, mark the version `ready`, atomically switch
-   `documents.active_version_id`, and mark the previous version inactive.
-6. Attempt to remove prior-version vectors after activation.
+   `documents.active_version_id`, and mark the previous version
+   `cleanup_pending`.
+6. Remove prior-version vectors and then delete its retired manifest rows.
 
 If Chroma writing fails, the new version is marked failed and its vector IDs are
 removed. The previous active version remains queryable. Startup recovery scans
-`building` and `failed` versions, removes their Chroma vectors, and either
-deletes incomplete rows or retains compact failure metadata for diagnostics.
+`building`, `failed`, and non-active `cleanup_pending` versions, removes their
+Chroma vectors idempotently, and deletes their manifest rows only after vector
+retirement succeeds.
 Dense candidates are accepted only when their `chunk_id` belongs to an active
 SQLite version, so orphaned or stale vectors cannot reach the Worker.
 
@@ -429,9 +431,12 @@ RRF score as factual confidence.
    reused because its vectors and chunk boundaries are incompatible.
 5. Query through the existing Worker tool.
 
-The application will expose a rebuild operation in the knowledge-base service
-or its existing manual entry point. Rebuild creates the new versioned
-collection before old data is retired.
+`python -m src.rag.cli rebuild <source> [<source> ...]` invokes the service
+rebuild operation. It creates a fingerprint-derived Chroma collection in a
+side-by-side staging directory, fully ingests the supplied source set, and only
+then switches the active storage directory. The former active directory is
+archived intact and its exact path is returned for rollback; failed staging
+never changes the active index.
 
 ## Files in Scope
 

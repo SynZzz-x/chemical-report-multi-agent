@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Any, Iterable
 import unicodedata
 
 from src.config import (
@@ -44,6 +44,8 @@ _SENTENCE_RE = re.compile(r"(?<=[。！？!?；;])\s*|(?<=[.])(?=\s+[A-Z0-9])")
 _UNIT_RE = re.compile(r"(?:\(([^()]+)\)|\[([^\[\]]+)\]|/\s*([%A-Za-z°μµ][\w/%°μµ·^\-]*)$)")
 _DATE_COLUMN_RE = re.compile(r"date|time|日期|时间|年月|批次", re.I)
 TABLE_CONTEXT_MAX_TOKENS = 180
+MIN_USEFUL_CHILD_TOKENS = 120
+TOKEN_BOUNDARY_PROBES = 8
 
 
 def _normalized_text(text: str) -> str:
@@ -434,6 +436,7 @@ class _SectionDraft:
 class _ChildUnit:
     text: str
     is_table: bool = False
+    is_complete: bool = False
 
 
 class StructureAwareChunker:
@@ -450,10 +453,16 @@ class StructureAwareChunker:
             or rag_settings.child_target_tokens <= 0
         ):
             raise ValueError("Chunk token targets must be positive integers.")
-        if rag_settings.child_max_tokens < rag_settings.child_target_tokens:
-            raise ValueError("child_max_tokens must be at least child_target_tokens.")
-        if rag_settings.child_overlap_tokens < 0:
-            raise ValueError("child_overlap_tokens cannot be negative.")
+        if rag_settings.child_max_tokens <= rag_settings.child_target_tokens:
+            raise ValueError("child_max_tokens must be greater than child_target_tokens.")
+        if not (
+            0
+            <= rag_settings.child_overlap_tokens
+            < rag_settings.child_target_tokens
+        ):
+            raise ValueError(
+                "child_overlap_tokens must satisfy 0 <= overlap < child_target_tokens."
+            )
         if rag_settings.parent_max_tokens < rag_settings.parent_target_tokens:
             raise ValueError("parent_max_tokens must be at least parent_target_tokens.")
         self._tokenizer = tokenizer
@@ -462,16 +471,35 @@ class StructureAwareChunker:
         self._child_target = rag_settings.child_target_tokens
         self._child_max = rag_settings.child_max_tokens
         self._child_overlap = rag_settings.child_overlap_tokens
+        self._document_token_counts: dict[str, int] = {}
 
     def chunk(self, document: SourceDocument) -> tuple[list[ParentChunk], list[ChildChunk]]:
-        drafts = self._build_parents(document)
-        parents = [draft.chunk for draft in drafts]
-        children = [
-            child
-            for draft in drafts
-            for child in self._build_children(document, draft)
-        ]
-        return parents, children
+        self._document_token_counts = {}
+        try:
+            initial_texts = [block.text for block in document.blocks if block.text]
+            initial_texts.extend(
+                sentence.strip()
+                for block in document.blocks
+                for sentence in _SENTENCE_RE.split(block.text)
+                if sentence.strip()
+            )
+            self._tokens_many(initial_texts)
+            drafts = self._build_parents(document)
+            parents = [draft.chunk for draft in drafts]
+            children = [
+                child
+                for draft in drafts
+                for child in self._build_children(document, draft)
+            ]
+            parent_counts = self._tokens_many([parent.content for parent in parents])
+            child_counts = self._tokens_many([child.content for child in children])
+            if any(count > self._parent_max for count in parent_counts):
+                raise ValueError("Batched parent assembly exceeded parent_max_tokens.")
+            if any(count > self._child_max for count in child_counts):
+                raise ValueError("Batched child assembly exceeded child_max_tokens.")
+            return parents, children
+        finally:
+            self._document_token_counts = {}
 
     def _build_parents(self, document: SourceDocument) -> list[_ParentDraft]:
         parents: list[_ParentDraft] = []
@@ -520,16 +548,30 @@ class StructureAwareChunker:
     def _build_section_parents(
         self, document: SourceDocument, section: _SectionDraft
     ) -> list[_ParentDraft]:
+        fragments = [
+            fragment
+            for block in section.blocks
+            for fragment in self._split_block_for_parent(block, section.table_title)
+        ]
+        fragment_counts = self._tokens_many(
+            [self._parent_content([fragment]) for fragment in fragments]
+        )
         groups: list[list[StructuralBlock]] = []
         current: list[StructuralBlock] = []
-        for block in section.blocks:
-            for fragment in self._split_block_for_parent(block, section.table_title):
-                candidate = [*current, fragment]
-                if current and self._tokens(self._parent_content(candidate)) > self._parent_target:
-                    groups.append(current)
-                    current = [fragment]
-                else:
-                    current.append(fragment)
+        current_tokens = 0
+        for fragment, fragment_tokens in zip(fragments, fragment_counts):
+            separator_tokens = 1 if current else 0
+            if (
+                current
+                and current_tokens + separator_tokens + fragment_tokens
+                > self._parent_target
+            ):
+                groups.append(current)
+                current = []
+                current_tokens = 0
+                separator_tokens = 0
+            current.append(fragment)
+            current_tokens += separator_tokens + fragment_tokens
         if current:
             groups.append(current)
 
@@ -608,15 +650,18 @@ class StructureAwareChunker:
     ) -> list[StructuralBlock]:
         fragments: list[StructuralBlock] = []
         current: list[str] = []
-        for sentence in sentences:
-            candidate = " ".join([*current, sentence]).strip()
-            if current and self._tokens(candidate) > self._parent_max:
+        current_tokens = 0
+        sentence_counts = self._tokens_many(sentences)
+        for sentence, sentence_tokens in zip(sentences, sentence_counts):
+            if current and current_tokens + 1 + sentence_tokens > self._parent_max:
                 fragments.append(self._copy_block(block, " ".join(current)))
                 current = []
-            if self._tokens(sentence) > self._parent_max:
+                current_tokens = 0
+            if sentence_tokens > self._parent_max:
                 fragments.extend(self._hard_prefix_parent_fragments(block, sentence))
             else:
                 current.append(sentence)
+                current_tokens += (1 if current_tokens else 0) + sentence_tokens
         if current:
             fragments.append(self._copy_block(block, " ".join(current)))
         return fragments
@@ -647,15 +692,20 @@ class StructureAwareChunker:
 
         fragments: list[StructuralBlock] = []
         current: list[str] = []
-        for row in rows:
-            candidate = self._table_parent_text(context, [*current, row])
-            if current and self._tokens(candidate) > self._parent_max:
+        base_text = self._table_parent_text(context, [])
+        single_texts = [self._table_parent_text(context, [row]) for row in rows]
+        counts = self._tokens_many([base_text, *single_texts])
+        base_tokens = counts[0]
+        current_tokens = base_tokens
+        for row, single_tokens in zip(rows, counts[1:]):
+            incremental_tokens = max(1, single_tokens - base_tokens) + 2
+            if current and current_tokens + incremental_tokens > self._parent_max:
                 fragments.append(
                     self._copy_block(block, self._table_parent_text(context, current))
                 )
                 current = []
-            single_row = self._table_parent_text(context, [row])
-            if self._tokens(single_row) > self._parent_max:
+                current_tokens = base_tokens
+            if single_tokens > self._parent_max:
                 fragments.extend(
                     self._copy_block(block, text)
                     for text in self._split_table_row_texts(
@@ -664,6 +714,7 @@ class StructureAwareChunker:
                 )
             else:
                 current.append(row)
+                current_tokens += incremental_tokens
         if current:
             fragments.append(self._copy_block(block, self._table_parent_text(context, current)))
         return fragments
@@ -786,17 +837,21 @@ class StructureAwareChunker:
                 for index, (component_key, _, _) in enumerate(components)
                 if component_key == key
             )
-            low, high, best = 1, len(values[index]), 0
-            while low <= high:
-                midpoint = (low + high) // 2
+            original_value = values[index]
+
+            def render_candidate(part: str) -> str:
                 candidate_values = list(values)
-                candidate_values[index] = values[index][:midpoint].rstrip()
-                if self._tokens(render(candidate_values, True)) <= TABLE_CONTEXT_MAX_TOKENS:
-                    best = midpoint
-                    low = midpoint + 1
-                else:
-                    high = midpoint - 1
-            values[index] = values[index][:best].rstrip() if best else minimums[index]
+                candidate_values[index] = part.rstrip()
+                return render(candidate_values, True)
+
+            best = self._largest_rendered_prefix_within_limit(
+                original_value,
+                TABLE_CONTEXT_MAX_TOKENS,
+                render_candidate,
+            )
+            values[index] = (
+                original_value[:best].rstrip() if best else minimums[index]
+            )
         compact = render(values, True)
         if self._tokens(compact) > TABLE_CONTEXT_MAX_TOKENS:
             raise ValueError("Table identity labels exceed the compact context token limit.")
@@ -815,17 +870,33 @@ class StructureAwareChunker:
             fields = ["(无列信息)"]
 
         fragments: list[str] = []
-        current: list[str] = []
-        for field in fields:
-            for field_fragment in self._split_table_context_field(
+        self._tokens_many(
+            [self._table_context_text(prefix, [field]) for field in fields]
+        )
+        field_fragments = [
+            fragment
+            for field in fields
+            for fragment in self._split_table_context_field(
                 prefix, field, token_limit
-            ):
-                candidate = self._table_context_text(prefix, [*current, field_fragment])
-                if current and self._tokens(candidate) > token_limit:
-                    fragments.append(self._table_context_text(prefix, current))
-                    current = [field_fragment]
-                else:
-                    current.append(field_fragment)
+            )
+        ]
+        base_text = self._table_context_text(prefix, [])
+        single_texts = [
+            self._table_context_text(prefix, [fragment])
+            for fragment in field_fragments
+        ]
+        counts = self._tokens_many([base_text, *single_texts])
+        base_tokens = counts[0]
+        current: list[str] = []
+        current_tokens = base_tokens
+        for field_fragment, single_tokens in zip(field_fragments, counts[1:]):
+            incremental_tokens = max(1, single_tokens - base_tokens) + 2
+            if current and current_tokens + incremental_tokens > token_limit:
+                fragments.append(self._table_context_text(prefix, current))
+                current = []
+                current_tokens = base_tokens
+            current.append(field_fragment)
+            current_tokens += incremental_tokens
         if current:
             fragments.append(self._table_context_text(prefix, current))
         return fragments
@@ -865,13 +936,30 @@ class StructureAwareChunker:
         if cells:
             fragments: list[str] = []
             current: list[str] = []
-            for cell in cells:
-                row = self._format_table_row([*current, cell], row_delimiter)
-                if current and self._tokens(self._table_context_text(prefix, [row])) > token_limit:
+            base_text = self._table_context_text(prefix, [])
+            single_rows = [
+                self._format_table_row([cell], row_delimiter) for cell in cells
+            ]
+            counts = self._tokens_many(
+                [
+                    base_text,
+                    *[
+                        self._table_context_text(prefix, [row])
+                        for row in single_rows
+                    ],
+                ]
+            )
+            base_tokens = counts[0]
+            current_tokens = base_tokens
+            for cell, single, single_tokens in zip(
+                cells, single_rows, counts[1:]
+            ):
+                incremental_tokens = max(1, single_tokens - base_tokens) + 2
+                if current and current_tokens + incremental_tokens > token_limit:
                     fragments.append(self._format_table_row(current, row_delimiter))
                     current = []
-                single = self._format_table_row([cell], row_delimiter)
-                if self._tokens(self._table_context_text(prefix, [single])) > token_limit:
+                    current_tokens = base_tokens
+                if single_tokens > token_limit:
                     fragments.extend(
                         self._split_table_context_field(
                             prefix, cell, token_limit, row_delimiter
@@ -879,6 +967,7 @@ class StructureAwareChunker:
                     )
                 else:
                     current.append(cell)
+                    current_tokens += incremental_tokens
             if current:
                 fragments.append(self._format_table_row(current, row_delimiter))
             return fragments
@@ -891,19 +980,27 @@ class StructureAwareChunker:
         if len(sentences) > 1:
             fragments = []
             current = []
-            for sentence in sentences:
-                candidate_field = " ".join([*current, sentence]).strip()
-                if current and self._tokens(
-                    self._table_context_text(prefix, [candidate_field])
-                ) > token_limit:
+            base_text = self._table_context_text(prefix, [])
+            single_texts = [
+                self._table_context_text(prefix, [sentence])
+                for sentence in sentences
+            ]
+            counts = self._tokens_many([base_text, *single_texts])
+            base_tokens = counts[0]
+            current_tokens = base_tokens
+            for sentence, single_tokens in zip(sentences, counts[1:]):
+                incremental_tokens = max(1, single_tokens - base_tokens) + 2
+                if current and current_tokens + incremental_tokens > token_limit:
                     fragments.append(" ".join(current))
                     current = []
-                if self._tokens(self._table_context_text(prefix, [sentence])) > token_limit:
+                    current_tokens = base_tokens
+                if single_tokens > token_limit:
                     fragments.extend(
                         self._split_table_context_field(prefix, sentence, token_limit, "")
                     )
                 else:
                     current.append(sentence)
+                    current_tokens += incremental_tokens
             if current:
                 fragments.append(" ".join(current))
             return fragments
@@ -927,16 +1024,11 @@ class StructureAwareChunker:
     def _largest_table_context_prefix(
         self, prefix: str, value: str, token_limit: int
     ) -> int:
-        low, high, best = 1, len(value), 0
-        while low <= high:
-            midpoint = (low + high) // 2
-            candidate = self._table_context_text(prefix, [value[:midpoint]])
-            if self._tokens(candidate) <= token_limit:
-                best = midpoint
-                low = midpoint + 1
-            else:
-                high = midpoint - 1
-        return best
+        return self._largest_rendered_prefix_within_limit(
+            value,
+            token_limit,
+            lambda part: self._table_context_text(prefix, [part]),
+        )
 
     def _split_table_row_texts(
         self, context: str, row: str, token_limit: int
@@ -947,26 +1039,33 @@ class StructureAwareChunker:
 
         fragments: list[str] = []
         current: list[str] = []
-        for cell in cells:
-            candidate = self._table_parent_text(
-                context, [self._format_table_row([*current, cell], delimiter)]
+        base_text = self._table_parent_text(context, [])
+        single_texts = [
+            self._table_parent_text(
+                context, [self._format_table_row([cell], delimiter)]
             )
-            if current and self._tokens(candidate) > token_limit:
+            for cell in cells
+        ]
+        counts = self._tokens_many([base_text, *single_texts])
+        base_tokens = counts[0]
+        current_tokens = base_tokens
+        for cell, single_tokens in zip(cells, counts[1:]):
+            incremental_tokens = max(1, single_tokens - base_tokens) + 2
+            if current and current_tokens + incremental_tokens > token_limit:
                 fragments.append(
                     self._table_parent_text(
                         context, [self._format_table_row(current, delimiter)]
                     )
                 )
                 current = []
-            single_cell = self._table_parent_text(
-                context, [self._format_table_row([cell], delimiter)]
-            )
-            if self._tokens(single_cell) > token_limit:
+                current_tokens = base_tokens
+            if single_tokens > token_limit:
                 fragments.extend(
                     self._split_table_cell_texts(context, cell, delimiter, token_limit)
                 )
             else:
                 current.append(cell)
+                current_tokens += incremental_tokens
         if current:
             fragments.append(
                 self._table_parent_text(context, [self._format_table_row(current, delimiter)])
@@ -1000,27 +1099,34 @@ class StructureAwareChunker:
         ]
         fragments: list[str] = []
         current: list[str] = []
-        for sentence in sentences or [cell]:
-            candidate_cell = " ".join([*current, sentence]).strip()
-            candidate = self._table_parent_text(
-                context, [self._format_table_row([candidate_cell], delimiter)]
+        sentence_units = sentences or [cell]
+        base_text = self._table_parent_text(context, [])
+        single_texts = [
+            self._table_parent_text(
+                context, [self._format_table_row([sentence], delimiter)]
             )
-            if current and self._tokens(candidate) > token_limit:
+            for sentence in sentence_units
+        ]
+        counts = self._tokens_many([base_text, *single_texts])
+        base_tokens = counts[0]
+        current_tokens = base_tokens
+        for sentence, single_tokens in zip(sentence_units, counts[1:]):
+            incremental_tokens = max(1, single_tokens - base_tokens) + 2
+            if current and current_tokens + incremental_tokens > token_limit:
                 fragments.append(
                     self._table_parent_text(
                         context, [self._format_table_row([" ".join(current)], delimiter)]
                     )
                 )
                 current = []
-            single = self._table_parent_text(
-                context, [self._format_table_row([sentence], delimiter)]
-            )
-            if self._tokens(single) > token_limit:
+                current_tokens = base_tokens
+            if single_tokens > token_limit:
                 fragments.extend(
                     self._hard_split_table_cell(context, sentence, delimiter, token_limit)
                 )
             else:
                 current.append(sentence)
+                current_tokens += incremental_tokens
         if current:
             fragments.append(
                 self._table_parent_text(
@@ -1053,18 +1159,13 @@ class StructureAwareChunker:
     def _largest_table_value_prefix(
         self, context: str, value: str, delimiter: str, token_limit: int
     ) -> int:
-        low, high, best = 1, len(value), 0
-        while low <= high:
-            midpoint = (low + high) // 2
-            candidate = self._table_parent_text(
-                context, [self._format_table_row([value[:midpoint]], delimiter)]
-            )
-            if self._tokens(candidate) <= token_limit:
-                best = midpoint
-                low = midpoint + 1
-            else:
-                high = midpoint - 1
-        return best
+        return self._largest_rendered_prefix_within_limit(
+            value,
+            token_limit,
+            lambda part: self._table_parent_text(
+                context, [self._format_table_row([part], delimiter)]
+            ),
+        )
 
     @staticmethod
     def _copy_block(block: StructuralBlock, text: str) -> StructuralBlock:
@@ -1089,17 +1190,22 @@ class StructureAwareChunker:
             if block.block_type == "table_title" or _TABLE_TITLE_RE.match(block.text):
                 nearest_table_title = block.text
             units.extend(self._units_from_block(block, nearest_table_title))
+        self._tokens_many([unit.text for unit in units])
+        pieces = [piece for unit in units for piece in self._split_unit(unit)]
+        piece_counts = self._tokens_many([piece.text for piece in pieces])
         child_units: list[list[_ChildUnit]] = []
         current: list[_ChildUnit] = []
-        for unit in units:
-            for piece in self._split_unit(unit):
-                candidate = [*current, piece]
-                if current and self._tokens(self._join_units(candidate)) > self._child_target:
-                    child_units.append(current)
-                    current = self._overlap_units(current, piece)
-                current.append(piece)
+        current_tokens = 0
+        for piece, piece_tokens in zip(pieces, piece_counts):
+            if current and current_tokens + 1 + piece_tokens > self._child_target:
+                child_units.append(current)
+                current = self._overlap_units(current, piece)
+                current_tokens = self._tokens(self._join_units(current)) if current else 0
+            current.append(piece)
+            current_tokens += (1 if current_tokens else 0) + piece_tokens
         if current:
             child_units.append(current)
+        child_units = self._rebalance_small_tail(child_units)
 
         chunks: list[ChildChunk] = []
         for ordinal, units_for_child in enumerate(child_units):
@@ -1139,7 +1245,7 @@ class StructureAwareChunker:
             return self._table_units(block.text, title)
         if block.block_type in {"clause", "claim", "list_item", "process_step"}:
             if self._tokens(block.text) <= self._child_max:
-                return [_ChildUnit(block.text)]
+                return [_ChildUnit(block.text, is_complete=True)]
         sentences = [part.strip() for part in _SENTENCE_RE.split(block.text) if part.strip()]
         return [_ChildUnit(sentence) for sentence in sentences] or [_ChildUnit(block.text)]
 
@@ -1150,8 +1256,15 @@ class StructureAwareChunker:
         else:
             context, data_rows = labeled
         if not data_rows:
-            return [_ChildUnit(context, is_table=True)]
-        return [_ChildUnit(self._table_parent_text(context, [row]), is_table=True) for row in data_rows]
+            return [_ChildUnit(context, is_table=True, is_complete=True)]
+        return [
+            _ChildUnit(
+                self._table_parent_text(context, [row]),
+                is_table=True,
+                is_complete=True,
+            )
+            for row in data_rows
+        ]
 
     @staticmethod
     def _labeled_table_context(text: str) -> tuple[str, list[str]] | None:
@@ -1185,10 +1298,13 @@ class StructureAwareChunker:
                             texts = self._split_table_payload_texts(
                                 context, row.removeprefix("详情：").strip(), self._child_max
                             )
-                        fragments.extend(_ChildUnit(text, is_table=True) for text in texts)
+                        fragments.extend(
+                            _ChildUnit(text, is_table=True, is_complete=True)
+                            for text in texts
+                        )
                     return fragments
                 return [
-                    _ChildUnit(text, is_table=True)
+                    _ChildUnit(text, is_table=True, is_complete=True)
                     for text in self._split_table_context_texts(context, self._child_max)
                 ]
         pieces: list[_ChildUnit] = []
@@ -1198,20 +1314,61 @@ class StructureAwareChunker:
             if end <= 0:
                 raise ValueError("Tokenizer cannot fit a single character in a child chunk.")
             split_at = self._preferred_split(remaining, end)
-            pieces.append(_ChildUnit(remaining[:split_at].strip(), unit.is_table))
+            pieces.append(
+                _ChildUnit(
+                    remaining[:split_at].strip(),
+                    unit.is_table,
+                    unit.is_table,
+                )
+            )
             remaining = remaining[split_at:].strip()
         return pieces
 
     def _largest_prefix_within_limit(self, text: str, token_limit: int) -> int:
-        low, high, best = 1, len(text), 0
-        while low <= high:
-            midpoint = (low + high) // 2
-            if self._tokens(text[:midpoint]) <= token_limit:
-                best = midpoint
-                low = midpoint + 1
+        return self._largest_rendered_prefix_within_limit(
+            text, token_limit, lambda part: part
+        )
+
+    def _largest_rendered_prefix_within_limit(
+        self,
+        value: str,
+        token_limit: int,
+        render: Any,
+    ) -> int:
+        """Find a safe prefix with bounded batched tokenizer probes."""
+
+        if not value:
+            return 0
+        if self._tokens(render(value)) <= token_limit:
+            return len(value)
+        low, high = 0, len(value)
+        while high - low > 1:
+            points = sorted(
+                {
+                    low + ((high - low) * index // (TOKEN_BOUNDARY_PROBES + 1))
+                    for index in range(1, TOKEN_BOUNDARY_PROBES + 1)
+                }
+                - {low, high}
+            )
+            if not points:
+                break
+            counts = self._tokens_many([render(value[:point]) for point in points])
+            fitting = [
+                point
+                for point, count in zip(points, counts)
+                if count <= token_limit
+            ]
+            if fitting:
+                low = max(fitting)
+                larger = [
+                    point
+                    for point, count in zip(points, counts)
+                    if point > low and count > token_limit
+                ]
+                high = min(larger) if larger else high
             else:
-                high = midpoint - 1
-        return best
+                high = min(points)
+        return low
 
     @staticmethod
     def _preferred_split(text: str, end: int) -> int:
@@ -1226,22 +1383,104 @@ class StructureAwareChunker:
     ) -> list[_ChildUnit]:
         if next_unit.is_table or any(unit.is_table for unit in completed):
             return []
-        overlap: list[_ChildUnit] = []
-        for unit in reversed(completed):
-            candidate = [unit, *overlap]
-            if self._tokens(self._join_units(candidate)) > self._child_overlap:
-                break
-            if self._tokens(self._join_units([*candidate, next_unit])) > self._child_max:
-                break
-            overlap = candidate
-        return overlap
+        suffixes = [completed[index:] for index in range(len(completed))]
+        texts = [self._join_units(suffix) for suffix in suffixes]
+        combined = [self._join_units([*suffix, next_unit]) for suffix in suffixes]
+        counts = self._tokens_many([*texts, *combined])
+        suffix_counts = counts[: len(suffixes)]
+        combined_counts = counts[len(suffixes) :]
+        candidates = [
+            suffix
+            for suffix, suffix_count, combined_count in zip(
+                suffixes, suffix_counts, combined_counts
+            )
+            if suffix_count <= self._child_overlap
+            and combined_count <= self._child_max
+        ]
+        return candidates[0] if candidates else []
+
+    def _rebalance_small_tail(
+        self, groups: list[list[_ChildUnit]]
+    ) -> list[list[_ChildUnit]]:
+        """Merge an undersized ordinary tail without splitting structural units."""
+
+        if len(groups) < 2:
+            return groups
+        tail = groups[-1]
+        if len(tail) == 1 and tail[0].is_complete:
+            return groups
+        previous = groups[-2]
+        previous_text = self._join_units(previous)
+        tail_text = self._join_units(tail)
+        combined = self._merge_unit_groups(previous, tail)
+        _, tail_tokens, merged_tokens = self._tokens_many(
+            [previous_text, tail_text, self._join_units(combined)]
+        )
+        if tail_tokens >= MIN_USEFUL_CHILD_TOKENS:
+            return groups
+        if merged_tokens <= self._child_max:
+            return [*groups[:-2], combined]
+
+        boundaries = list(range(1, len(combined)))
+        rendered = [
+            text
+            for boundary in boundaries
+            for text in (
+                self._join_units(combined[:boundary]),
+                self._join_units(combined[boundary:]),
+            )
+        ]
+        counts = self._tokens_many(rendered)
+        valid: list[tuple[int, int]] = []
+        for offset, boundary in enumerate(boundaries):
+            left_tokens, right_tokens = counts[offset * 2 : offset * 2 + 2]
+            if (
+                left_tokens <= self._child_max
+                and MIN_USEFUL_CHILD_TOKENS <= right_tokens <= self._child_max
+            ):
+                valid.append((abs(left_tokens - self._child_target), boundary))
+        if not valid:
+            return groups
+        _, boundary = min(valid)
+        return [
+            *groups[:-2],
+            combined[:boundary],
+            combined[boundary:],
+        ]
+
+    @staticmethod
+    def _merge_unit_groups(
+        previous: list[_ChildUnit], tail: list[_ChildUnit]
+    ) -> list[_ChildUnit]:
+        max_overlap = min(len(previous), len(tail))
+        for size in range(max_overlap, 0, -1):
+            if previous[-size:] == tail[:size]:
+                return [*previous, *tail[size:]]
+        return [*previous, *tail]
 
     @staticmethod
     def _join_units(units: list[_ChildUnit]) -> str:
         return "\n".join(unit.text for unit in units).strip()
 
     def _tokens(self, text: str) -> int:
-        return self._tokenizer.model_tokens(text)
+        cached = self._document_token_counts.get(text)
+        if cached is not None:
+            return cached
+        count = self._tokenizer.model_tokens(text)
+        self._document_token_counts[text] = count
+        return count
+
+    def _tokens_many(self, texts: Iterable[str]) -> list[int]:
+        requested = list(texts)
+        missing = list(
+            dict.fromkeys(
+                text for text in requested if text not in self._document_token_counts
+            )
+        )
+        if missing:
+            counts = self._tokenizer.model_token_counts(missing)
+            self._document_token_counts.update(zip(missing, counts))
+        return [self._document_token_counts[text] for text in requested]
 
     @staticmethod
     def _with_siblings(chunks: list[ChildChunk]) -> list[ChildChunk]:

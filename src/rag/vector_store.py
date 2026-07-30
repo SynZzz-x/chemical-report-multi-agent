@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,8 @@ from src.config import RAGSettings, get_rag_settings
 from .bm25_store import DISTANCE_METRIC, INDEX_FINGERPRINT_KEYS, index_fingerprint
 from .models import ChildChunk, RankedHit
 
-COLLECTION_NAME = "chemical_documents_v3_qwen3_1024_cosine"
+LEGACY_COLLECTION_NAME = "chemical_documents_v3_qwen3_1024_cosine"
+COLLECTION_PREFIX = "chemical_documents"
 _COLLECTION_CONFIGURATION = {"hnsw": {"space": DISTANCE_METRIC}}
 
 
@@ -40,13 +43,31 @@ class VectorStore:
         chroma_path = storage_root / "chroma"
         chroma_path.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(chroma_path))
-        self._collection = self._client.get_or_create_collection(
-            name=COLLECTION_NAME,
+        target_name = collection_name(self._fingerprint)
+        existing_names = {
+            getattr(collection, "name", str(collection))
+            for collection in self._client.list_collections()
+        }
+        if target_name not in existing_names and LEGACY_COLLECTION_NAME in existing_names:
+            legacy = self._client.get_collection(
+                name=LEGACY_COLLECTION_NAME,
+                embedding_function=None,
+            )
+            if dict(legacy.metadata or {}) == self._fingerprint:
+                self._collection = legacy
+            else:
+                self._collection = self._create_collection(target_name)
+        else:
+            self._collection = self._create_collection(target_name)
+        self._validate_collection()
+
+    def _create_collection(self, name: str) -> Any:
+        return self._client.get_or_create_collection(
+            name=name,
             metadata=self._fingerprint,
             configuration=_COLLECTION_CONFIGURATION,
             embedding_function=None,
         )
-        self._validate_collection()
 
     @classmethod
     def open(
@@ -198,3 +219,18 @@ def _configuration_value(value: Any) -> str | None:
 
     resolved = getattr(value, "value", value)
     return resolved.lower() if isinstance(resolved, str) else None
+
+
+def fingerprint_generation(fingerprint: Mapping[str, str]) -> str:
+    """Return a deterministic short generation for compatible index inputs."""
+
+    payload = json.dumps(
+        dict(fingerprint), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def collection_name(fingerprint: Mapping[str, str]) -> str:
+    """Derive the collection name so incompatible vectors cannot be reused."""
+
+    return f"{COLLECTION_PREFIX}_{fingerprint_generation(fingerprint)}"
