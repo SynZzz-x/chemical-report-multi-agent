@@ -385,15 +385,45 @@ class BM25Store:
                 )
             }
 
+    def mark_cleanup_pending(self, version_id: str) -> set[str]:
+        """Persist deferred vector retirement for a non-active version."""
+
+        with self._connection:
+            row = self._connection.execute(
+                """
+                SELECT v.status, d.active_version_id
+                FROM document_versions AS v
+                JOIN documents AS d ON d.doc_id = v.doc_id
+                WHERE v.version_id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Cannot defer cleanup for an unknown document version.")
+            if row["active_version_id"] == version_id:
+                raise ValueError("Cannot defer cleanup for an active document version.")
+            if row["status"] not in {"inactive", "cleanup_pending"}:
+                raise ValueError("Only inactive document versions may defer cleanup.")
+            self._connection.execute(
+                "UPDATE document_versions SET status = 'cleanup_pending' WHERE version_id = ?",
+                (version_id,),
+            )
+            return {
+                item["chunk_id"]
+                for item in self._connection.execute(
+                    "SELECT chunk_id FROM chunks WHERE version_id = ?", (version_id,)
+                )
+            }
+
     def incomplete_versions(self) -> dict[str, set[str]]:
-        """Return building and failed versions with their IDs for Chroma recovery."""
+        """Return every recoverable manifest version with its vector IDs."""
 
         rows = self._connection.execute(
             """
             SELECT v.version_id, c.chunk_id
             FROM document_versions AS v
             LEFT JOIN chunks AS c ON c.version_id = v.version_id
-            WHERE v.status IN ('building', 'failed')
+            WHERE v.status IN ('building', 'failed', 'cleanup_pending')
             ORDER BY v.version_id, c.ordinal
             """
         )
@@ -405,7 +435,7 @@ class BM25Store:
         return versions
 
     def cleanup_incomplete(self, version_id: str) -> set[str]:
-        """Delete a failed/building manifest after its returned vectors are removed."""
+        """Delete a recoverable manifest after its vectors are removed."""
 
         with self._connection:
             status = self._connection.execute(
@@ -413,8 +443,8 @@ class BM25Store:
             ).fetchone()
             if status is None:
                 return set()
-            if status["status"] not in {"building", "failed"}:
-                raise ValueError("Only building or failed versions may be cleaned up.")
+            if status["status"] not in {"building", "failed", "cleanup_pending"}:
+                raise ValueError("Only recoverable document versions may be cleaned up.")
             chunk_ids = {
                 row["chunk_id"]
                 for row in self._connection.execute(
@@ -554,6 +584,8 @@ class BM25Store:
             SELECT
                 (SELECT count(*) FROM documents) AS documents,
                 (SELECT count(*) FROM document_versions WHERE status = 'ready') AS ready_versions,
+                (SELECT count(*) FROM document_versions
+                 WHERE status = 'cleanup_pending') AS cleanup_pending_versions,
                 (SELECT count(*) FROM chunks) AS chunks,
                 (SELECT count(*) FROM chunks_fts) AS fts_rows
             """

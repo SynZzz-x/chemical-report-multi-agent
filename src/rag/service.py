@@ -73,8 +73,11 @@ class ChemicalRAGService:
             return {
                 "success": False,
                 "loaded_files": 0,
+                "loaded_with_warnings_files": 0,
+                "activated_files": 0,
                 "skipped_files": 0,
                 "failed_files": 0,
+                "cleanup_pending_files": 0,
                 "total_chunks": 0,
                 "warnings": list(self._startup_warnings),
                 "files": [],
@@ -86,16 +89,23 @@ class ChemicalRAGService:
         for path in file_paths:
             outcome = self._ingest_one(path)
             results.append(outcome)
-            if outcome["status"] == "loaded":
+            if outcome["status"] in {"loaded", "loaded_with_warnings"}:
                 total_chunks += int(outcome["chunks"])
         loaded = sum(item["status"] == "loaded" for item in results)
+        loaded_with_warnings = sum(
+            item["status"] == "loaded_with_warnings" for item in results
+        )
         skipped = sum(item["status"] == "skipped" for item in results)
         failed = sum(item["status"] == "failed" for item in results)
+        cleanup_pending = sum(bool(item.get("cleanup_pending")) for item in results)
         return {
-            "success": failed == 0,
+            "success": failed == 0 and cleanup_pending == 0,
             "loaded_files": loaded,
+            "loaded_with_warnings_files": loaded_with_warnings,
+            "activated_files": loaded + loaded_with_warnings,
             "skipped_files": skipped,
             "failed_files": failed,
+            "cleanup_pending_files": cleanup_pending,
             "total_chunks": total_chunks,
             "warnings": list(self._startup_warnings),
             "files": results,
@@ -133,7 +143,10 @@ class ChemicalRAGService:
                 result["warnings"].append(f"dense: {_sanitize_exception(exc)}")
         else:
             result["vectors"] = 0
-        result["success"] = not result["warnings"]
+        result["success"] = (
+            not result["warnings"]
+            and result.get("cleanup_pending_versions", 0) == 0
+        )
         return result
 
     def _ingest_one(self, path: str) -> dict[str, Any]:
@@ -159,19 +172,31 @@ class ChemicalRAGService:
             staged = True
             vector_ids = [chunk.chunk_id for chunk in chunks]
             self._embed_and_upsert(chunks)
-            _, prior_vector_ids = self._bm25_store.activate_version(
+            prior_version_id, prior_vector_ids = self._bm25_store.activate_version(
                 document.doc_id, document.version_id
             )
             warnings: list[str] = []
+            cleanup_pending = False
             try:
                 self._vector_store.delete(sorted(prior_vector_ids))
             except Exception as exc:
                 warnings.append(f"dense cleanup: {_sanitize_exception(exc)}")
+                if prior_version_id is not None:
+                    try:
+                        self._bm25_store.mark_cleanup_pending(prior_version_id)
+                        cleanup_pending = True
+                    except Exception as cleanup_exc:
+                        warnings.append(
+                            "manifest cleanup: "
+                            f"{_sanitize_exception(cleanup_exc)}"
+                        )
             return {
                 "path": path,
-                "status": "loaded",
+                "status": "loaded_with_warnings" if warnings else "loaded",
                 "chunks": len(chunks),
                 "version_id": document.version_id,
+                "activated": True,
+                "cleanup_pending": cleanup_pending,
                 "warnings": warnings,
             }
         except Exception as exc:

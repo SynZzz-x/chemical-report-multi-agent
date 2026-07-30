@@ -17,7 +17,6 @@ from .vector_store import VectorStore
 
 
 _DENSE_FETCH_ATTEMPTS = 3
-_FALLBACK_CHARS_PER_TOKEN = 2
 
 
 @dataclass
@@ -80,17 +79,13 @@ class HybridRetriever:
             return self._error_result(question, ["query: question must be a non-empty string."])
         if top_k is not None and top_k <= 0:
             return self._empty_result(question, "unavailable", ["query: top_k must be positive."])
-        if similarity_threshold is not None and not 0.0 <= similarity_threshold <= 1.0:
-            return self._error_result(
-                question,
-                ["query: similarity_threshold must be between 0.0 and 1.0."],
-            )
+        # Kept in the public signature for worker compatibility. RRF is rank-only,
+        # so a raw dense similarity cannot decide whether evidence is sufficient.
+        _ = similarity_threshold
 
         state = _QueryState(warnings=list(self._startup_warnings))
         bm25_hits, bm25_available = self._bm25_hits(question, doc_type_filter, state)
-        dense_hits, dense_available = self._dense_hits(
-            question, doc_type_filter, similarity_threshold, state
-        )
+        dense_hits, dense_available = self._dense_hits(question, doc_type_filter, state)
         retrieval_mode = _retrieval_mode(bm25_available, dense_available)
         if retrieval_mode is None:
             return self._error_result(question, state.warnings)
@@ -141,7 +136,6 @@ class HybridRetriever:
         self,
         question: str,
         doc_type_filter: str | None,
-        similarity_threshold: float | None,
         state: _QueryState,
     ) -> tuple[list[RankedHit], bool]:
         if self._vector_store is None:
@@ -158,7 +152,8 @@ class HybridRetriever:
             return [], False
 
         initial_limit = max(
-            self._settings.dense_top_k * self._settings.dense_overfetch_factor,
+            self._settings.dense_top_k
+            * max(self._settings.dense_overfetch_factor, 3),
             120,
         )
         dense_hits: list[RankedHit] = []
@@ -168,10 +163,6 @@ class HybridRetriever:
                 candidates = self._vector_store.search(
                     query_embedding, limit, doc_type_filter
                 )
-                if similarity_threshold is not None:
-                    candidates = [
-                        hit for hit in candidates if hit.score >= similarity_threshold
-                    ]
                 active_ids = self._bm25_store.active_chunk_ids(
                     hit.chunk_id for hit in candidates
                 )
@@ -251,54 +242,58 @@ class HybridRetriever:
         groups: Iterable[tuple[ParentChunk, list[_FusedHit]]],
         state: _QueryState,
     ) -> list[dict[str, Any]]:
-        remaining = self._settings.max_context_tokens
         results: list[dict[str, Any]] = []
+        rendered_contents: list[str] = []
         for parent, matches in groups:
-            parent_tokens = self._count_tokens(parent.content, state)
-            if parent_tokens <= remaining:
+            parent_candidate = _join_content([*rendered_contents, parent.content])
+            if self._count_tokens(parent_candidate, state) <= self._settings.max_context_tokens:
                 content = parent.content
-                remaining -= parent_tokens
+                included_matches = matches
             else:
-                content, used = self._expanded_children(parent, matches, remaining, state)
+                content, included_matches = self._expanded_children(
+                    parent, matches, rendered_contents, state
+                )
                 if not content:
                     continue
-                remaining -= used
-            results.append(self._evidence_group(parent, matches, content))
-            if remaining <= 0:
-                break
+            results.append(self._evidence_group(parent, included_matches, content))
+            rendered_contents.append(content)
         return results
 
     def _expanded_children(
         self,
         parent: ParentChunk,
         matches: list[_FusedHit],
-        remaining: int,
+        rendered_contents: list[str],
         state: _QueryState,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, list[_FusedHit]]:
         if self._bm25_store is None:
-            return "", 0
+            return "", []
         selected_ids = {item.chunk_id for item in matches}
         try:
             siblings = self._bm25_store.get_siblings(matches[0].chunk_id)
         except Exception as exc:
             state.warn("manifest", exc)
-            return "", 0
+            return "", []
         siblings = [chunk for chunk in siblings if chunk.parent_id == parent.parent_id]
         by_id = {chunk.chunk_id: chunk for chunk in siblings}
         selected_order = [item.chunk_id for item in matches if item.chunk_id in by_id]
         parts: list[str] = []
-        used = 0
+        included_matches: list[_FusedHit] = []
+        matches_by_id = {item.chunk_id: item for item in matches}
         for chunk_id in selected_order:
             chunk = by_id[chunk_id]
-            token_count = self._count_tokens(chunk.content, state)
-            if token_count > remaining - used:
-                return "", 0
+            candidate = _join_content([*rendered_contents, *parts, chunk.content])
+            if self._count_tokens(candidate, state) > self._settings.max_context_tokens:
+                continue
             parts.append(chunk.content)
-            used += token_count
+            included_matches.append(matches_by_id[chunk_id])
+
+        if not included_matches:
+            return "", []
 
         ordered_ids: list[str] = []
         for index, sibling in enumerate(siblings):
-            if sibling.chunk_id not in selected_ids:
+            if sibling.chunk_id not in {item.chunk_id for item in included_matches}:
                 continue
             for neighbor in (siblings[index - 1] if index else None, siblings[index + 1] if index + 1 < len(siblings) else None):
                 if neighbor is not None and neighbor.parent_id == parent.parent_id:
@@ -307,12 +302,11 @@ class HybridRetriever:
             if chunk_id in selected_ids:
                 continue
             chunk = by_id[chunk_id]
-            token_count = self._count_tokens(chunk.content, state)
-            if token_count > remaining - used:
+            candidate = _join_content([*rendered_contents, *parts, chunk.content])
+            if self._count_tokens(candidate, state) > self._settings.max_context_tokens:
                 continue
             parts.append(chunk.content)
-            used += token_count
-        return "\n\n".join(parts), used
+        return _join_content(parts), included_matches
 
     def _count_tokens(self, text: str, state: _QueryState) -> int:
         if state.tei_degraded:
@@ -394,7 +388,13 @@ def _retrieval_mode(bm25_available: bool, dense_available: bool) -> str | None:
 def _fallback_token_count(text: str) -> int:
     """Return a deliberately conservative estimate when TEI is unavailable."""
 
-    return max(1, (len(text) + _FALLBACK_CHARS_PER_TOKEN - 1) // _FALLBACK_CHARS_PER_TOKEN)
+    return max(1, len(text.encode("utf-8")))
+
+
+def _join_content(parts: Iterable[str]) -> str:
+    """Join exactly as evidence is rendered so separator tokens are budgeted."""
+
+    return "\n\n".join(part for part in parts if part)
 
 
 def _sanitize_exception(exc: BaseException) -> str:
