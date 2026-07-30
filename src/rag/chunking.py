@@ -652,7 +652,12 @@ class StructureAwareChunker:
                 current = []
             single_row = self._table_parent_text(context, [row])
             if self._tokens(single_row) > self._parent_max:
-                fragments.extend(self._split_table_row_for_parent(block, context, row))
+                fragments.extend(
+                    self._copy_block(block, text)
+                    for text in self._split_table_row_texts(
+                        context, row, self._parent_max
+                    )
+                )
             else:
                 current.append(row)
         if current:
@@ -686,31 +691,128 @@ class StructureAwareChunker:
     def _table_parent_text(context: str, rows: list[str]) -> str:
         return context + "\n" + "\n".join(f"数据行：{row}" for row in rows)
 
-    def _split_table_row_for_parent(
-        self, block: StructuralBlock, context: str, row: str
-    ) -> list[StructuralBlock]:
-        fragments: list[StructuralBlock] = []
-        remaining = row.strip()
+    def _split_table_row_texts(
+        self, context: str, row: str, token_limit: int
+    ) -> list[str]:
+        cells, delimiter = self._table_cells(row)
+        if not cells:
+            return self._split_table_cell_texts(context, row, delimiter, token_limit)
+
+        fragments: list[str] = []
+        current: list[str] = []
+        for cell in cells:
+            candidate = self._table_parent_text(
+                context, [self._format_table_row([*current, cell], delimiter)]
+            )
+            if current and self._tokens(candidate) > token_limit:
+                fragments.append(
+                    self._table_parent_text(
+                        context, [self._format_table_row(current, delimiter)]
+                    )
+                )
+                current = []
+            single_cell = self._table_parent_text(
+                context, [self._format_table_row([cell], delimiter)]
+            )
+            if self._tokens(single_cell) > token_limit:
+                fragments.extend(
+                    self._split_table_cell_texts(context, cell, delimiter, token_limit)
+                )
+            else:
+                current.append(cell)
+        if current:
+            fragments.append(
+                self._table_parent_text(context, [self._format_table_row(current, delimiter)])
+            )
+        return fragments
+
+    @staticmethod
+    def _table_cells(row: str) -> tuple[list[str], str]:
+        stripped = row.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            return [cell.strip() for cell in stripped.strip("|").split("|")], "|"
+        if "\t" in stripped:
+            return [cell.strip() for cell in stripped.split("\t")], "\t"
+        return [], ""
+
+    @staticmethod
+    def _format_table_row(cells: list[str], delimiter: str) -> str:
+        if delimiter == "|":
+            return "| " + " | ".join(cells) + " |"
+        if delimiter == "\t":
+            return "\t".join(cells)
+        return " ".join(cells)
+
+    def _split_table_cell_texts(
+        self, context: str, cell: str, delimiter: str, token_limit: int
+    ) -> list[str]:
+        sentences = [
+            sentence.strip()
+            for sentence in _SENTENCE_RE.split(cell)
+            if sentence.strip()
+        ]
+        fragments: list[str] = []
+        current: list[str] = []
+        for sentence in sentences or [cell]:
+            candidate_cell = " ".join([*current, sentence]).strip()
+            candidate = self._table_parent_text(
+                context, [self._format_table_row([candidate_cell], delimiter)]
+            )
+            if current and self._tokens(candidate) > token_limit:
+                fragments.append(
+                    self._table_parent_text(
+                        context, [self._format_table_row([" ".join(current)], delimiter)]
+                    )
+                )
+                current = []
+            single = self._table_parent_text(
+                context, [self._format_table_row([sentence], delimiter)]
+            )
+            if self._tokens(single) > token_limit:
+                fragments.extend(
+                    self._hard_split_table_cell(context, sentence, delimiter, token_limit)
+                )
+            else:
+                current.append(sentence)
+        if current:
+            fragments.append(
+                self._table_parent_text(
+                    context, [self._format_table_row([" ".join(current)], delimiter)]
+                )
+            )
+        return fragments
+
+    def _hard_split_table_cell(
+        self, context: str, cell: str, delimiter: str, token_limit: int
+    ) -> list[str]:
+        fragments: list[str] = []
+        remaining = cell.strip()
         while remaining:
-            end = self._largest_table_row_prefix(context, remaining)
+            end = self._largest_table_value_prefix(
+                context, remaining, delimiter, token_limit
+            )
             if end <= 0:
-                raise ValueError("Table context cannot fit a single row character in a parent.")
+                raise ValueError("Table context cannot fit a single cell character.")
             split_at = self._preferred_split(remaining, end)
             fragments.append(
-                self._copy_block(
-                    block,
-                    self._table_parent_text(context, [remaining[:split_at].strip()]),
+                self._table_parent_text(
+                    context,
+                    [self._format_table_row([remaining[:split_at].strip()], delimiter)],
                 )
             )
             remaining = remaining[split_at:].strip()
         return fragments
 
-    def _largest_table_row_prefix(self, context: str, row: str) -> int:
-        low, high, best = 1, len(row), 0
+    def _largest_table_value_prefix(
+        self, context: str, value: str, delimiter: str, token_limit: int
+    ) -> int:
+        low, high, best = 1, len(value), 0
         while low <= high:
             midpoint = (low + high) // 2
-            candidate = self._table_parent_text(context, [row[:midpoint]])
-            if self._tokens(candidate) <= self._parent_max:
+            candidate = self._table_parent_text(
+                context, [self._format_table_row([value[:midpoint]], delimiter)]
+            )
+            if self._tokens(candidate) <= token_limit:
                 best = midpoint
                 low = midpoint + 1
             else:
@@ -795,27 +897,44 @@ class StructureAwareChunker:
         return [_ChildUnit(sentence) for sentence in sentences] or [_ChildUnit(block.text)]
 
     def _table_units(self, text: str, title: str) -> list[_ChildUnit]:
-        rows = [line.strip() for line in text.splitlines() if line.strip()]
-        pipe_rows = [row for row in rows if row.startswith("|") and row.endswith("|")]
-        tab_rows = [row for row in rows if "\t" in row]
-        table_rows = pipe_rows or tab_rows
-        if len(table_rows) < 2:
-            header = table_rows[0] if table_rows else text
-            return [_ChildUnit(f"表格：{title}\n表头：{header}", is_table=True)]
-        header = table_rows[0]
-        data_rows = [
-            row
-            for row in table_rows[1:]
-            if not re.fullmatch(r"\|?\s*[:\- ]+(?:\|\s*[:\- ]+)+\|?", row)
-        ]
-        context = f"表格：{title}\n表头：{header}"
+        labeled = self._labeled_table_context(text)
+        if labeled is None:
+            context, data_rows = self._table_parent_context(text, title)
+        else:
+            context, data_rows = labeled
         if not data_rows:
             return [_ChildUnit(context, is_table=True)]
         return [_ChildUnit(f"{context}\n数据行：{row}", is_table=True) for row in data_rows]
 
+    @staticmethod
+    def _labeled_table_context(text: str) -> tuple[str, list[str]] | None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines or not lines[0].startswith("表格："):
+            return None
+        context: list[str] = []
+        data_rows: list[str] = []
+        for line in lines:
+            if line.startswith("数据行："):
+                data_rows.append(line.removeprefix("数据行：").strip())
+            else:
+                context.append(line)
+        return "\n".join(context), data_rows
+
     def _split_unit(self, unit: _ChildUnit) -> list[_ChildUnit]:
         if self._tokens(unit.text) <= self._child_max:
             return [unit]
+        if unit.is_table:
+            labeled = self._labeled_table_context(unit.text)
+            if labeled is not None:
+                context, rows = labeled
+                if rows:
+                    return [
+                        _ChildUnit(text, is_table=True)
+                        for row in rows
+                        for text in self._split_table_row_texts(
+                            context, row, self._child_max
+                        )
+                    ]
         pieces: list[_ChildUnit] = []
         remaining = unit.text.strip()
         while remaining:
