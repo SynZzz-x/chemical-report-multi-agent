@@ -22,9 +22,10 @@ answer generation in the existing DeepSeek-powered Worker.
 2. Keep ChromaDB for dense vectors.
 3. Add SQLite FTS5 for BM25 lexical retrieval.
 4. Fuse BM25 and dense rankings with Reciprocal Rank Fusion (RRF).
-5. Replace character windows with structure-aware parent-child chunks.
-6. Index child chunks and expand final hits to parent or neighboring context
-   before returning evidence to the Worker.
+5. Replace character windows with logical sections, bounded context parents,
+   and retrieval children.
+6. Index child chunks and expand final hits only inside their context-parent
+   boundary before returning evidence to the Worker.
 7. Keep all runtime configuration in `src/config.py`.
 
 ## Goals
@@ -55,17 +56,19 @@ answer generation in the existing DeepSeek-powered Worker.
 ```text
 Document
   -> structure-aware parser
-  -> parent chunks
+  -> logical sections
+  -> bounded context parents
   -> child chunks
        |-> jieba chemical tokenization -> SQLite FTS5
        `-> TEI Qwen3-Embedding-0.6B -> ChromaDB
 
 Question
-  |-> jieba chemical tokenization -> BM25 top 20
-  `-> Qwen query instruction -> TEI -> dense top 20
+  |-> jieba chemical tokenization -> BM25 top 40
+  `-> Qwen query instruction -> TEI -> dense overfetch, keep top 40 active
         -> RRF
         -> active-version filtering and deduplication
-        -> top 5 child hits
+        -> top 12 child hits
+        -> at most 5 parent evidence groups
         -> parent/sibling context expansion
         -> evidence budget enforcement
         -> Worker/DeepSeek
@@ -82,7 +85,8 @@ The default GPU deployment uses the official TEI image:
 docker run --gpus all -p 8080:80 \
   -v "$PWD/data:/data" \
   ghcr.io/huggingface/text-embeddings-inference:cuda-1.9 \
-  --model-id Qwen/Qwen3-Embedding-0.6B
+  --model-id Qwen/Qwen3-Embedding-0.6B \
+  --revision 66e95e324bebb9453d3b5be447c898dca1ba0eb0
 ```
 
 The image tag may be changed to the TEI variant matching the server's GPU
@@ -105,15 +109,21 @@ variables. `AppConfig` will replace DashScope embedding fields with:
 - `EMBEDDING_API_KEY`, optional and hidden from dataclass representations, for
   deployments protected by a reverse proxy;
 - `EMBEDDING_MODEL`, default `Qwen/Qwen3-Embedding-0.6B`;
+- `EMBEDDING_MODEL_REVISION`, default
+  `66e95e324bebb9453d3b5be447c898dca1ba0eb0`;
 - `EMBEDDING_DIMENSION`, default `1024`;
 - `EMBEDDING_TIMEOUT_SECONDS`, default `30`;
 - `RAG_CHILD_TARGET_TOKENS`, default `450`;
 - `RAG_CHILD_MAX_TOKENS`, default `700`;
 - `RAG_CHILD_OVERLAP_TOKENS`, default `70`;
 - `RAG_PARENT_TARGET_TOKENS`, default `1200`;
-- `RAG_BM25_TOP_K`, default `20`;
-- `RAG_DENSE_TOP_K`, default `20`;
+- `RAG_PARENT_MAX_TOKENS`, default `1600`;
+- `RAG_BM25_TOP_K`, default `40`;
+- `RAG_DENSE_TOP_K`, default `40`;
+- `RAG_DENSE_OVERFETCH_FACTOR`, default `3`;
+- `RAG_RRF_CHILD_TOP_K`, default `12`;
 - `RAG_FINAL_TOP_K`, default `5`;
+- `RAG_MAX_HITS_PER_PARENT`, default `2`;
 - `RAG_RRF_K`, default `60`;
 - `RAG_MAX_CONTEXT_TOKENS`, default `5000`.
 
@@ -165,16 +175,19 @@ Each block carries its source location and block type:
 - process step;
 - page boundary.
 
-Repeated page headers and footers are removed before chunk construction. Empty
-blocks and exact duplicate blocks are discarded.
+Repeated page headers, footers, watermarks, and identified template boilerplate
+are removed before chunk construction. Empty blocks are discarded. Identical
+semantic blocks at different structural positions are preserved.
 
-### Parent chunks
+### Logical sections and context parents
 
-Parents preserve a coherent section of the source and are stored as expansion
-context, not embedded as primary retrieval units.
+Logical sections preserve the source hierarchy and may be long. Each logical
+section has a stable `section_id` and is divided into one or more context
+parents. Context parents are the largest units that may be returned as
+evidence; they are stored for expansion and are not primary retrieval units.
 
-- General reports and papers: one heading subtree or approximately 900-1,400
-  tokens, with a 1,200-token target.
+- General reports and papers: one heading subtree may form a logical section;
+  context parents use a 1,200-token target and 1,600-token hard maximum.
 - Standards and safety documents: one clause or subclause; clauses are never
   merged across clause boundaries.
 - Process documents: one process step or unit-operation section.
@@ -182,7 +195,9 @@ context, not embedded as primary retrieval units.
   separate; an individual claim is not split unless it exceeds model limits.
 - Tables: table title, headers, units, and a related row group stay together.
 
-An oversized parent may contain multiple child chunks but keeps one `parent_id`.
+An oversized logical section produces multiple `parent_id` values that share
+one `section_id`. A single structural unit that exceeds the parent maximum is
+split only at safe sentence or table-row boundaries.
 
 ### Child chunks
 
@@ -233,7 +248,8 @@ The vector input includes lightweight structural context:
 ```
 
 The original child content is stored separately and is what the Worker sees.
-Queries use one fixed Qwen retrieval instruction before the user's question.
+Queries use one fixed English Qwen retrieval instruction before the user's
+question because Qwen recommends English instructions for multilingual use.
 The instruction is applied only to query embeddings, ensuring consistent
 indexing and query behavior.
 
@@ -242,8 +258,10 @@ indexing and query behavior.
 Every indexed item has stable identifiers:
 
 - `doc_id`: SHA-256 of normalized source identity;
-- `version_id`: SHA-256 of normalized document content;
-- `parent_id`: SHA-256 of `doc_id + version_id + structural path`;
+- `content_hash`: SHA-256 of normalized document content;
+- `version_id`: SHA-256 of `doc_id + content_hash`;
+- `section_id`: SHA-256 of `version_id + structural path + structural ordinal`;
+- `parent_id`: SHA-256 of `section_id + parent ordinal + source page/offset`;
 - `chunk_id`: SHA-256 of `parent_id + child ordinal + normalized child text`.
 
 Child metadata includes:
@@ -266,16 +284,21 @@ SQLite is the canonical manifest and lexical store:
 ```text
 documents(doc_id, source, active_version_id, updated_at)
 document_versions(version_id, doc_id, content_hash, status, created_at)
-parents(parent_id, version_id, content, metadata_json)
+parents(parent_id, section_id, version_id, content, metadata_json)
 chunks(chunk_id, parent_id, version_id, content, metadata_json, ordinal)
-chunks_fts(chunk_id UNINDEXED, bm25_text)
+chunks_fts(title, section_path, clause_number, bm25_text, chunk_id UNINDEXED)
+rag_index_meta(key, value)
 ```
 
 `chunks_fts` is an FTS5 virtual table. Text is pre-tokenized by jieba with a
 small chemical-domain dictionary so Chinese terms, formulas, model numbers, and
-standard identifiers remain searchable. The same tokenizer normalizes queries.
-SQLite's raw BM25 value is used only for rank ordering because its scale is not
-comparable with cosine similarity.
+standard identifiers remain searchable. Standard identifiers such as
+`GB 31570-2015`, `GB31570-2015`, and `GB_31570_2015` receive a common normalized
+alias. The same tokenizer normalizes queries, and user text is passed as a bound
+SQL parameter after safe FTS query construction. BM25 uses column weights
+`5.0, 3.0, 4.0, 1.0, 0.0` for title, section, clause, body, and unindexed ID.
+SQLite's lower-is-better BM25 value is used only for rank ordering because its
+scale is not comparable with cosine similarity.
 
 Chroma stores:
 
@@ -283,27 +306,31 @@ Chroma stores:
 - the context-prefixed embedding text;
 - compact filter metadata such as `doc_type`, `doc_id`, and `version_id`.
 
-The collection name includes an index schema version and embedding dimension.
-Changing model, dimension, chunking rules, or embedding text format creates a
-new collection and requires a rebuild; incompatible old vectors are never
-silently reused.
+The collection is created explicitly with cosine distance; Chroma's default L2
+distance is never used. Its name and `rag_index_meta` fingerprint include index
+schema version, embedding model and revision, vector dimension, distance metric,
+TEI version, document embedding-text format, query-instruction version,
+chunking configuration hash, normalization version, and jieba dictionary
+version. Changing an index-affecting value creates a new collection and requires
+a rebuild; incompatible old vectors are never silently reused.
 
 ## Ingestion Consistency
 
 Ingestion follows a staged document-version flow:
 
-1. Parse and hash the source.
+1. Parse, split, and calculate all stable IDs without writing either index.
 2. Return the existing result if the same version is already active.
-3. Create parent and child records with version status `building`.
-4. Batch-generate dense vectors and write them to the versioned Chroma
-   collection.
-5. In one SQLite transaction, write parents, chunks, and FTS rows, then mark the
-   version `ready` and switch `documents.active_version_id`.
-6. Mark the previous version inactive and remove its vectors after activation.
+3. In one SQLite transaction, create the `building` version and write its
+   parents, chunks, and FTS rows without changing `active_version_id`.
+4. Batch-generate vectors and upsert them to the versioned Chroma collection.
+5. In a second SQLite transaction, mark the version `ready`, atomically switch
+   `documents.active_version_id`, and mark the previous version inactive.
+6. Attempt to remove prior-version vectors after activation.
 
-If Chroma writing fails, the new vector IDs are removed and the version is
-marked failed. If the SQLite transaction fails, the new vector IDs are also
-removed. The previous active document version remains queryable throughout.
+If Chroma writing fails, the new version is marked failed and its vector IDs are
+removed. The previous active version remains queryable. Startup recovery scans
+`building` and `failed` versions, removes their Chroma vectors, and either
+deletes incomplete rows or retains compact failure metadata for diagnostics.
 Dense candidates are accepted only when their `chunk_id` belongs to an active
 SQLite version, so orphaned or stale vectors cannot reach the Worker.
 
@@ -312,8 +339,10 @@ SQLite version, so orphaned or stale vectors cannot reach the Worker.
 For each query:
 
 1. Apply optional metadata filters.
-2. Retrieve the top 20 BM25 children.
-3. Retrieve the top 20 dense children.
+2. Retrieve the top 40 BM25 children after active filtering in SQL.
+3. Request at least 120 dense candidates, validate them against the SQLite
+   active manifest, and keep the top 40 active children. If fewer than 40
+   remain, retry with bounded incremental overfetch.
 4. If one backend fails, continue with the available ranking and attach a
    degradation warning to diagnostics.
 5. Fuse rankings with:
@@ -323,16 +352,20 @@ For each query:
    ```
 
 6. Remove inactive, duplicate, and near-overlapping children.
-7. Keep the top five children.
-8. Merge hits from the same parent.
-9. Expand each hit:
+7. Keep the top 12 fused children, with at most two selected hits per parent.
+8. Merge hits from the same parent into at most five evidence groups.
+   `parent_score` is the maximum child RRF score; each child retains its own
+   RRF score, BM25 rank, and dense rank in a `matches` array.
+9. Expand each evidence group:
    - return the complete parent when it fits the remaining budget;
-   - otherwise return the child plus its immediate previous and next siblings.
+   - otherwise return selected children plus immediate siblings only when they
+     share the same `parent_id`; expansion never crosses a clause, claim,
+     process step, table, or safety boundary.
 10. Stop when the total evidence reaches approximately 5,000 model tokens.
 
 RRF uses ranks rather than adding BM25 and cosine values, avoiding
-provider-specific score normalization. Result metadata exposes BM25 rank, dense
-rank, RRF score, and which retrieval paths matched.
+provider-specific score normalization. Result metadata exposes parent score,
+per-child BM25/dense ranks, child RRF scores, and retrieval paths.
 
 ## Result Contract
 
@@ -356,9 +389,10 @@ adds hybrid diagnostics:
       pages,
       chunk_ids,
       parent_id,
-      rrf_score,
-      bm25_rank,
-      dense_rank
+      parent_score,
+      matches: [
+        {chunk_id, rrf_score, bm25_rank, dense_rank}
+      ]
     }
   ]
 }
@@ -379,8 +413,10 @@ RRF score as factual confidence.
 - Both retrieval paths unavailable: return a structured tool error; do not ask
   DeepSeek to invent knowledge-base evidence.
 - Dimension mismatch: reject the collection and require an explicit rebuild.
-- No matching evidence: return an empty successful result with source count
-  zero.
+- No candidates: return an empty successful result with source count zero.
+- Candidate evidence is not calibrated relevance. Every non-empty result sets
+  `evidence_assessment_required=true`; the Worker states that the knowledge base
+  lacks sufficient support when evidence does not directly answer the question.
 - Secrets and full embedding requests are not logged.
 
 ## Operator Workflow

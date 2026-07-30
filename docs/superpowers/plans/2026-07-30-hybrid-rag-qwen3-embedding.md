@@ -14,9 +14,15 @@
 - Use `Qwen/Qwen3-Embedding-0.6B` through an independent TEI service.
 - Default vector dimension is exactly `1024`.
 - Child target/max/overlap are exactly `450`/`700`/`70` model tokens.
-- Parent target is exactly `1200` model tokens.
-- Default BM25/dense/final top-k values are exactly `20`/`20`/`5`.
+- Parent target/max are exactly `1200`/`1600` model tokens.
+- Default BM25/dense/RRF-child/final top-k values are exactly
+  `40`/`40`/`12`/`5`.
+- Dense overfetch starts at exactly `3x`; at most `2` selected child hits may
+  come from one parent.
 - RRF constant is exactly `60`; maximum returned context is `5000` tokens.
+- Pin Qwen to revision
+  `66e95e324bebb9453d3b5be447c898dca1ba0eb0`, use cosine distance, and reject
+  index fingerprints that differ.
 - `src/config.py` is the only application module that reads environment variables.
 - The knowledge-base tool remains retrieval-only; Worker/DeepSeek generates answers.
 - Existing DashScope vectors are incompatible and must not be silently reused.
@@ -71,15 +77,20 @@ class RAGSettings:
     embedding_base_url: str
     embedding_api_key: str | None = field(repr=False)
     embedding_model: str
+    embedding_model_revision: str
     embedding_dimension: int
     embedding_timeout_seconds: float
     child_target_tokens: int
     child_max_tokens: int
     child_overlap_tokens: int
     parent_target_tokens: int
+    parent_max_tokens: int
     bm25_top_k: int
     dense_top_k: int
+    dense_overfetch_factor: int
+    rrf_child_top_k: int
     final_top_k: int
+    max_hits_per_parent: int
     rrf_k: int
     max_context_tokens: int
     storage_root: Path
@@ -94,8 +105,8 @@ Create frozen dataclasses for:
 
 ```python
 StructuralBlock(text, block_type, section_path, page_start, page_end, clause_no)
-SourceDocument(doc_id, version_id, title, doc_type, source, blocks, metadata)
-ParentChunk(parent_id, version_id, content, metadata)
+SourceDocument(doc_id, content_hash, version_id, title, doc_type, source, blocks, metadata)
+ParentChunk(section_id, parent_id, version_id, content, metadata)
 ChildChunk(chunk_id, parent_id, version_id, content, embedding_text, ordinal, metadata)
 RankedHit(chunk_id, rank, score, backend)
 ```
@@ -115,8 +126,8 @@ POST {base}/v1/embeddings  {"model": model, "input": texts}
 Normalize the base URL by removing trailing `/` and a trailing `/v1`. Parse
 both TEI token-list responses and `{tokens: [...]}` responses. Sort embedding
 rows by their response `index`, verify one row per input, and reject any vector
-whose length differs from `embedding_dimension`. Query embeddings prepend one
-fixed Chinese chemical-retrieval instruction; document embeddings do not.
+whose length differs from `embedding_dimension`. Query embeddings prepend the
+fixed English chemical-retrieval instruction; document embeddings do not.
 
 - [ ] **Step 4: Implement the tokenizer boundary**
 
@@ -148,7 +159,10 @@ git commit -m "feat: add TEI embedding configuration"
 ### Task 2: Structure-Aware Parent-Child Chunking
 
 **Files:**
-- Create: `src/rag/chunking.py`
+- Modify: `src/config.py`
+- Modify: `src/rag/models.py`
+- Modify: `src/rag/embeddings.py`
+- Modify: `src/rag/chunking.py`
 
 **Interfaces:**
 - Consumes: `ChemicalTokenizer.model_tokens`.
@@ -166,9 +180,10 @@ Use:
 - encoding fallback `utf-8`, `gbk`, `gb2312`, `latin-1` for text files.
 
 Create page-aware blocks, detect repeated PDF first/last lines appearing on at
-least three pages, and remove them. CSV/Excel blocks contain sheet, row count,
-column names, units when detectable, and date range when detectable; raw rows
-are not emitted.
+least three pages, and remove identified page boilerplate. Preserve identical
+semantic blocks at different structural positions. CSV/Excel blocks contain
+sheet, row count, column names, units when detectable, and date range when
+detectable; raw rows are not emitted.
 
 - [ ] **Step 2: Detect document structure**
 
@@ -177,17 +192,22 @@ claims, list items, process steps, and simple pipe/tabular rows. Maintain a
 heading stack as `section_path`; never merge standard clauses or patent claims
 across their detected boundary.
 
-- [ ] **Step 3: Build parents**
+- [ ] **Step 3: Build logical sections and bounded parents**
 
-Group coherent blocks to a 1,200-token target. Use clause/claim/process-step
-boundaries before token size. Generate:
+Group coherent blocks into logical sections, then split each section into
+context parents with a 1,200-token target and 1,600-token hard maximum. Use
+clause/claim/process-step/table boundaries before token size. Generate:
 
 ```python
-parent_id = sha256(f"{doc_id}\\0{version_id}\\0{structural_path}\\0{ordinal}")
+content_hash = sha256(normalized_content)
+version_id = sha256(f"{doc_id}\\0{content_hash}")
+section_id = sha256(f"{version_id}\\0{structural_path}\\0{section_ordinal}")
+parent_id = sha256(f"{section_id}\\0{parent_ordinal}\\0{page_or_offset}")
 ```
 
 Store title, source, document type, section path, clause number, and page range
-in metadata.
+in metadata. Different sources with identical content must not share a
+`version_id`.
 
 - [ ] **Step 4: Build children**
 
@@ -204,22 +224,31 @@ chunk_id = sha256(f"{parent_id}\\0{ordinal}\\0{normalized_child_text}")
 embedding_text = f"文档：{title}\\n章节：{section}\\n条款：{clause}\\n正文：{content}"
 ```
 
-Add previous/next sibling IDs after all children for a parent are created.
+Add previous/next sibling IDs after all children for a parent are created;
+sibling links never cross a parent or structural safety boundary.
 
-- [ ] **Step 5: Static check and commit**
+- [ ] **Step 5: Harden model and retrieval configuration**
+
+Add the approved model revision, parent maximum, `40/40/12/5` retrieval
+depths, 3x dense overfetch, and two-hits-per-parent settings. Change the query
+instruction to the fixed English chemical-domain instruction and use
+`text-embeddings-inference` as the OpenAI-compatible request model while
+retaining the Hugging Face model ID/revision for deployment and fingerprints.
+
+- [ ] **Step 6: Static check and commit**
 
 Run:
 
 ```bash
-python -m py_compile src/rag/chunking.py
+python -m py_compile src/config.py src/rag/models.py src/rag/embeddings.py src/rag/chunking.py
 git diff --check
 ```
 
 Commit:
 
 ```bash
-git add src/rag/chunking.py
-git commit -m "feat: add structure-aware RAG chunking"
+git add src/config.py src/rag
+git commit -m "fix: bound RAG context parents"
 ```
 
 ---
@@ -244,38 +273,46 @@ Open `hybrid.sqlite` with foreign keys, WAL, and busy timeout. Create:
 ```sql
 documents(doc_id PRIMARY KEY, source, active_version_id, updated_at)
 document_versions(version_id PRIMARY KEY, doc_id, content_hash, status, created_at)
-parents(parent_id PRIMARY KEY, version_id, content, metadata_json)
+parents(parent_id PRIMARY KEY, section_id, version_id, content, metadata_json)
 chunks(chunk_id PRIMARY KEY, parent_id, version_id, content, metadata_json, ordinal)
-chunks_fts USING fts5(chunk_id UNINDEXED, bm25_text)
+chunks_fts USING fts5(title, section_path, clause_number, bm25_text, chunk_id UNINDEXED)
+rag_index_meta(key PRIMARY KEY, value)
 ```
 
-Fail with an actionable error if FTS5 table creation is unsupported.
+Fail with an actionable error if FTS5 table creation is unsupported. Validate
+the complete index fingerprint before opening existing data.
 
 - [ ] **Step 2: Implement staged version activation**
 
-`begin_version()` inserts/updates a `building` version without changing the
-active version. `activate_version()` performs parents, chunks, FTS rows,
-`ready` status, and active-version switch in one transaction. Return the prior
-version ID and its chunk IDs so Chroma cleanup occurs after activation.
+`begin_version()` writes a `building` version plus parents, chunks, and FTS rows
+in one transaction without changing the active version. `activate_version()`
+performs only the `ready` status and active-version switch in a second
+transaction. Add incomplete-version discovery and cleanup interfaces. Return
+the prior version ID and its chunk IDs so Chroma cleanup occurs after
+activation.
 
 - [ ] **Step 3: Implement BM25 retrieval and context lookup**
 
-Build an OR query from quoted jieba terms. Join FTS rows through chunks,
-versions, and documents so only `documents.active_version_id` is returned.
-Order by SQLite `bm25(chunks_fts)` ascending and convert rows to ranked hits.
-Apply `doc_type` filtering from stored metadata in Python after over-fetching.
+Build a parameter-bound OR query from safely quoted jieba terms and normalized
+aliases for standards/model identifiers. Join FTS rows through chunks,
+versions, and documents so only `documents.active_version_id` is returned
+before `LIMIT`. Order by
+`bm25(chunks_fts, 5.0, 3.0, 4.0, 1.0, 0.0)` ascending and convert rows to ranked
+hits. Apply `doc_type` filtering before the final result limit.
 
 - [ ] **Step 4: Implement direct Chroma operations**
 
 Use `chromadb.PersistentClient` directly, with collection:
 
 ```text
-chemical_documents_v2_qwen3_1024
+chemical_documents_v3_qwen3_1024_cosine
 ```
 
 Upsert explicit IDs, documents, compact metadata, and precomputed embeddings.
 Query with a precomputed query vector and optional Chroma `doc_type` filter.
-Convert cosine distance to `max(0.0, 1.0 - distance)`.
+Create the collection with
+`configuration={"hnsw": {"space": "cosine"}}`, verify its fingerprint, and
+convert cosine distance to `max(0.0, 1.0 - distance)`.
 
 - [ ] **Step 5: Static check and commit**
 
@@ -320,9 +357,11 @@ For each backend rank:
 score[chunk_id] += 1.0 / (settings.rrf_k + rank)
 ```
 
-Filter dense-only candidates below `similarity_threshold`; BM25 hits remain
-eligible. Validate all candidate IDs through `BM25Store.active_chunk_ids()`,
-then sort by descending RRF score with best backend rank as tie-breaker.
+Do not treat RRF as calibrated relevance. Retrieve BM25 top 40, dense-overfetch
+at least 120, keep 40 active dense hits, and retain the top 12 fused children
+with at most two hits per parent. Validate all dense candidate IDs through
+`BM25Store.active_chunk_ids()` before truncation, then sort by descending RRF
+score with best backend rank as tie-breaker.
 
 - [ ] **Step 2: Implement degraded retrieval**
 
@@ -337,24 +376,26 @@ Warnings contain backend names and sanitized exception messages.
 
 - [ ] **Step 3: Expand and budget context**
 
-Merge selected children from the same parent. Return the parent when it fits the
-remaining 5,000-token budget; otherwise return the hit plus immediate sibling
-chunks. Use TEI token counts when available and a conservative character
-estimate only during TEI-degraded query mode. Preserve title, source, document
-type, section, pages, child IDs, ranks, and RRF score.
+Merge selected children from the same parent into at most five evidence groups.
+Set `parent_score` to the maximum child RRF score and preserve every child's
+score/ranks in `matches`. Return the parent when it fits the remaining
+5,000-token budget; otherwise return selected hits plus immediate siblings only
+when they share the same `parent_id`. Use TEI token counts when available and a
+conservative character estimate only during TEI-degraded query mode. Return
+`evidence_assessment_required=true` for non-empty evidence.
 
 - [ ] **Step 4: Implement consistent ingestion**
 
 For each file:
 
-1. load and hash;
+1. load, split, and compute IDs;
 2. skip when the version is already active;
-3. mark version building;
-4. create chunks;
-5. batch embeddings and Chroma upsert;
-6. activate SQLite rows;
-7. delete prior-version vectors;
-8. on failure delete newly written vectors and mark version failed.
+3. transactionally write the building version, parents, chunks, and FTS rows;
+4. batch embeddings and Chroma upsert;
+5. transactionally mark ready and switch active version;
+6. delete prior-version vectors;
+7. on failure delete new vectors and mark the version failed;
+8. on service startup clean abandoned building/failed vectors and rows.
 
 Process files independently so one failed file does not discard successful
 files.
@@ -412,8 +453,11 @@ the old character splitter, and test-document generation.
 
 Remove DashScope fields from `WorkerConfig`. Derive `KNOWLEDGE_BASE_DIR` from
 the centralized RAG storage root. Initialize the façade without an API key.
-Format hybrid evidence using RRF rank and source metadata, and retain full raw
-retrieval diagnostics for DeepSeek.
+Format hybrid evidence using parent score, per-child matches, and source
+metadata, and retain full raw retrieval diagnostics for DeepSeek. When
+`evidence_assessment_required` is true, explicitly instruct Worker/DeepSeek to
+state that the knowledge base lacks sufficient support when evidence does not
+directly answer the question.
 
 - [ ] **Step 3: Update dependencies and environment**
 
@@ -427,11 +471,14 @@ new implementation if not already listed. Replace DashScope variables in
 README must include:
 
 - TEI Docker command for Qwen3-Embedding-0.6B;
+- pinned model revision and cosine/index-fingerprint compatibility;
 - `/health` check;
 - Agent environment variables;
 - `cache/rag/hybrid.sqlite` and `cache/rag/chroma/`;
 - requirement to re-ingest old DashScope collections;
 - BM25-only/dense-only query degradation;
+- startup cleanup for incomplete versions and the requirement to rebuild after
+  an index-fingerprint change;
 - retrieval-only Worker responsibility.
 
 - [ ] **Step 5: Full static verification**
