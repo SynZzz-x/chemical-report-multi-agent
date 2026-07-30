@@ -34,9 +34,20 @@ INDEX_FINGERPRINT_KEYS = frozenset(
         "jieba_dictionary_version",
     }
 )
-_IDENTIFIER_RE = re.compile(
-    r"(?i)\b(?:[a-z]{1,8}(?:/[a-z]{1,8})?[\s_-]*\d+(?:[\s_-]*\d+)+"
-    r"|[a-z]+[a-z0-9]*(?:[-_]+[a-z0-9.]+)+)\b"
+_GB_STANDARD_RE = re.compile(
+    r"\bGB(?:\s*[/_-]\s*T)?\s*[_/-]?\s*"
+    r"(\d{3,}(?:\s*[_/-]\s*\d{2,4})?)\b",
+    flags=re.IGNORECASE,
+)
+_ASTM_STANDARD_RE = re.compile(
+    r"\bASTM\s*[_/-]?\s*([A-Z]{1,4})\s*[_/-]?\s*"
+    r"(\d{2,}(?:\s*[_/-]\s*\d{2,4})?)\b",
+    flags=re.IGNORECASE,
+)
+_QWEN_MODEL_RE = re.compile(
+    r"\bQwen\s*[_/-]?\s*(\d+(?:\.\d+)*)"
+    r"(?:\s*[_/-]?\s*(Embedding))?\b",
+    flags=re.IGNORECASE,
 )
 
 
@@ -563,7 +574,7 @@ class BM25Store:
         )
 
     def _match_query(self, query: str) -> str:
-        terms = [*self._tokenizer.bm25_terms(query), *_identifier_aliases(query)]
+        terms = [*self._tokenizer.bm25_terms(query), *canonical_identifier_aliases(query)]
         unique_terms = list(dict.fromkeys(terms))
         return " OR ".join(_fts_quote(term) for term in unique_terms if term)
 
@@ -609,15 +620,34 @@ def _metadata_json(metadata: Mapping[str, Any]) -> str:
     return json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _identifier_aliases(text: str) -> list[str]:
-    return [
-        re.sub(r"[^A-Za-z0-9]+", "", match.group(0)).upper()
-        for match in _IDENTIFIER_RE.finditer(text)
-    ]
+def canonical_identifier_aliases(text: str) -> list[str]:
+    """Return narrowly scoped aliases for supported standards and Qwen models."""
+
+    aliases: list[str] = []
+    for match in _GB_STANDARD_RE.finditer(text):
+        aliases.append("GB" + _strip_identifier_separators(match.group(1)))
+    for match in _ASTM_STANDARD_RE.finditer(text):
+        aliases.append(
+            "ASTM"
+            + match.group(1).upper()
+            + _strip_identifier_separators(match.group(2))
+        )
+    for match in _QWEN_MODEL_RE.finditer(text):
+        model = "QWEN" + _strip_identifier_separators(match.group(1))
+        aliases.append(model)
+        if match.group(2) is not None:
+            aliases.append(model + "EMBEDDING")
+    return list(dict.fromkeys(aliases))
+
+
+def _strip_identifier_separators(value: str) -> str:
+    return re.sub(r"[\s_/-]+", "", value).upper()
 
 
 def _indexed_text(tokenizer: ChemicalTokenizer, text: str) -> str:
-    return " ".join([*tokenizer.bm25_terms(text), *_identifier_aliases(text)])
+    return " ".join(
+        [*tokenizer.bm25_terms(text), *canonical_identifier_aliases(text)]
+    )
 
 
 def _fts_quote(term: str) -> str:

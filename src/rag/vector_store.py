@@ -141,9 +141,12 @@ class VectorStore:
                 "Chroma collection fingerprint mismatch. Rebuild the SQLite and "
                 "Chroma indexes instead of reusing incompatible vectors."
             )
-        configuration: Any = getattr(self._collection, "configuration", {}) or {}
-        hnsw = configuration.get("hnsw", {}) if isinstance(configuration, Mapping) else {}
-        if hnsw.get("space") != DISTANCE_METRIC:
+        configuration = _configuration_mapping(
+            getattr(self._collection, "configuration", None)
+        )
+        hnsw = _configuration_mapping(configuration.get("hnsw"))
+        space = _configuration_value(hnsw.get("space"))
+        if space != DISTANCE_METRIC:
             raise RuntimeError(
                 "Chroma collection is not configured for cosine distance. Rebuild "
                 "the collection with the required cosine HNSW configuration."
@@ -166,3 +169,32 @@ def _compact_metadata(chunk: ChildChunk) -> dict[str, str | int | float | bool]:
         if isinstance(value, (str, int, float, bool)):
             result[key] = value
     return result
+
+
+def _configuration_mapping(value: Any) -> Mapping[str, Any]:
+    """Read Chroma configuration from dict, Pydantic, or attribute-backed forms."""
+
+    if isinstance(value, Mapping):
+        return value
+    if value is None:
+        return {}
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            dumped = method()
+            if isinstance(dumped, Mapping):
+                return dumped
+    hnsw = getattr(value, "hnsw", None)
+    if hnsw is not None:
+        return {"hnsw": hnsw}
+    space = getattr(value, "space", None)
+    if space is not None:
+        return {"space": space}
+    return {}
+
+
+def _configuration_value(value: Any) -> str | None:
+    """Resolve a configuration enum or primitive to its lowercase text value."""
+
+    resolved = getattr(value, "value", value)
+    return resolved.lower() if isinstance(resolved, str) else None
