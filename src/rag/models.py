@@ -24,6 +24,7 @@ class StructuralBlock:
 @dataclass(frozen=True)
 class SourceDocument:
     doc_id: str
+    content_hash: str
     version_id: str
     title: str
     doc_type: str
@@ -34,6 +35,7 @@ class SourceDocument:
 
 @dataclass(frozen=True)
 class ParentChunk:
+    section_id: str
     parent_id: str
     version_id: str
     content: str

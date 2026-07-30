@@ -17,15 +17,20 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v1"
 DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_EMBEDDING_MODEL_REVISION = "66e95e324bebb9453d3b5be447c898dca1ba0eb0"
 DEFAULT_EMBEDDING_DIMENSION = 1024
 DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 30.0
 DEFAULT_CHILD_TARGET_TOKENS = 450
 DEFAULT_CHILD_MAX_TOKENS = 700
 DEFAULT_CHILD_OVERLAP_TOKENS = 70
 DEFAULT_PARENT_TARGET_TOKENS = 1200
-DEFAULT_BM25_TOP_K = 20
-DEFAULT_DENSE_TOP_K = 20
+DEFAULT_PARENT_MAX_TOKENS = 1600
+DEFAULT_BM25_TOP_K = 40
+DEFAULT_DENSE_TOP_K = 40
+DEFAULT_DENSE_OVERFETCH_FACTOR = 3
+DEFAULT_RRF_CHILD_TOP_K = 12
 DEFAULT_FINAL_TOP_K = 5
+DEFAULT_MAX_HITS_PER_PARENT = 2
 DEFAULT_RRF_K = 60
 DEFAULT_MAX_CONTEXT_TOKENS = 5000
 
@@ -37,15 +42,20 @@ class RAGSettings:
     embedding_base_url: str
     embedding_api_key: str | None = field(repr=False)
     embedding_model: str
+    embedding_model_revision: str
     embedding_dimension: int
     embedding_timeout_seconds: float
     child_target_tokens: int
     child_max_tokens: int
     child_overlap_tokens: int
     parent_target_tokens: int
+    parent_max_tokens: int
     bm25_top_k: int
     dense_top_k: int
+    dense_overfetch_factor: int
+    rrf_child_top_k: int
     final_top_k: int
+    max_hits_per_parent: int
     rrf_k: int
     max_context_tokens: int
     storage_root: Path
@@ -138,10 +148,21 @@ def get_app_config() -> AppConfig:
     child_max_tokens = _positive_int_from_env(
         "RAG_CHILD_MAX_TOKENS", DEFAULT_CHILD_MAX_TOKENS
     )
+    parent_target_tokens = _positive_int_from_env(
+        "RAG_PARENT_TARGET_TOKENS", DEFAULT_PARENT_TARGET_TOKENS
+    )
+    parent_max_tokens = _positive_int_from_env(
+        "RAG_PARENT_MAX_TOKENS", DEFAULT_PARENT_MAX_TOKENS
+    )
     if child_target_tokens > child_max_tokens:
         raise ValueError(
             "RAG_CHILD_TARGET_TOKENS must be less than or equal to "
             "RAG_CHILD_MAX_TOKENS."
+        )
+    if parent_target_tokens > parent_max_tokens:
+        raise ValueError(
+            "RAG_PARENT_TARGET_TOKENS must be less than or equal to "
+            "RAG_PARENT_MAX_TOKENS."
         )
 
     return AppConfig(
@@ -172,6 +193,10 @@ def get_app_config() -> AppConfig:
                 get_env("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
                 or DEFAULT_EMBEDDING_MODEL
             ),
+            embedding_model_revision=(
+                get_env("EMBEDDING_MODEL_REVISION", DEFAULT_EMBEDDING_MODEL_REVISION)
+                or DEFAULT_EMBEDDING_MODEL_REVISION
+            ),
             embedding_dimension=_positive_int_from_env(
                 "EMBEDDING_DIMENSION", DEFAULT_EMBEDDING_DIMENSION
             ),
@@ -183,17 +208,25 @@ def get_app_config() -> AppConfig:
             child_overlap_tokens=_positive_int_from_env(
                 "RAG_CHILD_OVERLAP_TOKENS", DEFAULT_CHILD_OVERLAP_TOKENS
             ),
-            parent_target_tokens=_positive_int_from_env(
-                "RAG_PARENT_TARGET_TOKENS", DEFAULT_PARENT_TARGET_TOKENS
-            ),
+            parent_target_tokens=parent_target_tokens,
+            parent_max_tokens=parent_max_tokens,
             bm25_top_k=_positive_int_from_env(
                 "RAG_BM25_TOP_K", DEFAULT_BM25_TOP_K
             ),
             dense_top_k=_positive_int_from_env(
                 "RAG_DENSE_TOP_K", DEFAULT_DENSE_TOP_K
             ),
+            dense_overfetch_factor=_positive_int_from_env(
+                "RAG_DENSE_OVERFETCH_FACTOR", DEFAULT_DENSE_OVERFETCH_FACTOR
+            ),
+            rrf_child_top_k=_positive_int_from_env(
+                "RAG_RRF_CHILD_TOP_K", DEFAULT_RRF_CHILD_TOP_K
+            ),
             final_top_k=_positive_int_from_env(
                 "RAG_FINAL_TOP_K", DEFAULT_FINAL_TOP_K
+            ),
+            max_hits_per_parent=_positive_int_from_env(
+                "RAG_MAX_HITS_PER_PARENT", DEFAULT_MAX_HITS_PER_PARENT
             ),
             rrf_k=_positive_int_from_env("RAG_RRF_K", DEFAULT_RRF_K),
             max_context_tokens=_positive_int_from_env(

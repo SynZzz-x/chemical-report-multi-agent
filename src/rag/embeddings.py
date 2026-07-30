@@ -9,10 +9,12 @@ import requests
 from src.config import RAGSettings, get_rag_settings
 
 QUERY_EMBEDDING_INSTRUCTION = (
-    "Instruct: 给定一个化工领域问题，检索能够回答该问题的相关技术资料、标准条款、"
-    "工艺条件、设备信息或安全规范\n"
+    "Instruct: Given a chemical-domain question, retrieve relevant technical "
+    "documentation, standard clauses, process conditions, equipment information, "
+    "or safety specifications.\n"
     "Query: "
 )
+TEI_OPENAI_COMPATIBLE_MODEL = "text-embeddings-inference"
 
 
 class TEIEmbeddings:
@@ -78,7 +80,7 @@ class TEIEmbeddings:
     def _embed(self, texts: list[str]) -> list[list[float]]:
         response = self._session.post(
             f"{self._base_url}/v1/embeddings",
-            json={"model": self._settings.embedding_model, "input": texts},
+            json={"model": TEI_OPENAI_COMPATIBLE_MODEL, "input": texts},
             timeout=self._settings.embedding_timeout_seconds,
         )
         response.raise_for_status()

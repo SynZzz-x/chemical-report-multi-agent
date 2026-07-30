@@ -93,9 +93,12 @@ class ChemicalDocumentLoader:
         blocks = cls._structure_blocks(raw_blocks, doc_type)
         normalized_source = _normalized_text(source_path.as_posix())
         normalized_content = "\n".join(_normalized_text(block.text) for block in blocks)
+        doc_id = _digest(normalized_source)
+        content_hash = _digest(normalized_content)
         return SourceDocument(
-            doc_id=_digest(normalized_source),
-            version_id=_digest(normalized_content),
+            doc_id=doc_id,
+            content_hash=content_hash,
+            version_id=_digest(f"{doc_id}\0{content_hash}"),
             title=title,
             doc_type=doc_type,
             source=str(source_path),
@@ -327,7 +330,6 @@ class ChemicalDocumentLoader:
     ) -> list[StructuralBlock]:
         stack: list[tuple[int, str]] = []
         structured: list[StructuralBlock] = []
-        previous_identity: tuple[str, str, str | None] | None = None
         claim_context = False
         for block in raw_blocks:
             text = block.text.strip()
@@ -369,12 +371,6 @@ class ChemicalDocumentLoader:
                     section_path = " > ".join(filter(None, (section_path, clause_no)))
                 if doc_type == "patent" and block_type == "claim":
                     claim_context = True
-            identity = (_normalized_text(text), block_type, clause_no)
-            if (
-                block_type not in {"clause", "claim", "process_step", "table"}
-                and identity == previous_identity
-            ):
-                continue
             structured.append(
                 StructuralBlock(
                     text=text,
@@ -385,7 +381,6 @@ class ChemicalDocumentLoader:
                     clause_no=clause_no,
                 )
             )
-            previous_identity = identity
         return structured
 
     @staticmethod
@@ -426,6 +421,15 @@ class _ParentDraft:
 
 
 @dataclass(frozen=True)
+class _SectionDraft:
+    section_id: str
+    structural_path: str
+    ordinal: int
+    table_title: str
+    blocks: tuple[StructuralBlock, ...]
+
+
+@dataclass(frozen=True)
 class _ChildUnit:
     text: str
     is_table: bool = False
@@ -449,8 +453,11 @@ class StructureAwareChunker:
             raise ValueError("child_max_tokens must be at least child_target_tokens.")
         if rag_settings.child_overlap_tokens < 0:
             raise ValueError("child_overlap_tokens cannot be negative.")
+        if rag_settings.parent_max_tokens < rag_settings.parent_target_tokens:
+            raise ValueError("parent_max_tokens must be at least parent_target_tokens.")
         self._tokenizer = tokenizer
         self._parent_target = rag_settings.parent_target_tokens
+        self._parent_max = rag_settings.parent_max_tokens
         self._child_target = rag_settings.child_target_tokens
         self._child_max = rag_settings.child_max_tokens
         self._child_overlap = rag_settings.child_overlap_tokens
@@ -466,7 +473,13 @@ class StructureAwareChunker:
         return parents, children
 
     def _build_parents(self, document: SourceDocument) -> list[_ParentDraft]:
-        groups: list[tuple[list[StructuralBlock], str]] = []
+        parents: list[_ParentDraft] = []
+        for section in self._build_sections(document):
+            parents.extend(self._build_section_parents(document, section))
+        return parents
+
+    def _build_sections(self, document: SourceDocument) -> list[_SectionDraft]:
+        sections: list[tuple[list[StructuralBlock], str]] = []
         current: list[StructuralBlock] = []
         current_table_title = document.title
         nearest_table_title = document.title
@@ -477,24 +490,59 @@ class StructureAwareChunker:
                 current.append(block)
                 current_table_title = nearest_table_title
                 continue
-            if self._starts_parent(block, current) or self._would_exceed_target(current, block):
-                groups.append((current, current_table_title))
+            if self._starts_section(block, current):
+                sections.append((current, current_table_title))
                 current = [block]
                 current_table_title = nearest_table_title
             else:
                 current.append(block)
         if current:
-            groups.append((current, current_table_title))
+            sections.append((current, current_table_title))
 
-        drafts: list[_ParentDraft] = []
-        for ordinal, (blocks, table_title) in enumerate(groups):
+        drafts: list[_SectionDraft] = []
+        for ordinal, (blocks, table_title) in enumerate(sections):
             section_path = next((block.section_path for block in blocks if block.section_path), "")
             clause_no = next((block.clause_no for block in blocks if block.clause_no), None)
-            page_start, page_end = _page_range(blocks)
             structural_path = clause_no or section_path or blocks[0].block_type
-            parent_id = _digest(
-                f"{document.doc_id}\0{document.version_id}\0{structural_path}\0{ordinal}"
+            section_id = _digest(f"{document.version_id}\0{structural_path}\0{ordinal}")
+            drafts.append(
+                _SectionDraft(
+                    section_id=section_id,
+                    structural_path=structural_path,
+                    ordinal=ordinal,
+                    table_title=table_title,
+                    blocks=tuple(blocks),
+                )
             )
+        return drafts
+
+    def _build_section_parents(
+        self, document: SourceDocument, section: _SectionDraft
+    ) -> list[_ParentDraft]:
+        groups: list[list[StructuralBlock]] = []
+        current: list[StructuralBlock] = []
+        for block in section.blocks:
+            for fragment in self._split_block_for_parent(block):
+                candidate = [*current, fragment]
+                if current and self._tokens(self._parent_content(candidate)) > self._parent_target:
+                    groups.append(current)
+                    current = [fragment]
+                else:
+                    current.append(fragment)
+        if current:
+            groups.append(current)
+
+        drafts: list[_ParentDraft] = []
+        for ordinal, blocks in enumerate(groups):
+            section_path = next(
+                (block.section_path for block in blocks if block.section_path), ""
+            )
+            clause_no = next((block.clause_no for block in blocks if block.clause_no), None)
+            page_start, page_end = _page_range(blocks)
+            page_or_offset = (
+                f"page:{page_start}" if page_start is not None else f"offset:{ordinal}"
+            )
+            parent_id = _digest(f"{section.section_id}\0{ordinal}\0{page_or_offset}")
             metadata = {
                 "doc_id": document.doc_id,
                 "title": document.title,
@@ -504,15 +552,19 @@ class StructureAwareChunker:
                 "clause_no": clause_no,
                 "page_start": page_start,
                 "page_end": page_end,
+                "section_id": section.section_id,
+                "section_ordinal": section.ordinal,
                 "parent_ordinal": ordinal,
-                "table_title": table_title,
+                "page_or_offset": page_or_offset,
+                "table_title": section.table_title,
             }
             drafts.append(
                 _ParentDraft(
                     ParentChunk(
+                        section_id=section.section_id,
                         parent_id=parent_id,
                         version_id=document.version_id,
-                        content="\n\n".join(block.text for block in blocks),
+                        content=self._parent_content(blocks),
                         metadata=metadata,
                     ),
                     tuple(blocks),
@@ -520,21 +572,46 @@ class StructureAwareChunker:
             )
         return drafts
 
-    def _starts_parent(
-        self, block: StructuralBlock, current: list[StructuralBlock]
+    @staticmethod
+    def _starts_section(
+        block: StructuralBlock, current: list[StructuralBlock]
     ) -> bool:
-        if block.block_type in {"heading", "clause", "claim", "process_step"}:
+        if block.block_type in {
+            "heading",
+            "clause",
+            "claim",
+            "process_step",
+            "table_title",
+        }:
             return True
-        return False
+        return block.block_type == "table" and current[-1].block_type != "table_title"
 
-    def _would_exceed_target(
-        self, current: list[StructuralBlock], block: StructuralBlock
-    ) -> bool:
-        protected = current[0].block_type in {"clause", "claim", "process_step"}
-        if protected:
-            return False
-        candidate = "\n\n".join(item.text for item in (*current, block))
-        return self._tokens(candidate) > self._parent_target
+    def _split_block_for_parent(self, block: StructuralBlock) -> list[StructuralBlock]:
+        if self._tokens(block.text) <= self._parent_max:
+            return [block]
+        fragments: list[StructuralBlock] = []
+        remaining = block.text.strip()
+        while remaining:
+            end = self._largest_prefix_within_limit(remaining, self._parent_max)
+            if end <= 0:
+                raise ValueError("Tokenizer cannot fit a single character in a parent chunk.")
+            split_at = self._preferred_split(remaining, end)
+            fragments.append(
+                StructuralBlock(
+                    text=remaining[:split_at].strip(),
+                    block_type=block.block_type,
+                    section_path=block.section_path,
+                    page_start=block.page_start,
+                    page_end=block.page_end,
+                    clause_no=block.clause_no,
+                )
+            )
+            remaining = remaining[split_at:].strip()
+        return fragments
+
+    @staticmethod
+    def _parent_content(blocks: list[StructuralBlock]) -> str:
+        return "\n\n".join(block.text for block in blocks)
 
     def _build_children(
         self, document: SourceDocument, draft: _ParentDraft) -> list[ChildChunk]:
