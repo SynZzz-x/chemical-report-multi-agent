@@ -11,10 +11,8 @@ from typing import Iterable
 import unicodedata
 
 from src.config import (
-    DEFAULT_CHILD_MAX_TOKENS,
-    DEFAULT_CHILD_OVERLAP_TOKENS,
-    DEFAULT_CHILD_TARGET_TOKENS,
-    DEFAULT_PARENT_TARGET_TOKENS,
+    RAGSettings,
+    get_rag_settings,
 )
 
 from .models import ChildChunk, ParentChunk, SourceDocument, StructuralBlock
@@ -26,17 +24,22 @@ _CHINESE_HEADING_RE = re.compile(
     r"^第(?P<number>[一二三四五六七八九十百千〇零]+)(?P<kind>[章节部分篇])\s*(?P<title>.*)$"
 )
 _ARABIC_HEADING_RE = re.compile(
-    r"^(?P<number>\d+(?:\.\d+){0,5})[.、]?(?:\s+|$)(?P<title>.+)$"
+    r"^(?P<number>\d+(?:\.\d+){0,5})(?:\s+|$)(?P<title>.+)$"
 )
-_STANDARD_CLAUSE_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)+)\s+(?P<text>.+)$")
+_STANDARD_CLAUSE_RE = re.compile(
+    r"^(?P<number>\d+(?:\.\d+)+)[.、:：]?\s*(?P<text>.+)$"
+)
 _ARTICLE_RE = re.compile(r"^第(?P<number>[一二三四五六七八九十百千〇零]+)条\s*(?P<text>.+)$")
 _CLAIM_RE = re.compile(r"^(?:权利要求|claim)\s*(?P<number>\d+)\s*[:：.、]?\s*(?P<text>.*)$", re.I)
+_BARE_CLAIM_RE = re.compile(r"^(?P<number>\d+)[.、)）]\s*(?P<text>.+)$")
+_CLAIMS_SECTION_RE = re.compile(r"^(?:权利要求(?:书)?|claims?)\b", re.I)
 _LIST_RE = re.compile(r"^(?:[-*•●▪]|(?:\d+|[一二三四五六七八九十])[.、)）]|[（(](?:\d+|[一二三四五六七八九十])[)）])\s*.+$")
 _PROCESS_RE = re.compile(
     r"^(?:步骤|step|工序|阶段)\s*(?:[一二三四五六七八九十\d]+|S\d+)?\s*[:：.、-]?\s*.+$",
     re.I,
 )
 _TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$|^\s*[^\t]+(?:\t[^\t]+)+\s*$")
+_TABLE_TITLE_RE = re.compile(r"^(?:表\s*\d+[\s.:：、-]*|table\s*\d+[\s.:：、-]*).+", re.I)
 _SENTENCE_RE = re.compile(r"(?<=[。！？!?；;])\s*|(?<=[.])(?=\s+[A-Z0-9])")
 _UNIT_RE = re.compile(r"(?:\(([^()]+)\)|\[([^\[\]]+)\]|/\s*([%A-Za-z°μµ][\w/%°μµ·^\-]*)$)")
 _DATE_COLUMN_RE = re.compile(r"date|time|日期|时间|年月|批次", re.I)
@@ -140,7 +143,12 @@ class ChemicalDocumentLoader:
                 if not text:
                     continue
                 style_name = paragraph.style.name.lower() if paragraph.style else ""
-                block_type = "heading" if style_name.startswith("heading") else "paragraph"
+                heading_match = re.match(r"heading\s*(?P<level>\d+)?", style_name)
+                block_type = (
+                    f"heading:{heading_match.group('level') or '1'}"
+                    if heading_match
+                    else "paragraph"
+                )
                 blocks.append(StructuralBlock(text, block_type, "", None, None, None))
             elif isinstance(child, CT_Tbl):
                 table = Table(child, document)
@@ -253,7 +261,10 @@ class ChemicalDocumentLoader:
                 table_rows.append(line)
                 continue
             flush_table()
-            if cls._heading_details(line) is not None:
+            if _LIST_RE.match(line):
+                flush_pending()
+                blocks.append(StructuralBlock(line, "list_item", "", page, page, None))
+            elif cls._heading_details(line) is not None:
                 flush_pending()
                 blocks.append(StructuralBlock(line, "heading", "", page, page, None))
             elif _CLAIM_RE.match(line) or _ARTICLE_RE.match(line) or _PROCESS_RE.match(line):
@@ -316,14 +327,34 @@ class ChemicalDocumentLoader:
     ) -> list[StructuralBlock]:
         stack: list[tuple[int, str]] = []
         structured: list[StructuralBlock] = []
-        seen: set[tuple[str, str, int | None, int | None]] = set()
+        previous_identity: tuple[str, str, str | None] | None = None
+        claim_context = False
         for block in raw_blocks:
             text = block.text.strip()
             if not text:
                 continue
-            heading = cls._heading_details(text) if block.block_type == "heading" else None
-            if doc_type in {"standard", "safety"} and _STANDARD_CLAUSE_RE.match(text):
-                heading = None
+            is_claims_section = bool(_CLAIMS_SECTION_RE.match(text))
+            block_type, clause_no = cls._classify_block(
+                text, block.block_type, doc_type, claim_context
+            )
+            heading = None
+            if block.block_type.startswith("heading") and block_type not in {
+                "clause",
+                "claim",
+            }:
+                heading = cls._heading_details(text) or (
+                    cls._loader_heading_level(block.block_type),
+                    text,
+                )
+            elif block_type not in {
+                "clause",
+                "claim",
+                "list_item",
+                "process_step",
+                "table",
+                "table_title",
+            } and is_claims_section:
+                heading = (1, text)
             if heading is not None:
                 level, title = heading
                 while stack and stack[-1][0] >= level:
@@ -331,15 +362,19 @@ class ChemicalDocumentLoader:
                 stack.append((level, title))
                 section_path = " > ".join(item[1] for item in stack)
                 block_type, clause_no = "heading", None
+                claim_context = doc_type == "patent" and is_claims_section
             else:
                 section_path = " > ".join(item[1] for item in stack)
-                block_type, clause_no = cls._classify_block(text, block.block_type, doc_type)
                 if clause_no:
                     section_path = " > ".join(filter(None, (section_path, clause_no)))
-            identity = (text, block_type, block.page_start, block.page_end)
-            if identity in seen:
+                if doc_type == "patent" and block_type == "claim":
+                    claim_context = True
+            identity = (_normalized_text(text), block_type, clause_no)
+            if (
+                block_type not in {"clause", "claim", "process_step", "table"}
+                and identity == previous_identity
+            ):
                 continue
-            seen.add(identity)
             structured.append(
                 StructuralBlock(
                     text=text,
@@ -350,22 +385,36 @@ class ChemicalDocumentLoader:
                     clause_no=clause_no,
                 )
             )
+            previous_identity = identity
         return structured
 
     @staticmethod
-    def _classify_block(text: str, original_type: str, doc_type: str) -> tuple[str, str | None]:
+    def _loader_heading_level(block_type: str) -> int:
+        match = re.fullmatch(r"heading:(?P<level>\d+)", block_type)
+        return int(match.group("level")) if match else 1
+
+    @staticmethod
+    def _classify_block(
+        text: str,
+        original_type: str,
+        doc_type: str,
+        claim_context: bool = False,
+    ) -> tuple[str, str | None]:
         if original_type == "table" or _TABLE_ROW_RE.match(text.splitlines()[0]):
             return "table", None
+        if _TABLE_TITLE_RE.match(text):
+            return "table_title", None
         if match := _CLAIM_RE.match(text):
+            return "claim", match.group("number")
+        if doc_type == "patent" and claim_context and (match := _BARE_CLAIM_RE.match(text)):
             return "claim", match.group("number")
         if match := _ARTICLE_RE.match(text):
             return "clause", f"第{match.group('number')}条"
         if match := _STANDARD_CLAUSE_RE.match(text):
-            if doc_type in {"standard", "safety"}:
-                return "clause", match.group("number")
+            return "clause", match.group("number")
         if _PROCESS_RE.match(text):
             return "process_step", None
-        if _LIST_RE.match(text):
+        if original_type == "list_item" or _LIST_RE.match(text):
             return "list_item", None
         return "paragraph", None
 
@@ -388,22 +437,23 @@ class StructureAwareChunker:
     def __init__(
         self,
         tokenizer: ChemicalTokenizer,
-        parent_target_tokens: int = DEFAULT_PARENT_TARGET_TOKENS,
-        child_target_tokens: int = DEFAULT_CHILD_TARGET_TOKENS,
-        child_max_tokens: int = DEFAULT_CHILD_MAX_TOKENS,
-        child_overlap_tokens: int = DEFAULT_CHILD_OVERLAP_TOKENS,
+        settings: RAGSettings | None = None,
     ) -> None:
-        if parent_target_tokens <= 0 or child_target_tokens <= 0:
+        rag_settings = settings or get_rag_settings()
+        if (
+            rag_settings.parent_target_tokens <= 0
+            or rag_settings.child_target_tokens <= 0
+        ):
             raise ValueError("Chunk token targets must be positive integers.")
-        if child_max_tokens < child_target_tokens:
+        if rag_settings.child_max_tokens < rag_settings.child_target_tokens:
             raise ValueError("child_max_tokens must be at least child_target_tokens.")
-        if child_overlap_tokens < 0:
+        if rag_settings.child_overlap_tokens < 0:
             raise ValueError("child_overlap_tokens cannot be negative.")
         self._tokenizer = tokenizer
-        self._parent_target = parent_target_tokens
-        self._child_target = child_target_tokens
-        self._child_max = child_max_tokens
-        self._child_overlap = child_overlap_tokens
+        self._parent_target = rag_settings.parent_target_tokens
+        self._child_target = rag_settings.child_target_tokens
+        self._child_max = rag_settings.child_max_tokens
+        self._child_overlap = rag_settings.child_overlap_tokens
 
     def chunk(self, document: SourceDocument) -> tuple[list[ParentChunk], list[ChildChunk]]:
         drafts = self._build_parents(document)
@@ -416,22 +466,28 @@ class StructureAwareChunker:
         return parents, children
 
     def _build_parents(self, document: SourceDocument) -> list[_ParentDraft]:
-        groups: list[list[StructuralBlock]] = []
+        groups: list[tuple[list[StructuralBlock], str]] = []
         current: list[StructuralBlock] = []
+        current_table_title = document.title
+        nearest_table_title = document.title
         for block in document.blocks:
+            if block.block_type == "table_title" or _TABLE_TITLE_RE.match(block.text):
+                nearest_table_title = block.text
             if not current:
                 current.append(block)
+                current_table_title = nearest_table_title
                 continue
             if self._starts_parent(block, current) or self._would_exceed_target(current, block):
-                groups.append(current)
+                groups.append((current, current_table_title))
                 current = [block]
+                current_table_title = nearest_table_title
             else:
                 current.append(block)
         if current:
-            groups.append(current)
+            groups.append((current, current_table_title))
 
         drafts: list[_ParentDraft] = []
-        for ordinal, blocks in enumerate(groups):
+        for ordinal, (blocks, table_title) in enumerate(groups):
             section_path = next((block.section_path for block in blocks if block.section_path), "")
             clause_no = next((block.clause_no for block in blocks if block.clause_no), None)
             page_start, page_end = _page_range(blocks)
@@ -449,6 +505,7 @@ class StructureAwareChunker:
                 "page_start": page_start,
                 "page_end": page_end,
                 "parent_ordinal": ordinal,
+                "table_title": table_title,
             }
             drafts.append(
                 _ParentDraft(
@@ -481,11 +538,12 @@ class StructureAwareChunker:
 
     def _build_children(
         self, document: SourceDocument, draft: _ParentDraft) -> list[ChildChunk]:
-        units = [
-            unit
-            for block in draft.blocks
-            for unit in self._units_from_block(block, document.title)
-        ]
+        units: list[_ChildUnit] = []
+        nearest_table_title = str(draft.chunk.metadata.get("table_title", document.title))
+        for block in draft.blocks:
+            if block.block_type == "table_title" or _TABLE_TITLE_RE.match(block.text):
+                nearest_table_title = block.text
+            units.extend(self._units_from_block(block, nearest_table_title))
         child_units: list[list[_ChildUnit]] = []
         current: list[_ChildUnit] = []
         for unit in units:
@@ -546,7 +604,8 @@ class StructureAwareChunker:
         tab_rows = [row for row in rows if "\t" in row]
         table_rows = pipe_rows or tab_rows
         if len(table_rows) < 2:
-            return [_ChildUnit(text, is_table=True)]
+            header = table_rows[0] if table_rows else text
+            return [_ChildUnit(f"表格：{title}\n表头：{header}", is_table=True)]
         header = table_rows[0]
         data_rows = [
             row
@@ -554,6 +613,8 @@ class StructureAwareChunker:
             if not re.fullmatch(r"\|?\s*[:\- ]+(?:\|\s*[:\- ]+)+\|?", row)
         ]
         context = f"表格：{title}\n表头：{header}"
+        if not data_rows:
+            return [_ChildUnit(context, is_table=True)]
         return [_ChildUnit(f"{context}\n数据行：{row}", is_table=True) for row in data_rows]
 
     def _split_unit(self, unit: _ChildUnit) -> list[_ChildUnit]:
