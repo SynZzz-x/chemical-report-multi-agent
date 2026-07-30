@@ -57,7 +57,7 @@ class TEIEmbeddings:
         return self.count_tokens_batch([text])[0]
 
     def count_tokens_batch(self, texts: Sequence[str]) -> list[int]:
-        """Return one token count per input using a single TEI request."""
+        """Return one token count per input using TEI's batch tokenization API."""
 
         inputs = list(texts)
         if not inputs:
@@ -69,8 +69,22 @@ class TEIEmbeddings:
             json={"inputs": inputs},
             timeout=self._settings.embedding_timeout_seconds,
         )
+        if response.status_code in {400, 422}:
+            # TEI 1.9 accepts ``TokenizeInput::Batch(Vec<String>)``. Keep a
+            # compatibility path for older deployments whose /tokenize route
+            # accepts only one string per request.
+            return [self._count_tokens_single(text) for text in inputs]
         response.raise_for_status()
         return _parse_token_counts(response.json(), len(inputs))
+
+    def _count_tokens_single(self, text: str) -> int:
+        response = self._session.post(
+            f"{self._base_url}/tokenize",
+            json={"inputs": text},
+            timeout=self._settings.embedding_timeout_seconds,
+        )
+        response.raise_for_status()
+        return _parse_token_counts(response.json(), 1)[0]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents without adding a retrieval instruction."""

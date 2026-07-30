@@ -119,15 +119,18 @@ Use `requests.Session.post()` against:
 
 ```text
 GET  {base}/health
-POST {base}/tokenize       {"inputs": text}
+POST {base}/tokenize       {"inputs": [text, ...]}
 POST {base}/v1/embeddings  {"model": model, "input": texts}
 ```
 
 Normalize the base URL by removing trailing `/` and a trailing `/v1`. Parse
-both TEI token-list responses and `{tokens: [...]}` responses. Sort embedding
-rows by their response `index`, verify one row per input, and reject any vector
-whose length differs from `embedding_dimension`. Query embeddings prepend the
-fixed English chemical-retrieval instruction; document embeddings do not.
+both TEI token-list responses and `{tokens: [...]}` responses. TEI 1.9 defines
+the `/tokenize` input as either a string or a batch of strings; use the batch
+form by default and fall back to individual string requests only when an older
+deployment rejects the batch payload with HTTP 400/422. Sort embedding rows by
+their response `index`, verify one row per input, and reject any vector whose
+length differs from `embedding_dimension`. Query embeddings prepend the fixed
+English chemical-retrieval instruction; document embeddings do not.
 
 - [ ] **Step 4: Implement the tokenizer boundary**
 
