@@ -639,7 +639,10 @@ class StructureAwareChunker:
     ) -> list[StructuralBlock]:
         context, rows = self._table_parent_context(block.text, title)
         if not rows:
-            return [self._copy_block(block, context)]
+            return [
+                self._copy_block(block, text)
+                for text in self._split_table_context_texts(context, self._parent_max)
+            ]
 
         fragments: list[StructuralBlock] = []
         current: list[str] = []
@@ -690,6 +693,127 @@ class StructureAwareChunker:
     @staticmethod
     def _table_parent_text(context: str, rows: list[str]) -> str:
         return context + "\n" + "\n".join(f"数据行：{row}" for row in rows)
+
+    def _split_table_context_texts(self, context: str, token_limit: int) -> list[str]:
+        prefix, fields = self._table_context_fields(context)
+        if not fields:
+            fields = ["(无列信息)"]
+
+        fragments: list[str] = []
+        current: list[str] = []
+        for field in fields:
+            for field_fragment in self._split_table_context_field(
+                prefix, field, token_limit
+            ):
+                candidate = self._table_context_text(prefix, [*current, field_fragment])
+                if current and self._tokens(candidate) > token_limit:
+                    fragments.append(self._table_context_text(prefix, current))
+                    current = [field_fragment]
+                else:
+                    current.append(field_fragment)
+        if current:
+            fragments.append(self._table_context_text(prefix, current))
+        return fragments
+
+    @staticmethod
+    def _table_context_fields(context: str) -> tuple[str, list[str]]:
+        lines = [line.strip() for line in context.splitlines() if line.strip()]
+        title = next((line for line in lines if line.startswith("表格：")), "表格：未命名表格")
+        remaining = [line for line in lines if line != title]
+        header = next((line for line in remaining if line.startswith("表头：")), None)
+        if header is None:
+            return f"{title}\n架构：", remaining
+        fields = [header.removeprefix("表头：").strip()]
+        fields.extend(line for line in remaining if line != header)
+        return f"{title}\n表头：", [field for field in fields if field]
+
+    @staticmethod
+    def _table_context_text(prefix: str, fields: list[str]) -> str:
+        return prefix + ("\n" + "\n".join(fields) if fields else "")
+
+    def _split_table_context_field(
+        self, prefix: str, field: str, token_limit: int, delimiter: str | None = None
+    ) -> list[str]:
+        candidate = self._table_context_text(prefix, [field])
+        if self._tokens(candidate) <= token_limit:
+            return [field]
+        cells, detected_delimiter = self._table_cells(field)
+        row_delimiter = delimiter if delimiter is not None else detected_delimiter
+        if cells:
+            fragments: list[str] = []
+            current: list[str] = []
+            for cell in cells:
+                row = self._format_table_row([*current, cell], row_delimiter)
+                if current and self._tokens(self._table_context_text(prefix, [row])) > token_limit:
+                    fragments.append(self._format_table_row(current, row_delimiter))
+                    current = []
+                single = self._format_table_row([cell], row_delimiter)
+                if self._tokens(self._table_context_text(prefix, [single])) > token_limit:
+                    fragments.extend(
+                        self._split_table_context_field(
+                            prefix, cell, token_limit, row_delimiter
+                        )
+                    )
+                else:
+                    current.append(cell)
+            if current:
+                fragments.append(self._format_table_row(current, row_delimiter))
+            return fragments
+
+        sentences = [
+            sentence.strip()
+            for sentence in _SENTENCE_RE.split(field)
+            if sentence.strip()
+        ]
+        if len(sentences) > 1:
+            fragments = []
+            current = []
+            for sentence in sentences:
+                candidate_field = " ".join([*current, sentence]).strip()
+                if current and self._tokens(
+                    self._table_context_text(prefix, [candidate_field])
+                ) > token_limit:
+                    fragments.append(" ".join(current))
+                    current = []
+                if self._tokens(self._table_context_text(prefix, [sentence])) > token_limit:
+                    fragments.extend(
+                        self._split_table_context_field(prefix, sentence, token_limit, "")
+                    )
+                else:
+                    current.append(sentence)
+            if current:
+                fragments.append(" ".join(current))
+            return fragments
+
+        return self._hard_split_table_context_field(prefix, field, token_limit)
+
+    def _hard_split_table_context_field(
+        self, prefix: str, field: str, token_limit: int
+    ) -> list[str]:
+        fragments: list[str] = []
+        remaining = field.strip()
+        while remaining:
+            end = self._largest_table_context_prefix(prefix, remaining, token_limit)
+            if end <= 0:
+                raise ValueError("Table identity prefix cannot fit a single field character.")
+            split_at = self._preferred_split(remaining, end)
+            fragments.append(remaining[:split_at].strip())
+            remaining = remaining[split_at:].strip()
+        return fragments
+
+    def _largest_table_context_prefix(
+        self, prefix: str, value: str, token_limit: int
+    ) -> int:
+        low, high, best = 1, len(value), 0
+        while low <= high:
+            midpoint = (low + high) // 2
+            candidate = self._table_context_text(prefix, [value[:midpoint]])
+            if self._tokens(candidate) <= token_limit:
+                best = midpoint
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        return best
 
     def _split_table_row_texts(
         self, context: str, row: str, token_limit: int
@@ -935,6 +1059,10 @@ class StructureAwareChunker:
                             context, row, self._child_max
                         )
                     ]
+                return [
+                    _ChildUnit(text, is_table=True)
+                    for text in self._split_table_context_texts(context, self._child_max)
+                ]
         pieces: list[_ChildUnit] = []
         remaining = unit.text.strip()
         while remaining:
