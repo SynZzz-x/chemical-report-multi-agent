@@ -15,6 +15,40 @@ from typing import Any
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v1"
+DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:8080"
+DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_EMBEDDING_DIMENSION = 1024
+DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 30.0
+DEFAULT_CHILD_TARGET_TOKENS = 450
+DEFAULT_CHILD_MAX_TOKENS = 700
+DEFAULT_CHILD_OVERLAP_TOKENS = 70
+DEFAULT_PARENT_TARGET_TOKENS = 1200
+DEFAULT_BM25_TOP_K = 20
+DEFAULT_DENSE_TOP_K = 20
+DEFAULT_FINAL_TOP_K = 5
+DEFAULT_RRF_K = 60
+DEFAULT_MAX_CONTEXT_TOKENS = 5000
+
+
+@dataclass(frozen=True)
+class RAGSettings:
+    """Immutable configuration for the hybrid chemical RAG pipeline."""
+
+    embedding_base_url: str
+    embedding_api_key: str | None = field(repr=False)
+    embedding_model: str
+    embedding_dimension: int
+    embedding_timeout_seconds: float
+    child_target_tokens: int
+    child_max_tokens: int
+    child_overlap_tokens: int
+    parent_target_tokens: int
+    bm25_top_k: int
+    dense_top_k: int
+    final_top_k: int
+    rrf_k: int
+    max_context_tokens: int
+    storage_root: Path
 
 
 @dataclass(frozen=True)
@@ -26,6 +60,7 @@ class AppConfig:
     deepseek_model: str
     dashscope_api_key: str | None = field(repr=False)
     dashscope_embedding_model: str
+    rag_settings: RAGSettings
 
 def get_cache_root() -> Path:
     """
@@ -71,9 +106,43 @@ def get_env(name: str, default: str | None = None) -> str | None:
     return value
 
 
+def _positive_int_from_env(name: str, default: int) -> int:
+    value = get_env(name, str(default))
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return parsed
+
+
+def _positive_float_from_env(name: str, default: float) -> float:
+    value = get_env(name, str(default))
+    try:
+        parsed = float(value) if value is not None else default
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive number.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive number.")
+    return parsed
+
+
 @lru_cache(maxsize=1)
 def get_app_config() -> AppConfig:
     """Load model-provider settings once for consistent process-wide access."""
+
+    child_target_tokens = _positive_int_from_env(
+        "RAG_CHILD_TARGET_TOKENS", DEFAULT_CHILD_TARGET_TOKENS
+    )
+    child_max_tokens = _positive_int_from_env(
+        "RAG_CHILD_MAX_TOKENS", DEFAULT_CHILD_MAX_TOKENS
+    )
+    if child_target_tokens > child_max_tokens:
+        raise ValueError(
+            "RAG_CHILD_TARGET_TOKENS must be less than or equal to "
+            "RAG_CHILD_MAX_TOKENS."
+        )
 
     return AppConfig(
         deepseek_api_key=get_env("DEEPSEEK_API_KEY"),
@@ -93,7 +162,52 @@ def get_app_config() -> AppConfig:
             )
             or DEFAULT_DASHSCOPE_EMBEDDING_MODEL
         ),
+        rag_settings=RAGSettings(
+            embedding_base_url=(
+                get_env("EMBEDDING_BASE_URL", DEFAULT_EMBEDDING_BASE_URL)
+                or DEFAULT_EMBEDDING_BASE_URL
+            ),
+            embedding_api_key=get_env("EMBEDDING_API_KEY"),
+            embedding_model=(
+                get_env("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+                or DEFAULT_EMBEDDING_MODEL
+            ),
+            embedding_dimension=_positive_int_from_env(
+                "EMBEDDING_DIMENSION", DEFAULT_EMBEDDING_DIMENSION
+            ),
+            embedding_timeout_seconds=_positive_float_from_env(
+                "EMBEDDING_TIMEOUT_SECONDS", DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+            ),
+            child_target_tokens=child_target_tokens,
+            child_max_tokens=child_max_tokens,
+            child_overlap_tokens=_positive_int_from_env(
+                "RAG_CHILD_OVERLAP_TOKENS", DEFAULT_CHILD_OVERLAP_TOKENS
+            ),
+            parent_target_tokens=_positive_int_from_env(
+                "RAG_PARENT_TARGET_TOKENS", DEFAULT_PARENT_TARGET_TOKENS
+            ),
+            bm25_top_k=_positive_int_from_env(
+                "RAG_BM25_TOP_K", DEFAULT_BM25_TOP_K
+            ),
+            dense_top_k=_positive_int_from_env(
+                "RAG_DENSE_TOP_K", DEFAULT_DENSE_TOP_K
+            ),
+            final_top_k=_positive_int_from_env(
+                "RAG_FINAL_TOP_K", DEFAULT_FINAL_TOP_K
+            ),
+            rrf_k=_positive_int_from_env("RAG_RRF_K", DEFAULT_RRF_K),
+            max_context_tokens=_positive_int_from_env(
+                "RAG_MAX_CONTEXT_TOKENS", DEFAULT_MAX_CONTEXT_TOKENS
+            ),
+            storage_root=get_cache_root() / "rag",
+        ),
     )
+
+
+def get_rag_settings() -> RAGSettings:
+    """Return the process-wide immutable RAG settings."""
+
+    return get_app_config().rag_settings
 
 
 def missing_key_message(name: str) -> str:
