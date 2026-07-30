@@ -268,6 +268,11 @@ class BaseWorkerTool(ABC):
             return str(result["content"])
         return json.dumps(result, ensure_ascii=False, indent=2)
 
+    def expose_failed_result_to_model(self, result: Dict[str, Any]) -> bool:
+        """Whether a tool's structured failure is safe and useful for the model."""
+
+        return False
+
     def create_langchain_tool(self, task: Task) -> BaseTool:
         """创建LangChain兼容的工具"""
 
@@ -276,7 +281,9 @@ class BaseWorkerTool(ABC):
             try:
                 result = self.execute(task, **kwargs)
                 if isinstance(result, dict):
-                    if result.get("success") is False or result.get("error"):
+                    if (
+                        result.get("success") is False or result.get("error")
+                    ) and not self.expose_failed_result_to_model(result):
                         error = result.get("error") or "工具返回失败状态"
                         raise ToolExecutionError(str(error))
                     return self.format_result_for_model(result)
@@ -390,25 +397,14 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
     def format_result_for_model(self, result: Dict[str, Any]) -> str:
         """Send both readable and structured retrieval evidence to DeepSeek."""
 
-        if "evidence" not in result:
+        if "raw_data" not in result:
             return super().format_result_for_model(result)
-        return json.dumps(
-            {
-                "query": result.get("query", ""),
-                "summary": result.get("summary", ""),
-                "content": result.get("content", ""),
-                "evidence": result.get("evidence", []),
-                "retrieval_mode": result.get("retrieval_mode", "unavailable"),
-                "warnings": result.get("warnings", []),
-                "evidence_assessment_required": result.get(
-                    "evidence_assessment_required", False
-                ),
-                "evidence_instruction": result.get("evidence_instruction", ""),
-                "retrieval_diagnostics": result.get("raw_data", {}),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    def expose_failed_result_to_model(self, result: Dict[str, Any]) -> bool:
+        """Keep hybrid-RAG failure diagnostics available to DeepSeek."""
+
+        return "raw_data" in result
 
     def execute(self, task: Task, **kwargs) -> Dict[str, Any]:
         if not self._initialized or not self.knowledge_base:
@@ -450,16 +446,43 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
 
         print(f"📚 正在加载 {len(document_files)} 个文档到知识库...")
         load_result = self.knowledge_base.load_documents(document_files)
-        task["knowledge_base_loaded"] = True
+        failed_files = [
+            item
+            for item in load_result.get("files", [])
+            if item.get("status") == "failed"
+            or item.get("cleanup_tracking_failed", False)
+        ]
+        task["knowledge_base_loaded"] = bool(load_result.get("activated_files", 0))
 
         return {
-            "success": True,
+            "success": bool(load_result.get("success", False)),
             "operation": "load",
             "total_files": len(document_files),
             "loaded_files": load_result.get("loaded_files", 0),
+            "loaded_with_warnings_files": load_result.get(
+                "loaded_with_warnings_files", 0
+            ),
+            "activated_files": load_result.get("activated_files", 0),
+            "skipped_files": load_result.get("skipped_files", 0),
             "total_chunks": load_result.get("total_chunks", 0),
-            "failed_files": load_result.get("failed_files", []),
-            "summary": f"成功加载 {load_result.get('loaded_files', 0)} 个文档，共 {load_result.get('total_chunks', 0)} 个文本块"
+            "failed_files": failed_files,
+            "failed_files_count": len(failed_files),
+            "cleanup_pending_files": load_result.get("cleanup_pending_files", 0),
+            "cleanup_tracking_failed_files": load_result.get(
+                "cleanup_tracking_failed_files", 0
+            ),
+            "cleanup_pending_versions": load_result.get(
+                "cleanup_pending_versions", 0
+            ),
+            "incomplete_versions": load_result.get("incomplete_versions", 0),
+            "warnings": load_result.get("warnings", []),
+            "error": load_result.get("error"),
+            "summary": (
+                f"知识库处理了 {len(document_files)} 个文档，激活 "
+                f"{load_result.get('activated_files', 0)} 个版本，"
+                f"生成 {load_result.get('total_chunks', 0)} 个文本块。"
+            ),
+            "raw_data": load_result,
         }
 
     def _query_knowledge_base(self, task: Task, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -484,9 +507,15 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
 
         if result.get("error"):
             return {
-                "success": False,
+                "success": bool(result.get("success", False)),
                 "error": result["error"],
-                "query": query
+                "query": query,
+                "retrieval_mode": result.get("retrieval_mode", "unavailable"),
+                "warnings": result.get("warnings", []),
+                "evidence_assessment_required": result.get(
+                    "evidence_assessment_required", False
+                ),
+                "raw_data": result,
             }
 
         relevant_content = []
@@ -525,7 +554,7 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             )
 
         return {
-            "success": True,
+            "success": bool(result.get("success", True)),
             "query": query,
             "results_count": len(relevant_content),
             "retrieval_mode": result.get("retrieval_mode", "unavailable"),
@@ -544,19 +573,17 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
     def _get_knowledge_base_stats(self) -> Dict[str, Any]:
         """获取知识库统计信息"""
         stats = self.knowledge_base.get_stats()
-        if stats.get("error"):
-            return {
-                "success": False,
-                "error": stats["error"],
-            }
         return {
-            "success": True,
+            "success": bool(stats.get("success", False)),
             "operation": "stats",
             "stats": stats,
+            "warnings": stats.get("warnings", []),
+            "error": stats.get("error"),
             "summary": (
                 f"知识库当前包含 {stats.get('documents', 0)} 个文档、"
                 f"{stats.get('chunks', 0)} 个文本块和 {stats.get('vectors', 0)} 个向量"
-            )
+            ),
+            "raw_data": stats,
         }
 
 
