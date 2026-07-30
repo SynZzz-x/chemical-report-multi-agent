@@ -723,25 +723,70 @@ class StructureAwareChunker:
         units: str | None,
         sheet: str | None,
     ) -> str:
-        components = [("表格", title), ("表头", header)]
-        if units:
-            components.append(("单位", units))
-        if sheet:
-            components.append(("工作表", sheet))
+        components = [
+            ("title", "表格", title.strip() or "未命名表格"),
+            ("header", "表头", header.strip() or "未检测到列"),
+        ]
+        if units and units.strip():
+            components.append(("units", "单位", units.strip()))
+        if sheet and sheet.strip():
+            components.append(("sheet", "工作表", sheet.strip()))
 
         def render(values: list[str], truncated: bool) -> str:
-            lines = [f"{label}：{value}" for (label, _), value in zip(components, values)]
+            lines = [
+                f"{label}：{value}"
+                for (_, label, _), value in zip(components, values)
+            ]
             if truncated:
                 lines.append("[上下文已截断]")
             return "\n".join(lines)
 
-        values = [value.strip() for _, value in components]
+        values = [value for _, _, value in components]
         full = render(values, False)
         if self._tokens(full) <= TABLE_CONTEXT_MAX_TOKENS:
             return full
 
-        for index in range(len(values) - 1, -1, -1):
-            low, high, best = 0, len(values[index]), 0
+        # Each present identity value gets a nonempty reserved prefix and an
+        # independent token budget. The header receives the largest share, but
+        # cannot consume the title, units, or sheet identity.
+        minimums = [value[:1] for value in values]
+        minimum_context = render(minimums, True)
+        if self._tokens(minimum_context) > TABLE_CONTEXT_MAX_TOKENS:
+            raise ValueError("Table identity labels exceed the compact context token limit.")
+
+        remaining = TABLE_CONTEXT_MAX_TOKENS - self._tokens(minimum_context)
+        weights = {"title": 3, "header": 6, "units": 2, "sheet": 2}
+        weight_total = sum(weights[key] for key, _, _ in components)
+        field_budgets = [
+            self._tokens(minimum)
+            + (remaining * weights[key] // weight_total)
+            for minimum, (key, _, _) in zip(minimums, components)
+        ]
+
+        def bounded_prefix(value: str, token_budget: int, minimum: str) -> str:
+            end = self._largest_prefix_within_limit(value, token_budget)
+            if end <= 0:
+                return minimum
+            return value[:end].rstrip() or minimum
+
+        values = [
+            bounded_prefix(value, budget, minimum)
+            for value, budget, minimum in zip(values, field_budgets, minimums)
+        ]
+
+        # Tokenization is not necessarily additive across lines.  Use the
+        # verified rendered context as the final authority, shortening the
+        # header first and never below its reserved nonempty prefix.
+        priority = ("header", "title", "units", "sheet")
+        for key in priority:
+            if self._tokens(render(values, True)) <= TABLE_CONTEXT_MAX_TOKENS:
+                break
+            index = next(
+                index
+                for index, (component_key, _, _) in enumerate(components)
+                if component_key == key
+            )
+            low, high, best = 1, len(values[index]), 0
             while low <= high:
                 midpoint = (low + high) // 2
                 candidate_values = list(values)
@@ -751,7 +796,7 @@ class StructureAwareChunker:
                     low = midpoint + 1
                 else:
                     high = midpoint - 1
-            values[index] = values[index][:best].rstrip()
+            values[index] = values[index][:best].rstrip() if best else minimums[index]
         compact = render(values, True)
         if self._tokens(compact) > TABLE_CONTEXT_MAX_TOKENS:
             raise ValueError("Table identity labels exceed the compact context token limit.")
