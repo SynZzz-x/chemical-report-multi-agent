@@ -43,6 +43,7 @@ _TABLE_TITLE_RE = re.compile(r"^(?:表\s*\d+[\s.:：、-]*|table\s*\d+[\s.:：�
 _SENTENCE_RE = re.compile(r"(?<=[。！？!?；;])\s*|(?<=[.])(?=\s+[A-Z0-9])")
 _UNIT_RE = re.compile(r"(?:\(([^()]+)\)|\[([^\[\]]+)\]|/\s*([%A-Za-z°μµ][\w/%°μµ·^\-]*)$)")
 _DATE_COLUMN_RE = re.compile(r"date|time|日期|时间|年月|批次", re.I)
+TABLE_CONTEXT_MAX_TOKENS = 180
 
 
 def _normalized_text(text: str) -> str:
@@ -667,14 +668,13 @@ class StructureAwareChunker:
             fragments.append(self._copy_block(block, self._table_parent_text(context, current)))
         return fragments
 
-    @staticmethod
-    def _table_parent_context(text: str, title: str) -> tuple[str, list[str]]:
+    def _table_parent_context(self, text: str, title: str) -> tuple[str, list[str]]:
         rows = [line.strip() for line in text.splitlines() if line.strip()]
         pipe_rows = [row for row in rows if row.startswith("|") and row.endswith("|")]
         tab_rows = [row for row in rows if "\t" in row]
         table_rows = pipe_rows or tab_rows
         if not table_rows:
-            return f"表格：{title}\n表头：{text}", []
+            return self._schema_table_context(text, title)
         header = table_rows[0]
         data_rows = [
             row
@@ -685,16 +685,86 @@ class StructureAwareChunker:
             row for row in data_rows if re.search(r"单位|units?", row, re.I)
         ]
         content_rows = [row for row in data_rows if row not in unit_rows]
-        context = f"表格：{title}\n表头：{header}"
-        if unit_rows:
-            context += "\n单位：" + "\n".join(unit_rows)
+        units = "\n".join(unit_rows) if unit_rows else None
+        context = self._compact_table_context(title, header, units, None)
         return context, content_rows
+
+    def _schema_table_context(self, text: str, title: str) -> tuple[str, list[str]]:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        values: dict[str, str] = {}
+        details: list[str] = []
+        for line in lines:
+            label, separator, value = line.partition("：")
+            if not separator:
+                details.append(line)
+                continue
+            if label in {"数据集", "文件"}:
+                values["title"] = value.strip()
+            elif label in {"工作表", "Sheet"}:
+                values["sheet"] = value.strip()
+            elif label in {"列名", "列", "表头"}:
+                values["header"] = value.strip()
+            elif label in {"单位", "Units"}:
+                values["units"] = value.strip()
+            else:
+                details.append(line)
+        context = self._compact_table_context(
+            values.get("title", title),
+            values.get("header", "架构摘要"),
+            values.get("units"),
+            values.get("sheet"),
+        )
+        return context, [f"详情：{detail}" for detail in details]
+
+    def _compact_table_context(
+        self,
+        title: str,
+        header: str,
+        units: str | None,
+        sheet: str | None,
+    ) -> str:
+        components = [("表格", title), ("表头", header)]
+        if units:
+            components.append(("单位", units))
+        if sheet:
+            components.append(("工作表", sheet))
+
+        def render(values: list[str], truncated: bool) -> str:
+            lines = [f"{label}：{value}" for (label, _), value in zip(components, values)]
+            if truncated:
+                lines.append("[上下文已截断]")
+            return "\n".join(lines)
+
+        values = [value.strip() for _, value in components]
+        full = render(values, False)
+        if self._tokens(full) <= TABLE_CONTEXT_MAX_TOKENS:
+            return full
+
+        for index in range(len(values) - 1, -1, -1):
+            low, high, best = 0, len(values[index]), 0
+            while low <= high:
+                midpoint = (low + high) // 2
+                candidate_values = list(values)
+                candidate_values[index] = values[index][:midpoint].rstrip()
+                if self._tokens(render(candidate_values, True)) <= TABLE_CONTEXT_MAX_TOKENS:
+                    best = midpoint
+                    low = midpoint + 1
+                else:
+                    high = midpoint - 1
+            values[index] = values[index][:best].rstrip()
+        compact = render(values, True)
+        if self._tokens(compact) > TABLE_CONTEXT_MAX_TOKENS:
+            raise ValueError("Table identity labels exceed the compact context token limit.")
+        return compact
 
     @staticmethod
     def _table_parent_text(context: str, rows: list[str]) -> str:
-        return context + "\n" + "\n".join(f"数据行：{row}" for row in rows)
+        payloads = [row if row.startswith(("数据行：", "详情：")) else f"数据行：{row}" for row in rows]
+        return context + "\n" + "\n".join(payloads)
 
     def _split_table_context_texts(self, context: str, token_limit: int) -> list[str]:
+        if self._tokens(context) <= token_limit:
+            return [context]
         prefix, fields = self._table_context_fields(context)
         if not fields:
             fields = ["(无列信息)"]
@@ -714,6 +784,14 @@ class StructureAwareChunker:
         if current:
             fragments.append(self._table_context_text(prefix, current))
         return fragments
+
+    def _split_table_payload_texts(
+        self, context: str, payload: str, token_limit: int
+    ) -> list[str]:
+        return [
+            text.replace("数据行：", "详情：", 1)
+            for text in self._split_table_cell_texts(context, payload, "", token_limit)
+        ]
 
     @staticmethod
     def _table_context_fields(context: str) -> tuple[str, list[str]]:
@@ -1028,7 +1106,7 @@ class StructureAwareChunker:
             context, data_rows = labeled
         if not data_rows:
             return [_ChildUnit(context, is_table=True)]
-        return [_ChildUnit(f"{context}\n数据行：{row}", is_table=True) for row in data_rows]
+        return [_ChildUnit(self._table_parent_text(context, [row]), is_table=True) for row in data_rows]
 
     @staticmethod
     def _labeled_table_context(text: str) -> tuple[str, list[str]] | None:
@@ -1036,13 +1114,13 @@ class StructureAwareChunker:
         if not lines or not lines[0].startswith("表格："):
             return None
         context: list[str] = []
-        data_rows: list[str] = []
+        payloads: list[str] = []
         for line in lines:
-            if line.startswith("数据行："):
-                data_rows.append(line.removeprefix("数据行：").strip())
+            if line.startswith(("数据行：", "详情：")):
+                payloads.append(line)
             else:
                 context.append(line)
-        return "\n".join(context), data_rows
+        return "\n".join(context), payloads
 
     def _split_unit(self, unit: _ChildUnit) -> list[_ChildUnit]:
         if self._tokens(unit.text) <= self._child_max:
@@ -1052,13 +1130,18 @@ class StructureAwareChunker:
             if labeled is not None:
                 context, rows = labeled
                 if rows:
-                    return [
-                        _ChildUnit(text, is_table=True)
-                        for row in rows
-                        for text in self._split_table_row_texts(
-                            context, row, self._child_max
-                        )
-                    ]
+                    fragments: list[_ChildUnit] = []
+                    for row in rows:
+                        if row.startswith("数据行："):
+                            texts = self._split_table_row_texts(
+                                context, row.removeprefix("数据行：").strip(), self._child_max
+                            )
+                        else:
+                            texts = self._split_table_payload_texts(
+                                context, row.removeprefix("详情：").strip(), self._child_max
+                            )
+                        fragments.extend(_ChildUnit(text, is_table=True) for text in texts)
+                    return fragments
                 return [
                     _ChildUnit(text, is_table=True)
                     for text in self._split_table_context_texts(context, self._child_max)
