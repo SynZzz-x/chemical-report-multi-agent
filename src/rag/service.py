@@ -70,6 +70,15 @@ class ChemicalRAGService:
         """Ingest each file independently, never activating incomplete versions."""
 
         if self._bm25_store is None or self._vector_store is None:
+            manifest = (
+                self._manifest_diagnostics()
+                if self._bm25_store is not None
+                else {
+                    "cleanup_pending_versions": 0,
+                    "incomplete_versions": 0,
+                    "warnings": [],
+                }
+            )
             return {
                 "success": False,
                 "loaded_files": 0,
@@ -78,18 +87,26 @@ class ChemicalRAGService:
                 "skipped_files": 0,
                 "failed_files": 0,
                 "cleanup_pending_files": 0,
+                "cleanup_tracking_failed_files": 0,
+                "cleanup_pending_versions": manifest["cleanup_pending_versions"],
+                "incomplete_versions": manifest["incomplete_versions"],
                 "total_chunks": 0,
-                "warnings": list(self._startup_warnings),
+                "warnings": [*self._startup_warnings, *manifest["warnings"]],
                 "files": [],
                 "error": "Both SQLite and Chroma stores are required for ingestion.",
             }
 
         results: list[dict[str, Any]] = []
         total_chunks = 0
+        activated_statuses = {
+            "loaded",
+            "loaded_with_warnings",
+            "activated_with_untracked_cleanup",
+        }
         for path in file_paths:
             outcome = self._ingest_one(path)
             results.append(outcome)
-            if outcome["status"] in {"loaded", "loaded_with_warnings"}:
+            if outcome["status"] in activated_statuses:
                 total_chunks += int(outcome["chunks"])
         loaded = sum(item["status"] == "loaded" for item in results)
         loaded_with_warnings = sum(
@@ -98,16 +115,39 @@ class ChemicalRAGService:
         skipped = sum(item["status"] == "skipped" for item in results)
         failed = sum(item["status"] == "failed" for item in results)
         cleanup_pending = sum(bool(item.get("cleanup_pending")) for item in results)
+        cleanup_tracking_failed = sum(
+            bool(item.get("cleanup_tracking_failed")) for item in results
+        )
+        manifest = self._manifest_diagnostics()
+        warnings = list(self._startup_warnings)
+        for outcome in results:
+            path = outcome["path"]
+            warnings.extend(
+                f"{path}: {warning}" for warning in outcome.get("warnings", [])
+            )
+        warnings.extend(manifest["warnings"])
         return {
-            "success": failed == 0 and cleanup_pending == 0,
+            "success": (
+                failed == 0
+                and cleanup_pending == 0
+                and cleanup_tracking_failed == 0
+                and manifest["cleanup_pending_versions"] == 0
+                and not self._startup_warnings
+                and not manifest["warnings"]
+            ),
             "loaded_files": loaded,
             "loaded_with_warnings_files": loaded_with_warnings,
-            "activated_files": loaded + loaded_with_warnings,
+            "activated_files": sum(
+                item["status"] in activated_statuses for item in results
+            ),
             "skipped_files": skipped,
             "failed_files": failed,
             "cleanup_pending_files": cleanup_pending,
+            "cleanup_tracking_failed_files": cleanup_tracking_failed,
+            "cleanup_pending_versions": manifest["cleanup_pending_versions"],
+            "incomplete_versions": manifest["incomplete_versions"],
             "total_chunks": total_chunks,
-            "warnings": list(self._startup_warnings),
+            "warnings": warnings,
             "files": results,
         }
 
@@ -177,6 +217,7 @@ class ChemicalRAGService:
             )
             warnings: list[str] = []
             cleanup_pending = False
+            cleanup_tracking_failed = False
             try:
                 self._vector_store.delete(sorted(prior_vector_ids))
             except Exception as exc:
@@ -186,19 +227,26 @@ class ChemicalRAGService:
                         self._bm25_store.mark_cleanup_pending(prior_version_id)
                         cleanup_pending = True
                     except Exception as cleanup_exc:
+                        cleanup_tracking_failed = True
                         warnings.append(
                             "manifest cleanup: "
                             f"{_sanitize_exception(cleanup_exc)}"
                         )
             return {
                 "path": path,
-                "status": "loaded_with_warnings" if warnings else "loaded",
+                "status": (
+                    "activated_with_untracked_cleanup"
+                    if cleanup_tracking_failed
+                    else "loaded_with_warnings" if warnings else "loaded"
+                ),
                 "chunks": len(chunks),
                 "version_id": document.version_id,
                 "activated": True,
                 "cleanup_pending": cleanup_pending,
+                "cleanup_tracking_failed": cleanup_tracking_failed,
                 "warnings": warnings,
             }
+
         except Exception as exc:
             cleanup_warnings: list[str] = []
             if staged and document is not None:
@@ -221,6 +269,26 @@ class ChemicalRAGService:
                 "error": _sanitize_exception(exc),
                 "warnings": cleanup_warnings,
             }
+
+    def _manifest_diagnostics(self) -> dict[str, Any]:
+        """Read current recovery state after the independent ingestion attempts."""
+
+        assert self._bm25_store is not None
+        warnings: list[str] = []
+        cleanup_pending_versions = 0
+        incomplete_versions = 0
+        try:
+            cleanup_pending_versions = int(
+                self._bm25_store.stats().get("cleanup_pending_versions", 0)
+            )
+            incomplete_versions = len(self._bm25_store.incomplete_versions())
+        except Exception as exc:
+            warnings.append(f"manifest diagnostics: {_sanitize_exception(exc)}")
+        return {
+            "cleanup_pending_versions": cleanup_pending_versions,
+            "incomplete_versions": incomplete_versions,
+            "warnings": warnings,
+        }
 
     def _embed_and_upsert(self, chunks: Sequence[Any]) -> None:
         assert self._vector_store is not None
