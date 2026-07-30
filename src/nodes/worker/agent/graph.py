@@ -2,7 +2,7 @@ from typing import TypedDict, List, Dict, Any, Optional, Callable, Type
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
-from ....config import get_app_config
+from ....config import get_app_config, get_rag_settings
 from ....llm import get_llm
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
@@ -54,12 +54,6 @@ class WorkerConfig:
     LLM_MODEL: str = field(
         default_factory=lambda: get_app_config().deepseek_model
     )
-    DASHSCOPE_API_KEY: str = field(
-        default_factory=lambda: get_app_config().dashscope_api_key or ""
-    )
-    DASHSCOPE_EMBEDDING_MODEL: str = field(
-        default_factory=lambda: get_app_config().dashscope_embedding_model
-    )
     TEMPERATURE: float = 0.7
     TIMEOUT: int = 60
     MAX_RETRIES: int = 3
@@ -74,7 +68,9 @@ class WorkerConfig:
 
     # 工具目录和知识库目录
     TOOLS_DIR: str = field(default_factory=lambda: os.path.join(PROJECT_ROOT, "src", "nodes", "worker", "tools"))
-    KNOWLEDGE_BASE_DIR: str = field(default_factory=lambda: os.path.join(PROJECT_ROOT, "data", "chemical_kb"))
+    KNOWLEDGE_BASE_DIR: str = field(
+        default_factory=lambda: str(get_rag_settings().storage_root)
+    )
 
     # 工具配置
     ENABLED_TOOLS: List[str] = field(default_factory=lambda: [
@@ -339,20 +335,9 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
 
     def _initialize_knowledge_base(self):
         """初始化知识库"""
-        if not self.config.DASHSCOPE_API_KEY:
-            self._initialization_error = (
-                "缺少 DASHSCOPE_API_KEY；化工知识库检索需要 DashScope 嵌入服务。"
-            )
-            print(f"❌ 化工知识库初始化失败: {self._initialization_error}")
-            return
-
         try:
             from ..tools.ChemicalKnowledgeBase import ChemicalKnowledgeBase
-            self.knowledge_base = ChemicalKnowledgeBase(
-                dashscope_api_key=self.config.DASHSCOPE_API_KEY,
-                embedding_model=self.config.DASHSCOPE_EMBEDDING_MODEL,
-                persist_directory=self.config.KNOWLEDGE_BASE_DIR
-            )
+            self.knowledge_base = ChemicalKnowledgeBase()
             self._initialized = True
             print(f"✅ {self.name} 初始化成功")
             print(f"   知识库路径: {self.config.KNOWLEDGE_BASE_DIR}")
@@ -413,6 +398,13 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
                 "summary": result.get("summary", ""),
                 "content": result.get("content", ""),
                 "evidence": result.get("evidence", []),
+                "retrieval_mode": result.get("retrieval_mode", "unavailable"),
+                "warnings": result.get("warnings", []),
+                "evidence_assessment_required": result.get(
+                    "evidence_assessment_required", False
+                ),
+                "evidence_instruction": result.get("evidence_instruction", ""),
+                "retrieval_diagnostics": result.get("raw_data", {}),
             },
             ensure_ascii=False,
             indent=2,
@@ -424,7 +416,7 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
                 "success": False,
                 "error": self._initialization_error or "化工知识库工具未初始化",
                 "suggestion": (
-                    "请配置 DASHSCOPE_API_KEY，并检查知识库依赖和向量存储。"
+                    "请检查 TEI 嵌入服务、RAG 存储和知识库依赖。"
                 ),
             }
 
@@ -501,30 +493,51 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
         for r in result.get("results", []):
             relevant_content.append({
                 "content": r.get("content", ""),
-                "score": r.get("score", 0),
+                "parent_score": r.get("parent_score", 0),
+                "matches": r.get("matches", []),
                 "source": r.get("source", ""),
                 "title": r.get("title", ""),
                 "doc_type": r.get("doc_type", ""),
-                "metadata": r.get("metadata", {})
+                "section_path": r.get("section_path", ""),
+                "pages": r.get("pages", {}),
+                "chunk_ids": r.get("chunk_ids", []),
+                "parent_id": r.get("parent_id", ""),
             })
 
         formatted_evidence = "\n\n".join(
             (
                 f"[证据 {index}] 标题: {item['title']} | "
                 f"来源: {item['source']} | 类型: {item['doc_type']} | "
-                f"相关度: {item['score']:.2f}\n{item['content']}"
+                f"章节: {item['section_path']} | 页码: {item['pages']} | "
+                f"父级 RRF 分数: {item['parent_score']:.6f}\n"
+                f"子块匹配: {json.dumps(item['matches'], ensure_ascii=False)}\n"
+                f"{item['content']}"
             )
             for index, item in enumerate(relevant_content, start=1)
         )
+
+        evidence_instruction = ""
+        if result.get("evidence_assessment_required"):
+            evidence_instruction = (
+                "请仅将这些内容作为来源证据，不要把 RRF 分数当作事实置信度。"
+                "如果证据不能直接回答问题，必须明确说明知识库缺乏充分支持，"
+                "不得补造知识库结论。"
+            )
 
         return {
             "success": True,
             "query": query,
             "results_count": len(relevant_content),
-            "average_score": result.get("average_score", 0),
+            "retrieval_mode": result.get("retrieval_mode", "unavailable"),
+            "warnings": result.get("warnings", []),
+            "evidence_assessment_required": result.get("evidence_assessment_required", False),
+            "evidence_instruction": evidence_instruction,
             "content": formatted_evidence,
             "evidence": relevant_content,
-            "summary": f"从知识库中检索到 {len(relevant_content)} 条相关结果，平均相关度: {result.get('average_score', 0):.2f}",
+            "summary": (
+                f"知识库返回 {len(relevant_content)} 组父级证据；"
+                f"检索模式: {result.get('retrieval_mode', 'unavailable')}。"
+            ),
             "raw_data": result
         }
 
@@ -540,7 +553,10 @@ class ChemicalKnowledgeBaseTool(BaseWorkerTool):
             "success": True,
             "operation": "stats",
             "stats": stats,
-            "summary": f"知识库当前包含 {stats.get('total_vectors', 0)} 个向量"
+            "summary": (
+                f"知识库当前包含 {stats.get('documents', 0)} 个文档、"
+                f"{stats.get('chunks', 0)} 个文本块和 {stats.get('vectors', 0)} 个向量"
+            )
         }
 
 

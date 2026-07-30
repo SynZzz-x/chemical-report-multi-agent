@@ -29,7 +29,7 @@ See [docs/architecture.md](docs/architecture.md) for the full workflow and state
 - Streamlit for the demo UI
 - pandas, matplotlib, python-docx, reportlab
 - DeepSeek official API for chat generation
-- ChromaDB with DashScope embeddings for chemical knowledge retrieval
+- Hybrid BM25/ChromaDB retrieval with TEI-hosted Qwen3 embeddings for chemical knowledge
 - pytest for deterministic checks
 
 ## Quick Start
@@ -50,18 +50,66 @@ source .env
 set +a
 ```
 
-Provider configuration is centralized in `src/config.py`:
+Provider and hybrid-RAG configuration is centralized in `src/config.py`:
 
 - `DEEPSEEK_API_KEY` is required for all Agent chat generation.
 - `DEEPSEEK_BASE_URL` defaults to `https://api.deepseek.com`.
 - `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`.
-- `DASHSCOPE_API_KEY` is required only when loading or querying the chemical
-  knowledge base.
-- `DASHSCOPE_EMBEDDING_MODEL` defaults to `text-embedding-v1`.
+- `EMBEDDING_BASE_URL` defaults to `http://127.0.0.1:8080` and identifies the
+  independently deployed TEI service.
+- `EMBEDDING_API_KEY` is optional for a reverse-proxy-protected TEI endpoint.
+- `EMBEDDING_MODEL`, `EMBEDDING_MODEL_REVISION`, `EMBEDDING_DIMENSION`, and
+  `EMBEDDING_TIMEOUT_SECONDS` identify the compatible embedding index.
+- `RAG_CHILD_*`, `RAG_PARENT_*`, `RAG_BM25_TOP_K`, `RAG_DENSE_TOP_K`,
+  `RAG_DENSE_OVERFETCH_FACTOR`, `RAG_RRF_CHILD_TOP_K`, `RAG_FINAL_TOP_K`,
+  `RAG_MAX_HITS_PER_PARENT`, `RAG_RRF_K`, and `RAG_MAX_CONTEXT_TOKENS` set
+  the hybrid retrieval and evidence limits.
+- `AGENT_CACHE_ROOT` defaults to `cache`; hybrid RAG data lives below it.
 
-The chemical knowledge base is retrieval-only: it uses DashScope embeddings
-and ChromaDB to return sourced evidence. The Worker agent then uses the shared
-DeepSeek client to interpret that evidence and generate the task result.
+## Hybrid Chemical RAG Operations
+
+Deploy the Qwen3 embedding model independently with Hugging Face Text
+Embeddings Inference (TEI). The model revision is intentionally pinned because
+the model/revision, 1,024-dimensional cosine index, chunking settings, and
+other index inputs form the collection fingerprint.
+
+```bash
+docker run --gpus all -p 8080:80 \
+  -v "$PWD/data:/data" \
+  ghcr.io/huggingface/text-embeddings-inference:cuda-1.9 \
+  --model-id Qwen/Qwen3-Embedding-0.6B \
+  --revision 66e95e324bebb9453d3b5be447c898dca1ba0eb0
+```
+
+For CPU-only hosts, use the compatible `cpu-1.9` TEI image. Before starting
+the Agent, wait for the service to be ready:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Copy `.env.example` to `.env`, set `DEEPSEEK_*` and the `EMBEDDING_*`/`RAG_*`
+values for the deployment, then start the Agent. The TEI endpoint must also
+provide `/tokenize` and OpenAI-compatible `/v1/embeddings`.
+
+Hybrid RAG persists its active-manifest data in `cache/rag/hybrid.sqlite` and
+its dense collections in `cache/rag/chroma/` (or the corresponding
+`AGENT_CACHE_ROOT`). Existing DashScope-built collections must be re-ingested:
+their vectors and character chunk boundaries are incompatible and are never
+silently reused. A changed index fingerprint likewise requires a rebuild and
+re-ingestion; the index uses cosine distance and has no compatibility guarantee
+across fingerprint changes.
+
+At startup, the service cleans incomplete `building` and `failed` versions and
+their dense vectors. During queries, it degrades to BM25-only if TEI/dense
+retrieval is unavailable, or dense-only if the lexical backend is unavailable;
+diagnostics identify the active retrieval mode. If neither backend is available,
+the tool returns an error instead of generating an answer.
+
+The chemical knowledge-base Worker tool is retrieval-only. It returns parent
+evidence, child-match diagnostics, and source metadata to DeepSeek; DeepSeek
+must state that the knowledge base lacks sufficient support when the evidence
+does not directly answer the question.
 
 Run the Streamlit app:
 

@@ -14,7 +14,6 @@ from typing import Any
 
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEFAULT_DASHSCOPE_EMBEDDING_MODEL = "text-embedding-v1"
 DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBEDDING_MODEL_REVISION = "66e95e324bebb9453d3b5be447c898dca1ba0eb0"
@@ -68,8 +67,6 @@ class AppConfig:
     deepseek_api_key: str | None = field(repr=False)
     deepseek_base_url: str
     deepseek_model: str
-    dashscope_api_key: str | None = field(repr=False)
-    dashscope_embedding_model: str
     rag_settings: RAGSettings
 
 def get_cache_root() -> Path:
@@ -174,14 +171,6 @@ def get_app_config() -> AppConfig:
         deepseek_model=(
             get_env("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
             or DEFAULT_DEEPSEEK_MODEL
-        ),
-        dashscope_api_key=get_env("DASHSCOPE_API_KEY"),
-        dashscope_embedding_model=(
-            get_env(
-                "DASHSCOPE_EMBEDDING_MODEL",
-                DEFAULT_DASHSCOPE_EMBEDDING_MODEL,
-            )
-            or DEFAULT_DASHSCOPE_EMBEDDING_MODEL
         ),
         rag_settings=RAGSettings(
             embedding_base_url=(
