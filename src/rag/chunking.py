@@ -299,10 +299,10 @@ class ChemicalDocumentLoader:
 
     @staticmethod
     def _infer_doc_type(path: Path, blocks: list[StructuralBlock]) -> str:
-        probe = f"{path.stem} " + " ".join(block.text for block in blocks[:8])
+        probe = f"{path.stem} " + " ".join(block.text for block in blocks)
         if path.suffix.lower() in {".csv", ".xlsx", ".xls"}:
             return "tabular"
-        if re.search(r"专利|patent|权利要求", probe, re.I):
+        if re.search(r"专利|patent|权利要求|\bclaims?\b", probe, re.I):
             return "patent"
         if re.search(r"GB/T|标准|standard|规范", probe, re.I):
             return "standard"
@@ -522,7 +522,7 @@ class StructureAwareChunker:
         groups: list[list[StructuralBlock]] = []
         current: list[StructuralBlock] = []
         for block in section.blocks:
-            for fragment in self._split_block_for_parent(block):
+            for fragment in self._split_block_for_parent(block, section.table_title):
                 candidate = [*current, fragment]
                 if current and self._tokens(self._parent_content(candidate)) > self._parent_target:
                     groups.append(current)
@@ -586,28 +586,147 @@ class StructureAwareChunker:
             return True
         return block.block_type == "table" and current[-1].block_type != "table_title"
 
-    def _split_block_for_parent(self, block: StructuralBlock) -> list[StructuralBlock]:
+    def _split_block_for_parent(
+        self, block: StructuralBlock, table_title: str
+    ) -> list[StructuralBlock]:
         if self._tokens(block.text) <= self._parent_max:
             return [block]
+        if block.block_type == "table":
+            return self._split_table_for_parent(block, table_title)
+        sentences = [
+            sentence.strip()
+            for sentence in _SENTENCE_RE.split(block.text)
+            if sentence.strip()
+        ]
+        if len(sentences) > 1:
+            return self._group_parent_sentences(block, sentences)
+        return self._hard_prefix_parent_fragments(block, block.text)
+
+    def _group_parent_sentences(
+        self, block: StructuralBlock, sentences: list[str]
+    ) -> list[StructuralBlock]:
         fragments: list[StructuralBlock] = []
-        remaining = block.text.strip()
+        current: list[str] = []
+        for sentence in sentences:
+            candidate = " ".join([*current, sentence]).strip()
+            if current and self._tokens(candidate) > self._parent_max:
+                fragments.append(self._copy_block(block, " ".join(current)))
+                current = []
+            if self._tokens(sentence) > self._parent_max:
+                fragments.extend(self._hard_prefix_parent_fragments(block, sentence))
+            else:
+                current.append(sentence)
+        if current:
+            fragments.append(self._copy_block(block, " ".join(current)))
+        return fragments
+
+    def _hard_prefix_parent_fragments(
+        self, block: StructuralBlock, text: str
+    ) -> list[StructuralBlock]:
+        fragments: list[StructuralBlock] = []
+        remaining = text.strip()
         while remaining:
             end = self._largest_prefix_within_limit(remaining, self._parent_max)
             if end <= 0:
                 raise ValueError("Tokenizer cannot fit a single character in a parent chunk.")
             split_at = self._preferred_split(remaining, end)
+            fragments.append(self._copy_block(block, remaining[:split_at]))
+            remaining = remaining[split_at:].strip()
+        return fragments
+
+    def _split_table_for_parent(
+        self, block: StructuralBlock, title: str
+    ) -> list[StructuralBlock]:
+        context, rows = self._table_parent_context(block.text, title)
+        if not rows:
+            return [self._copy_block(block, context)]
+
+        fragments: list[StructuralBlock] = []
+        current: list[str] = []
+        for row in rows:
+            candidate = self._table_parent_text(context, [*current, row])
+            if current and self._tokens(candidate) > self._parent_max:
+                fragments.append(
+                    self._copy_block(block, self._table_parent_text(context, current))
+                )
+                current = []
+            single_row = self._table_parent_text(context, [row])
+            if self._tokens(single_row) > self._parent_max:
+                fragments.extend(self._split_table_row_for_parent(block, context, row))
+            else:
+                current.append(row)
+        if current:
+            fragments.append(self._copy_block(block, self._table_parent_text(context, current)))
+        return fragments
+
+    @staticmethod
+    def _table_parent_context(text: str, title: str) -> tuple[str, list[str]]:
+        rows = [line.strip() for line in text.splitlines() if line.strip()]
+        pipe_rows = [row for row in rows if row.startswith("|") and row.endswith("|")]
+        tab_rows = [row for row in rows if "\t" in row]
+        table_rows = pipe_rows or tab_rows
+        if not table_rows:
+            return f"表格：{title}\n表头：{text}", []
+        header = table_rows[0]
+        data_rows = [
+            row
+            for row in table_rows[1:]
+            if not re.fullmatch(r"\|?\s*[:\- ]+(?:\|\s*[:\- ]+)+\|?", row)
+        ]
+        unit_rows = [
+            row for row in data_rows if re.search(r"单位|units?", row, re.I)
+        ]
+        content_rows = [row for row in data_rows if row not in unit_rows]
+        context = f"表格：{title}\n表头：{header}"
+        if unit_rows:
+            context += "\n单位：" + "\n".join(unit_rows)
+        return context, content_rows
+
+    @staticmethod
+    def _table_parent_text(context: str, rows: list[str]) -> str:
+        return context + "\n" + "\n".join(f"数据行：{row}" for row in rows)
+
+    def _split_table_row_for_parent(
+        self, block: StructuralBlock, context: str, row: str
+    ) -> list[StructuralBlock]:
+        fragments: list[StructuralBlock] = []
+        remaining = row.strip()
+        while remaining:
+            end = self._largest_table_row_prefix(context, remaining)
+            if end <= 0:
+                raise ValueError("Table context cannot fit a single row character in a parent.")
+            split_at = self._preferred_split(remaining, end)
             fragments.append(
-                StructuralBlock(
-                    text=remaining[:split_at].strip(),
-                    block_type=block.block_type,
-                    section_path=block.section_path,
-                    page_start=block.page_start,
-                    page_end=block.page_end,
-                    clause_no=block.clause_no,
+                self._copy_block(
+                    block,
+                    self._table_parent_text(context, [remaining[:split_at].strip()]),
                 )
             )
             remaining = remaining[split_at:].strip()
         return fragments
+
+    def _largest_table_row_prefix(self, context: str, row: str) -> int:
+        low, high, best = 1, len(row), 0
+        while low <= high:
+            midpoint = (low + high) // 2
+            candidate = self._table_parent_text(context, [row[:midpoint]])
+            if self._tokens(candidate) <= self._parent_max:
+                best = midpoint
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        return best
+
+    @staticmethod
+    def _copy_block(block: StructuralBlock, text: str) -> StructuralBlock:
+        return StructuralBlock(
+            text=text.strip(),
+            block_type=block.block_type,
+            section_path=block.section_path,
+            page_start=block.page_start,
+            page_end=block.page_end,
+            clause_no=block.clause_no,
+        )
 
     @staticmethod
     def _parent_content(blocks: list[StructuralBlock]) -> str:
@@ -724,6 +843,7 @@ class StructureAwareChunker:
         boundary = max(
             text.rfind(mark, 0, end + 1) + 1 for mark in ("\n", " ", "。", "；", ";", "，", ",")
         )
+        boundary = min(boundary, end)
         return boundary if boundary > max(1, end // 2) else end
 
     def _overlap_units(
