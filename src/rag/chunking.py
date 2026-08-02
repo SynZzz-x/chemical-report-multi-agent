@@ -343,11 +343,17 @@ class ChemicalDocumentLoader:
                 text, block.block_type, doc_type, claim_context
             )
             heading = None
-            if block.block_type.startswith("heading") and block_type not in {
-                "clause",
-                "claim",
-            }:
-                heading = cls._heading_details(text) or (
+            heading_details = (
+                cls._heading_details(text)
+                if block.block_type.startswith("heading")
+                else None
+            )
+            if (
+                block.block_type.startswith("heading")
+                and block_type != "claim"
+                and (block_type != "clause" or heading_details is not None)
+            ):
+                heading = heading_details or (
                     cls._loader_heading_level(block.block_type),
                     text,
                 )
