@@ -17,7 +17,7 @@ from .models import ChildChunk, ParentChunk, RankedHit, SourceDocument
 from .tokenizer import CHEMICAL_TERMS, ChemicalTokenizer
 
 DATABASE_FILENAME = "hybrid.sqlite"
-INDEX_SCHEMA_VERSION = "3"
+INDEX_SCHEMA_VERSION = "4"
 DISTANCE_METRIC = "cosine"
 INDEX_FINGERPRINT_KEYS = frozenset(
     {
