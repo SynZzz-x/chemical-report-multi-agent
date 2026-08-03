@@ -9,6 +9,73 @@ from src.state import State
 from src.llm import get_llm
 
 
+_DIRECT_APPROVAL_FEEDBACK = {
+    "",
+    "ok",
+    "okay",
+    "确认",
+    "通过",
+    "继续",
+    "继续工作",
+    "继续执行",
+    "继续下一项",
+    "下一步",
+    "开始",
+    "开始执行",
+    "按此执行",
+    "没问题",
+    "可以",
+    "同意",
+}
+
+_DECISION_ALIASES = {
+    "PASS": "PASS",
+    "APPROVE": "PASS",
+    "APPROVED": "PASS",
+    "CONTINUE": "PASS",
+    "NEXT": "PASS",
+    "通过": "PASS",
+    "继续": "PASS",
+    "REWORK": "REWORK",
+    "RETRY": "REWORK",
+    "RETRY_WORKER": "REWORK",
+    "修改": "REWORK",
+    "返工": "REWORK",
+    "REPLAN": "REPLAN",
+    "BAD_PLAN": "REPLAN",
+    "重新规划": "REPLAN",
+}
+
+
+def _normalized_feedback(value: str) -> str:
+    return str(value or "").strip().rstrip("。.!！?？").strip().lower()
+
+
+def _is_direct_approval(value: str) -> bool:
+    return _normalized_feedback(value) in _DIRECT_APPROVAL_FEEDBACK
+
+
+def _normalize_decision(value: object) -> str:
+    normalized = str(value or "PASS").strip().upper()
+    return _DECISION_ALIASES.get(normalized, "PASS")
+
+
+def _append_result_once(previous_results, current_result):
+    results = list(previous_results or [])
+    if not current_result:
+        return results
+
+    current_task_id = current_result.get("task_id")
+    if current_task_id is not None:
+        if any(result.get("task_id") == current_task_id for result in results):
+            return results
+    elif current_result in results:
+        return results
+
+    results.append(current_result)
+    return results
+
+
 def _task_name(tasks, idx):
     if 0 <= idx < len(tasks):
         t = tasks[idx]
@@ -125,8 +192,16 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
     )
     
     # 3. 分析反馈
-    analysis = _analyze_feedback(feedback_text, task_name, content_text, config)
-    decision_code = analysis.get("decision", "PASS").upper()
+    if _is_direct_approval(feedback_text):
+        analysis = {
+            "decision": "PASS",
+            "reason": "用户明确确认当前任务结果",
+            "suggestions": "",
+        }
+    else:
+        analysis = _analyze_feedback(feedback_text, task_name, content_text, config)
+
+    decision_code = _normalize_decision(analysis.get("decision", "PASS"))
     suggestions = analysis.get("suggestions", "")
     reason = analysis.get("reason", "")
     
@@ -155,7 +230,7 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             }
             
         # 追加结果
-        results = previous_results + ([current_result] if current_result else [])
+        results = _append_result_once(previous_results, current_result)
         output_updates["results"] = results
         
     elif decision_code == "REWORK":
@@ -196,9 +271,18 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
         output_updates["results"] = previous_results
         
     else:
-        # 默认 PASS
+        # _normalize_decision 保证只返回上面三个值；保留防御性兜底。
         final_decision = "NEXT"
-        output_updates["results"] = previous_results + ([current_result] if current_result else [])
+        content_obj = {
+            "from": "Verifier",
+            "to": "Planner",
+            "type": "PROCEED",
+            "current_section": task_name,
+        }
+        output_updates["results"] = _append_result_once(
+            previous_results,
+            current_result,
+        )
     
     msg = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
     
