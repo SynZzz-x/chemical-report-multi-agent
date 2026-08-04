@@ -90,6 +90,7 @@ class State(TypedDict, total=False):
     worker_state: Dict[str, Any]
     guidance: Dict[str, Any]
     task_retry_count: Dict[str, int]
+    replan_count: int
     current_task: Dict[str, Any]
     all_results: List[Dict[str, Any]]
     tool_execution_history: List[Dict[str, Any]]

@@ -956,6 +956,7 @@ if chat_value:
                     "guidance": {},
                     "worker_state": {},
                     "task_retry_count": {},
+                    "replan_count": 0,
                 }
             )
 

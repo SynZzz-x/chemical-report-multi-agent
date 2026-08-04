@@ -5,7 +5,11 @@
 
 # Input Data
 当前任务目标 (Task Name): {task_name}
+当前任务完整要求 (Task Requirements):
+{task_requirements}
 Worker 提交的执行结果 (Worker Result): {worker_result}
+Worker 结构化资产 (Tables/Figures/Citations/Sources):
+{worker_assets}
 
 # Evaluation Logic
 请执行以下步骤进行评估：
@@ -20,6 +24,7 @@ Worker 提交的执行结果 (Worker Result): {worker_result}
    - **BAD_PLAN (规划错误)**：
      - 任务本身存在逻辑漏洞，或者 Worker 根本无法完成（如：缺少必要的前置数据、资源文件缺失、任务指令自相矛盾）。
      - 此时不仅是 Worker 的问题，需要 Planner 重新规划。
+     - 只有明确的资源缺失、要求矛盾或任务不可执行才能建议 `REPLAN`。字数不足、缺少正文细节、遗漏图表或引用等执行质量问题必须建议 `RETRY_WORKER`。
 
 # Output Constraints
 1. **issues 字段**：如果是 FAILED 或 BAD_PLAN，必须在 `issues` 列表里提供具体的错误描述和**明确的改进建议**。
@@ -73,11 +78,12 @@ Worker 提交的执行结果 (Worker Result): {worker_result}
   "recommended_decision": "RETRY_WORKER"
 }}
 
-示例 3 — 规划问题（BAD_PLAN）：任务缺少必要资源或矛盾指令。
+示例 3 — 规划问题（BAD_PLAN）：Planner 未分配任务必需的数据资源。
 
 输入（上下文）：
-- Task Name: 绘制趋势图
-- Worker Result: "以下是能耗分析... (无图)"
+- Task Name: 分析2023年运行数据
+- Task Requirements: 必须读取 `2023data.csv`，但 `use_resources` 为空
+- Worker Result: "任务无法执行：没有可用的数据文件"
 
 期望输出（严格 JSON，仅一行）：
 {{
@@ -86,8 +92,8 @@ Worker 提交的执行结果 (Worker Result): {worker_result}
   "issues": [
       {{
           "code": "MISSING_RESOURCE",
-          "description": "任务要求绘制趋势图，但未生成任何图表文件。",
-          "suggestion": "请检查数据源是否可用，或调整任务类型为纯文本分析。"
+          "description": "任务必须读取2023年数据，但 Planner 未向任务分配数据文件。",
+          "suggestion": "重新规划并将可用的2023data.csv分配给当前任务。"
       }}
   ],
   "recommended_decision": "REPLAN"

@@ -14,12 +14,60 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_PATH = os.path.join(LOG_DIR, "verifier_logs.jsonl")
 
+MAX_AUTO_RETRIES_PER_TASK = 2
+MAX_AUTO_REPLANS_PER_JOB = 1
+PLAN_DEFECT_CODES = {
+    "BAD_PLAN",
+    "CONTRADICTORY_REQUIREMENTS",
+    "INVALID_PLAN",
+    "MISSING_RESOURCE",
+    "RESOURCE_UNAVAILABLE",
+    "UNEXECUTABLE_TASK",
+}
+
 
 def _task_name(tasks, idx):
     if 0 <= idx < len(tasks):
         t = tasks[idx]
         return t.get("task_name") or t.get("task_id") or f"Task_{idx}"
     return f"Task_{idx}"
+
+
+def _append_result_once(previous_results, current_result):
+    results = list(previous_results or [])
+    if not current_result:
+        return results
+    task_id = current_result.get("task_id")
+    if task_id is not None and any(item.get("task_id") == task_id for item in results):
+        return results
+    if task_id is None and current_result in results:
+        return results
+    results.append(current_result)
+    return results
+
+
+def _is_explicit_plan_defect(assessment: dict) -> bool:
+    issue_codes = {
+        str(issue.get("code") or "").strip().upper()
+        for issue in assessment.get("issues", [])
+        if isinstance(issue, dict)
+    }
+    return bool(issue_codes & PLAN_DEFECT_CODES)
+
+
+def _advance_control(tasks, cursor):
+    if (cursor + 1) >= len(tasks):
+        return "DONE", {
+            "from": "Verifier",
+            "to": "Summarizer",
+            "type": "SUMMARIZE",
+        }
+    return "NEXT", {
+        "from": "Verifier",
+        "to": "Planner",
+        "type": "PROCEED",
+        "current_section": _task_name(tasks, cursor),
+    }
 
 
 def verifier(state: State, config: RunnableConfig, **kwargs):
@@ -39,23 +87,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
     task_retry_count = state.get("task_retry_count", {}) or {}
     current_retry_count = task_retry_count.get(cursor, 0)
 
-    # 是否为最后一个任务
-    done = (cursor + 1) >= len(tasks)
-    if done:
-        decision_code = "DONE"
-        content_obj = {
-            "from": "Verifier",
-            "to": "Summarizer",
-            "type": "SUMMARIZE",
-        }
-    else:
-        decision_code = "NEXT"
-        content_obj = {
-            "from": "Verifier",
-            "to": "Planner",
-            "type": "PROCEED",
-            "current_section": _task_name(tasks, cursor),
-        }
+    decision_code, content_obj = _advance_control(tasks, cursor)
+    replan_count = int(state.get("replan_count", 0) or 0)
 
     # 检查是否启用 LLM
     use_llm = False
@@ -73,8 +106,21 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
     if use_llm:
         try:
             # 1. 准备上下文
+            current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
             content = (current_result.get("content") or current_result.get("text_output") or "")
             task_name = _task_name(tasks, cursor)
+            task_requirements = json.dumps(current_task, ensure_ascii=False, indent=2)
+            worker_assets = json.dumps(
+                {
+                    "status": current_result.get("status"),
+                    "tables": current_result.get("tables", []),
+                    "figures": current_result.get("figures", []),
+                    "citations": current_result.get("citations", []),
+                    "sources_used": current_result.get("sources_used", []),
+                    "evidence_coverage": current_result.get("evidence_coverage", {}),
+                },
+                ensure_ascii=False,
+            )
             
             # 2. 加载 Prompt
             prompts_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "verifier.md")
@@ -99,7 +145,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
             # 4. 执行调用
             res = chain.invoke({
                 "task_name": task_name,
+                "task_requirements": task_requirements,
                 "worker_result": content,
+                "worker_assets": worker_assets,
                 "format_instructions": format_instructions
             })
             
@@ -142,71 +190,83 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
     # 后处理：清理无效 issues
     assessment = _sanitize_assessment(assessment, state)
 
-    # 检查任务质量：如果 status 不是 PASS，增加重试计数并决定下一步
+    # 自动审核只允许明确的计划结构问题触发一次 REPLAN。普通内容问题
+    # 有限返工，达到上限后保留审核警告并继续，避免无限回到 T1。
     status = assessment.get("status", "PASS")
     if status in ["FAILED", "BLOCKED"]:
-        # 任务失败，增加重试计数
-        new_retry_count = current_retry_count + 1
-        task_retry_count = dict(task_retry_count)  # 创建副本
-        task_retry_count[cursor] = new_retry_count
-        
-        # 如果连续失败2次，强制 REPLAN
-        if new_retry_count >= 2:
+        if (
+            _is_explicit_plan_defect(assessment)
+            and replan_count < MAX_AUTO_REPLANS_PER_JOB
+        ):
             decision_code = "REPLAN"
-            task_retry_count[cursor] = 0  # 重置计数，重新规划后从头开始
+            replan_count += 1
+            task_retry_count = {}
+            issues_desc = "; ".join(
+                f"{item.get('code', 'ISSUE')}: {item.get('description', '')}"
+                for item in assessment.get("issues", [])
+            )
             content_obj = {
                 "from": "Verifier",
                 "to": "Planner",
                 "type": "REPLAN",
-                "reason": f"任务 {_task_name(tasks, cursor)} 连续失败 {new_retry_count} 次，需要重新规划",
+                "reason": f"任务存在明确规划阻断：{issues_desc}",
                 "current_section": _task_name(tasks, cursor),
             }
-            # Add a generic issue for consecutive failures if not present
-            if not any(i.get("code") == "CONSECUTIVE_FAILURES" for i in assessment.get("issues", [])):
-                assessment["issues"] = assessment.get("issues", []) + [{
-                    "code": "CONSECUTIVE_FAILURES", 
-                    "description": f"Failed {new_retry_count} times", 
-                    "suggestion": "Replan"
-                }]
             assessment["recommended_decision"] = "REPLAN"
         else:
-            # 第一次失败，使用 LLM 评估的建议决策
-            recommended = assessment.get("recommended_decision", "RETRY_WORKER")
-            decision_code = recommended
-            
-            if recommended in ["REPLAN", "BAD_PLAN"]:
-                decision_code = "REPLAN"  # Normalize BAD_PLAN to REPLAN for graph routing
-                task_retry_count[cursor] = 0  # 重置计数，重新规划后从头开始
-                
-                # Format issues for the reason message
-                issues_desc = "; ".join([f"{i.get('code', 'ISSUE')}: {i.get('description', '')}" for i in assessment.get("issues", [])])
-                reason_msg = f"任务质量不达标，建议重新规划（第 {new_retry_count} 次失败）。问题：{issues_desc}"
-
-                content_obj = {
-                    "from": "Verifier",
-                    "to": "Planner",
-                    "type": "REPLAN",
-                    "reason": reason_msg,
-                    "current_section": _task_name(tasks, cursor),
-                }
-            else:  # RETRY_WORKER
+            new_retry_count = current_retry_count + 1
+            task_retry_count = dict(task_retry_count)
+            if new_retry_count <= MAX_AUTO_RETRIES_PER_TASK:
+                task_retry_count[cursor] = new_retry_count
+                decision_code = "RETRY_WORKER"
                 content_obj = {
                     "from": "Verifier",
                     "to": "Worker",
                     "type": "REWORK",
-                    "reason": f"任务质量不达标，第 {new_retry_count} 次重试",
+                    "reason": (
+                        f"任务质量不达标，自动返工 {new_retry_count}/"
+                        f"{MAX_AUTO_RETRIES_PER_TASK}"
+                    ),
                 }
-    # 任务成功时，不需要重置计数（cursor 会移动到下一个任务）
+                assessment["recommended_decision"] = "RETRY_WORKER"
+            else:
+                task_retry_count.pop(cursor, None)
+                decision_code, content_obj = _advance_control(tasks, cursor)
+                assessment["issues"] = assessment.get("issues", []) + [{
+                    "code": "AUTO_RETRY_LIMIT_REACHED",
+                    "description": (
+                        f"自动返工已达到 {MAX_AUTO_RETRIES_PER_TASK} 次上限，"
+                        "为避免工作流循环，保留当前结果并继续。"
+                    ),
+                    "suggestion": "请在最终报告中人工复核本章节。",
+                }]
+                assessment["recommended_decision"] = decision_code
+    else:
+        task_retry_count = dict(task_retry_count)
+        task_retry_count.pop(cursor, None)
     
     # 只有当决策是 NEXT 或 DONE 时，才将当前结果追加到 results 中
     # 如果是 RETRY_WORKER 或 REPLAN，说明当前结果不合格，应被丢弃
     if decision_code in ["NEXT", "DONE"]:
-        results = previous_results + ([current_result] if current_result else [])
+        results = _append_result_once(previous_results, current_result)
     else:
         results = previous_results
 
     # 记录日志
-    _log_verifier_output(state, assessment, llm_record)
+    print(
+        "🔍 AutoVerifier: "
+        f"task={_task_name(tasks, cursor)} status={assessment.get('status')} "
+        f"decision={decision_code} retries={task_retry_count.get(cursor, 0)} "
+        f"replans={replan_count}/{MAX_AUTO_REPLANS_PER_JOB}"
+    )
+    _log_verifier_output(
+        state,
+        assessment,
+        llm_record,
+        decision_code=decision_code,
+        task_retry_count=task_retry_count,
+        replan_count=replan_count,
+    )
 
     msg = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
     return {
@@ -214,7 +274,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs):
         "results": results,
         "decision": decision_code,
         "assessment": assessment,
+        "feedback": assessment,
         "task_retry_count": task_retry_count,
+        "replan_count": replan_count,
     }
 
 
@@ -234,10 +296,16 @@ def _sanitize_assessment(assessment: dict, state: State) -> dict:
     tasks = state.get("tasks", []) or []
     requires_table = False
     requires_image = False
-    if tasks:
-        desc = (tasks[0].get("task_description") or "")
-        requires_table = ("表" in desc or "表格" in desc or "数据表" in desc)
-        requires_image = ("图" in desc or "趋势图" in desc or "画图" in desc)
+    cursor = int(state.get("cursor", 0) or 0)
+    if 0 <= cursor < len(tasks):
+        task = tasks[cursor]
+        desc = task.get("task_description") or ""
+        requires_table = bool(task.get("generate_table")) or any(
+            value in desc for value in ("表格", "数据表", "生成表")
+        )
+        requires_image = bool(task.get("generate_figure")) or any(
+            value in desc for value in ("趋势图", "因果图", "流程图", "生成图")
+        )
 
     for issue in raw_issues:
         # 如果是旧格式的字符串，尝试转换为新格式
@@ -273,7 +341,15 @@ def _sanitize_assessment(assessment: dict, state: State) -> dict:
     }
 
 
-def _log_verifier_output(state: State, assessment: dict, llm_record: dict = None):
+def _log_verifier_output(
+    state: State,
+    assessment: dict,
+    llm_record: dict = None,
+    *,
+    decision_code: str = "",
+    task_retry_count: dict | None = None,
+    replan_count: int = 0,
+):
     def _safe(obj):
         try:
             json.dumps(obj, ensure_ascii=False)
@@ -285,10 +361,13 @@ def _log_verifier_output(state: State, assessment: dict, llm_record: dict = None
                 return None
 
     entry = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "tasks": _safe(state.get("tasks")),
         "cursor": _safe(state.get("cursor")),
         "assessment": _safe(assessment),
+        "decision": decision_code,
+        "task_retry_count": _safe(task_retry_count or {}),
+        "replan_count": replan_count,
     }
     if llm_record:
         entry["llm"] = llm_record
