@@ -44,10 +44,20 @@
      请参考下方【Task Description Template】中的详细格式。
    - `generate_figure`: Boolean。若任务涉及数据可视化，设为 true。
    - `generate_table`: Boolean。若任务涉及表格展示，设为 true。
-   - `use_rag`: Boolean。若任务需要调用专业知识库检索或查找外部信息，设为 true。
+   - `use_rag`: Boolean。若任务需要调用内部专业知识库检索，设为 true。
+   - `use_web`: Boolean。若普通任务明确需要公开网络资料，设为 true；否则为 false。概念图的条件式联网由 `visualization.allow_web_fallback` 控制。
    - `task_type`: String。任务类型，必须为 "analysis"（分析）、"summary"（总结）或 "inference"（推论）中的一种。
    - `query`: String。向知识库/网络爬虫进行查询所用的搜索关键词组合。若不需要检索则为空字符串 ""。
    - `use_resources`: Array。从“可用资源”列表中选取该任务所需的文件名。若无则为空数组 `[]`。
+   - `visualization`: Object 或 null。普通数据图表设为 null；因果图、流程图或故障树必须显式填写：
+     - `kind`: 当前可执行值为 `"causal"`；`"flowchart"`、`"fault_tree"` 为保留类型。
+     - `title`: 图标题。
+     - `required_concepts`: 图中必须由证据覆盖的核心概念数组。
+     - `web_queries`: RAG 缺少上述概念时才使用的公开网络检索词，最多 3 条。
+     - `allow_web_fallback`: Boolean。是否允许该任务在 RAG 覆盖不足时联网，默认 true。
+     概念关系图不依赖 CSV/Excel；若要求“参数—指标影响关系图”“因果图”或“关系示意图”，不得用热力图代替，必须使用 `kind="causal"`。
+
+4. **证据策略**：专业结论先使用 RAG。只有 RAG 未覆盖 `required_concepts` 时才使用 `web_queries` 补充公开来源；不得要求 Worker 重建、加载或统计知识库。
 
 # Task Description Template (Standard)
 为了确保 Worker 生成高质量内容，你的 `task_description` 必须非常详细，建议包含以下结构（JSON 中需使用 \n 换行）：
@@ -89,8 +99,10 @@
         "generate_figure": <Boolean>,
         "generate_table": <Boolean>,
         "use_rag": <Boolean>,
+        "use_web": <Boolean>,
         "task_type": "<String, analysis/summary/inference>",
         "query": "<String, 搜索关键词>",
+        "visualization": <Object 或 null>,
         "use_resources": [
             "<String, 必须是'可用资源'列表中的文件名>"
         ]
@@ -114,8 +126,10 @@
         "generate_figure": false,
         "generate_table": false,
         "use_rag": true,
+        "use_web": false,
         "task_type": "summary",
         "query": "炼化装置能耗优化 政策 标准",
+        "visualization": null,
         "use_resources": ["report_template.docx"]
     }}
     // ... (More tasks to reach 6-10 items)

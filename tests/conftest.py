@@ -28,6 +28,10 @@ class _ChatPromptTemplate:
     def __or__(self, other):
         return other
 
+    @classmethod
+    def from_template(cls, template):
+        return cls()
+
 
 def _install_module(name: str) -> types.ModuleType:
     module = types.ModuleType(name)
@@ -45,13 +49,21 @@ langchain_core.messages = _install_module("langchain_core.messages")
 langchain_core.messages.AIMessage = _Message
 langchain_core.messages.SystemMessage = _Message
 langchain_core.messages.HumanMessage = _Message
+langchain_core.messages.ToolMessage = _Message
+langchain_core.messages.AnyMessage = _Message
+langchain_core.messages.BaseMessage = _Message
 langchain_core.prompts = _install_module("langchain_core.prompts")
 langchain_core.prompts.ChatPromptTemplate = _ChatPromptTemplate
+langchain_core.prompts.PromptTemplate = _ChatPromptTemplate
+langchain_core.tools = _install_module("langchain_core.tools")
+langchain_core.tools.BaseTool = object
 
 langgraph = _install_module("langgraph")
 langgraph.types = _install_module("langgraph.types")
 langgraph.types.interrupt = lambda payload: None
 langgraph.graph = _install_module("langgraph.graph")
+langgraph.graph.StateGraph = object
+langgraph.graph.END = "__end__"
 langgraph.graph.message = _install_module("langgraph.graph.message")
 langgraph.graph.message.BaseMessage = _Message
 langgraph.graph.message.add_messages = lambda left, right: (left or []) + (right or [])

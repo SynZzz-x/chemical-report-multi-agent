@@ -65,6 +65,25 @@ Provider and hybrid-RAG configuration is centralized in `src/config.py`:
   `RAG_MAX_HITS_PER_PARENT`, `RAG_RRF_K`, and `RAG_MAX_CONTEXT_TOKENS` set
   the hybrid retrieval and evidence limits.
 - `AGENT_CACHE_ROOT` defaults to `cache`; hybrid RAG data lives below it.
+- `CONCEPT_GRAPH_*` controls evidence-grounded causal diagrams; every rendered
+  relation carries one or more `[E编号]` citations.
+- `EVIDENCE_RAG_MAX_QUERIES` caps duplicate-prone Worker retrieval, while
+  `EVIDENCE_WEB_MAX_QUERIES` and `EVIDENCE_WEB_FALLBACK` control RAG-first
+  public-web supplementation.
+
+Concept diagrams require the Graphviz `dot` executable and a Chinese font on
+the server. On Ubuntu/Debian, install both before starting the Agent:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y graphviz fonts-noto-cjk
+dot -V
+```
+
+The Worker does not ingest documents. Use the RAG CLI `rebuild`/`ingest`
+commands first; report execution only performs retrieval. Causal graph
+artifacts (`.png`, `.svg`, and validated `.json`) are written to the current
+job's `charts/` directory and embedded into Markdown, DOCX, and PDF reports.
 
 ## Hybrid Chemical RAG Operations
 

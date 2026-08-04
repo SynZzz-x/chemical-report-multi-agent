@@ -1,0 +1,91 @@
+from src.evidence.models import EvidenceBundle, EvidenceRecord
+from src.evidence.reporting import append_missing_figures, format_evidence_table
+from src.nodes.worker.agent.graph import AutonomousToolNode
+
+
+def _rag_call():
+    return {
+        "tool": "chemical_knowledge_base_tool",
+        "success": True,
+        "parameters": {"query": "反应温度"},
+        "full_result": {
+            "evidence": [
+                {
+                    "title": "聚乙烯工艺说明",
+                    "source": "/srv/docs/process.docx",
+                    "section_path": "4.1 反应条件",
+                    "content": "反应温度影响熔融指数。",
+                    "chunk_ids": ["C1"],
+                }
+            ]
+        },
+    }
+
+
+def test_task_result_derives_citations_and_sources_from_rag_calls():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    result = node._create_task_result(
+        {
+            "task_id": "T3",
+            "task_name": "反应条件",
+            "use_resources": ["/srv/data/process.csv"],
+        },
+        2,
+        "这是由检索证据支持的正文。" * 10,
+        [_rag_call()],
+        {"chemical_knowledge_base_tool": 1},
+        1.0,
+        True,
+        False,
+    )
+
+    assert result["citations"][0]["evidence_id"] == "E1"
+    assert result["sources_used"] == [
+        "/srv/data/process.csv",
+        "/srv/docs/process.docx",
+    ]
+
+
+def test_evidence_table_contains_document_locator_and_web_url():
+    bundle = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="工艺说明",
+                locator="4.1 反应条件",
+                supporting_text="温度影响熔融指数。",
+                file_path="/srv/docs/process.docx",
+            ),
+            EvidenceRecord(
+                evidence_id="E2",
+                source_type="web",
+                title="公开资料",
+                supporting_text="压力影响密度。",
+                url="https://example.org/source",
+                accessed_at="2026-08-04T00:00:00Z",
+            ),
+        )
+    )
+
+    table = format_evidence_table([record.model_dump(mode="json") for record in bundle.records])
+
+    assert "[E1]" in table
+    assert "4.1 反应条件" in table
+    assert "https://example.org/source" in table
+
+
+def test_missing_concept_figure_is_appended_deterministically():
+    markdown = append_missing_figures(
+        "## 反应条件\n\n正文",
+        [
+            {
+                "path": "/srv/cache/charts/concept_T3.png",
+                "description": "参数影响关系图（关系证据：[E1]）",
+            }
+        ],
+    )
+
+    assert "![参数影响关系图](/srv/cache/charts/concept_T3.png)" in markdown
+    assert "<description>参数影响关系图（关系证据：[E1]）</description>" in markdown

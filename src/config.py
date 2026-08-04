@@ -32,6 +32,10 @@ DEFAULT_FINAL_TOP_K = 5
 DEFAULT_MAX_HITS_PER_PARENT = 2
 DEFAULT_RRF_K = 60
 DEFAULT_MAX_CONTEXT_TOKENS = 5000
+DEFAULT_CONCEPT_GRAPH_MAX_NODES = 24
+DEFAULT_CONCEPT_GRAPH_MAX_EDGES = 40
+DEFAULT_EVIDENCE_RAG_MAX_QUERIES = 3
+DEFAULT_EVIDENCE_WEB_MAX_QUERIES = 3
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,21 @@ class RAGSettings:
 
 
 @dataclass(frozen=True)
+class ConceptGraphSettings:
+    """Evidence and conceptual-graph settings shared by Planner and Worker."""
+
+    enabled: bool
+    renderer: str
+    max_nodes: int
+    max_edges: int
+    font_family: str
+    rag_max_queries: int
+    web_max_queries: int
+    web_fallback: bool
+    web_allowed_source_classes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Provider configuration shared by every model consumer."""
 
@@ -68,6 +87,7 @@ class AppConfig:
     deepseek_base_url: str
     deepseek_model: str
     rag_settings: RAGSettings
+    concept_graph_settings: ConceptGraphSettings
 
 def get_cache_root() -> Path:
     """
@@ -144,6 +164,15 @@ def _positive_float_from_env(name: str, default: float) -> float:
     if parsed <= 0:
         raise ValueError(f"{name} must be a positive number.")
     return parsed
+
+
+def _bool_from_env(name: str, default: bool) -> bool:
+    value = (get_env(name, "true" if default else "false") or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value.")
 
 
 @lru_cache(maxsize=1)
@@ -234,6 +263,38 @@ def get_app_config() -> AppConfig:
                 "RAG_MAX_CONTEXT_TOKENS", DEFAULT_MAX_CONTEXT_TOKENS
             ),
             storage_root=get_cache_root() / "rag",
+        ),
+        concept_graph_settings=ConceptGraphSettings(
+            enabled=_bool_from_env("CONCEPT_GRAPH_ENABLED", True),
+            renderer=get_env("CONCEPT_GRAPH_RENDERER", "graphviz") or "graphviz",
+            max_nodes=_positive_int_from_env(
+                "CONCEPT_GRAPH_MAX_NODES", DEFAULT_CONCEPT_GRAPH_MAX_NODES
+            ),
+            max_edges=_positive_int_from_env(
+                "CONCEPT_GRAPH_MAX_EDGES", DEFAULT_CONCEPT_GRAPH_MAX_EDGES
+            ),
+            font_family=(
+                get_env("CONCEPT_GRAPH_FONT_FAMILY", "Noto Sans CJK SC")
+                or "Noto Sans CJK SC"
+            ),
+            rag_max_queries=_positive_int_from_env(
+                "EVIDENCE_RAG_MAX_QUERIES", DEFAULT_EVIDENCE_RAG_MAX_QUERIES
+            ),
+            web_max_queries=_positive_int_from_env(
+                "EVIDENCE_WEB_MAX_QUERIES", DEFAULT_EVIDENCE_WEB_MAX_QUERIES
+            ),
+            web_fallback=_bool_from_env("EVIDENCE_WEB_FALLBACK", True),
+            web_allowed_source_classes=tuple(
+                value.strip()
+                for value in (
+                    get_env(
+                        "EVIDENCE_WEB_ALLOWED_SOURCE_CLASSES",
+                        "government,standards,academic,vendor",
+                    )
+                    or ""
+                ).split(",")
+                if value.strip()
+            ),
         ),
     )
 

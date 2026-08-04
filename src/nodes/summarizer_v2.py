@@ -13,6 +13,7 @@ from ..state import State
 from ..llm import get_llm
 from ..utils import md_to_docx, md_to_pdf, md_rewrite
 from ..utils.path_manager import get_session_cache_dir
+from ..evidence.reporting import append_missing_figures, format_evidence_table
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -65,6 +66,12 @@ def _content_reorganizer(state: State) -> List[Dict[str, Any]]:
             for p in (res.get("outputs", []) or []):
                 if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".svg")):
                     figures.append({"path": p, "description": f"图像：{os.path.basename(p)}"})
+        for figure in figures:
+            if figure.get("graph_type") and figure.get("evidence_ids"):
+                markers = "、".join(f"[{value}]" for value in figure["evidence_ids"])
+                description = str(figure.get("description") or "概念关系图")
+                if markers not in description:
+                    figure["description"] = f"{description}（关系证据：{markers}）"
 
         section = {
             "title": title,
@@ -119,7 +126,10 @@ def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -
     
     if not prompt_template:
         logger.warning("Prompt template not found. Using raw text.")
-        return f"## {section['title']}\n\n{section['text']}"
+        raw = f"## {section['title']}\n\n{section['text']}"
+        raw = append_missing_figures(raw, section.get("figures", []))
+        evidence_table = format_evidence_table(section.get("citations", []))
+        return f"{raw}\n\n{evidence_table}" if evidence_table else raw
 
     # Prepare data for the prompt
     section_title = section.get("title", "Section")
@@ -128,10 +138,17 @@ def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -
     # Serialize figures and tables to JSON for the prompt
     figures_json = json.dumps(section.get("figures", []), ensure_ascii=False, indent=2)
     tables_json = json.dumps(section.get("tables", []), ensure_ascii=False, indent=2)
+    citations = section.get("citations", [])
+    citations_json = json.dumps(citations, ensure_ascii=False, indent=2)
+
+    def with_evidence(value: str) -> str:
+        value = append_missing_figures(value, section.get("figures", []))
+        table = format_evidence_table(citations)
+        return f"{value.rstrip()}\n\n{table}" if table else value
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", prompt_template),
-        ("human", "请根据以下信息对章节内容进行排版和图表嵌入（保持原文）：\n\n章节标题：{section_title}\n\n文本素材：\n{text_content}\n\n可用图片资源：\n{figures_list}\n\n可用表格资源：\n{tables_list}")
+        ("human", "请根据以下信息对章节内容进行排版和图表嵌入（保持原文）：\n\n章节标题：{section_title}\n\n文本素材：\n{text_content}\n\n可用图片资源：\n{figures_list}\n\n可用表格资源：\n{tables_list}\n\n引用证据（不得删除或改写证据编号）：\n{citations_list}")
     ])
     
     try:
@@ -139,7 +156,8 @@ def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -
             section_title=section_title,
             text_content=text_content,
             figures_list=figures_json,
-            tables_list=tables_json
+            tables_list=tables_json,
+            citations_list=citations_json,
         )
         resp = model.invoke(messages, config=config)
         content = str(getattr(resp, "content", "")).strip()
@@ -160,22 +178,22 @@ def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -
         if content.startswith("# "):
             # 如果内容以一级标题开头，说明 LLM 生成了错误的层级结构
             # 此时需要将全文所有标题降级 (H1->H2, H2->H3...)
-            return _downgrade_headings(content)
+            return with_evidence(_downgrade_headings(content))
             
         elif content.startswith("## "):
             # 已有 H2，直接返回
-            return content
+            return with_evidence(content)
             
         else:
             # 没有标题，手动添加
-            return f"## {section_title}\n\n{content}"
+            return with_evidence(f"## {section_title}\n\n{content}")
     except Exception as e:
         logger.error(f"LLM generation failed for section {section_title}: {e}")
         # Fallback: 如果原始内容以 H1 开头，也进行降级处理
         stripped_text = text_content.strip()
         if stripped_text.startswith("# "):
-            return _downgrade_headings(text_content) + "\n\n(LLM Generation Failed)"
-        return f"## {section_title}\n\n{text_content}\n\n(LLM Generation Failed)"
+            return with_evidence(_downgrade_headings(text_content) + "\n\n(LLM Generation Failed)")
+        return with_evidence(f"## {section_title}\n\n{text_content}\n\n(LLM Generation Failed)")
 
 def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str:
     """
