@@ -11,6 +11,7 @@ from typing import Dict, Any, List
 from ..state import State, merge_docs
 from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
+from ..task_contract import task_allows_web
 from ..tool_names import canonical_tool_name
 
 logger = logging.getLogger(__name__)
@@ -183,16 +184,7 @@ def _normalize_replacement_tasks(
             if any(requirement is None for requirement in canonical_requirements):
                 raise ValueError("tool_requirements contains an invalid tool requirement")
             task["tool_requirements"] = canonical_requirements
-            visualization = task.get("visualization")
-            web_allowed = (
-                task.get("use_web") is True
-                or task.get("allow_web_fallback") is True
-                or (
-                    isinstance(visualization, dict)
-                    and visualization.get("allow_web_fallback") is True
-                )
-            )
-            if "spider_tool" in canonical_requirements and not web_allowed:
+            if "spider_tool" in canonical_requirements and not task_allows_web(task):
                 raise ValueError("spider_tool requires explicit web permission")
         task_id = str(task.get("task_id") or "").strip()
         if not task_id or task_id in used_ids:
@@ -339,6 +331,16 @@ def _full_replan_error_guidance(error: Exception | str) -> Dict[str, Any]:
     return {
         "natural_language_guidance": (
             "无法安全生成替换计划，请提供新的整体目标或重试。"
+        ),
+        "resource_mapping": {},
+        "error": str(error),
+    }
+
+
+def _initial_plan_error_guidance(error: Exception | str) -> Dict[str, Any]:
+    return {
+        "natural_language_guidance": (
+            "无法安全应用计划修改，已保留上一版候选计划。请重新修改或确认上一版计划。"
         ),
         "resource_mapping": {},
         "error": str(error),
@@ -820,6 +822,10 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     active_tasks = state.get("tasks", []) or []
     planner_action = str(state.get("planner_action") or "")
     is_full_replan = planner_action in {"FULL_REPLAN", "FULL_REPLAN_REFINED"}
+    is_initial_plan = planner_action in {
+        "INTAKE_SUMMARY",
+        "INTAKE_SUMMARY_REFINED",
+    }
     tasks = (
         state.get("full_replan_candidate_tasks") or []
         if is_full_replan
@@ -995,16 +1001,47 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
             "docs": resumed_docs,
         }
 
-    if not is_full_replan:
-        tasks = _refine_tasks(
-            state,
-            tasks,
-            feedback_text,
-            combined_docs,
-            intake_data,
-            config,
-        )
-    else:
+    if is_initial_plan and not is_confirmation:
+        try:
+            refined_tasks = _normalize_replacement_tasks(
+                _refine_tasks(
+                    state,
+                    tasks,
+                    feedback_text,
+                    combined_docs,
+                    intake_data,
+                    config,
+                    True,
+                ),
+                [],
+            )
+        except ValueError as exc:
+            return {
+                "planner_action": "INTAKE_SUMMARY_REFINED",
+                "guidance": _initial_plan_error_guidance(exc),
+                "messages": [feedback_message],
+                "docs": resumed_docs,
+            }
+        initial_resource_names = [
+            resource.get("name")
+            for resource in intake_data.get("resources", [])
+            if isinstance(resource, dict) and resource.get("name")
+        ]
+        return {
+            "messages": [feedback_message],
+            "tasks": refined_tasks,
+            "cursor": 0,
+            "planner_action": "INTAKE_SUMMARY_REFINED",
+            "guidance": _generate_plan_guidance(
+                refined_tasks, initial_resource_names, config
+            ),
+            "docs": resumed_docs,
+            "task_id_registry": list(
+                dict.fromkeys([*_job_task_ids(state), *_task_ids(refined_tasks)])
+            ),
+        }
+
+    if is_full_replan:
         try:
             tasks = _normalize_replacement_tasks(
                 tasks,
@@ -1036,6 +1073,15 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         # 只提交本轮新增附件，State.merge_docs 会负责合并。
         "docs": resumed_docs,
     }
+    if is_initial_plan:
+        update.update(
+            {
+                "planner_action": "PROCEED",
+                "task_id_registry": list(
+                    dict.fromkeys([*_job_task_ids(state), *_task_ids(tasks)])
+                ),
+            }
+        )
     if is_full_replan:
         # The replacement plan is staged above, but it becomes a new execution
         # revision only when this explicit confirmation resumes the node.

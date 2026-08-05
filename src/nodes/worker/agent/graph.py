@@ -4,6 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
 from ....config import get_app_config, get_rag_settings
 from ....llm import get_llm
+from ....task_contract import task_allows_web
 from ....tool_names import canonical_tool_name
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
@@ -1280,13 +1281,7 @@ class ToolManager:
             if task.get("use_rag"):
                 tool_requirements.append("chemical_knowledge_base_tool")
             description = str(task.get("task_description") or "")
-            if "_recovery_allow_web" in task:
-                needs_public_web = task.get("_recovery_allow_web") is True
-            else:
-                needs_public_web = task.get("use_web") or any(
-                    keyword in description
-                    for keyword in ("公开网络", "网络公开", "外部公开", "最新公开信息")
-                )
+            needs_public_web = task_allows_web(task)
             if needs_public_web and not task.get("visualization"):
                 tool_requirements.append("spider_tool")
             if task.get("generate_table"):
@@ -1309,6 +1304,8 @@ class ToolManager:
             for requirement in tool_requirements
             if (canonical_name := canonical_tool_name(requirement)) is not None
         }
+        if "spider_tool" in required and not task_allows_web(task):
+            required.remove("spider_tool")
         if not required:
             return []
 

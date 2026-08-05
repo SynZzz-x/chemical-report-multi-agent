@@ -150,6 +150,48 @@ def test_tool_manager_accepts_only_supported_exact_spider_aliases(requirement):
     assert initialized == ["spider_tool"]
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"use_web": False, "tool_requirements": ["SpiderTool"]},
+        {"tool_requirements": ["spider_tool"]},
+        {
+            "use_web": False,
+            "tool_requirements": ["spider_tool"],
+            "visualization": {"allow_web_fallback": "true"},
+        },
+    ],
+)
+def test_tool_manager_rejects_legacy_spider_metadata_without_explicit_web_access(task):
+    initialized = []
+    manager = _spider_only_manager(initialized)
+
+    tools = manager.get_available_tools_for_task(task)
+
+    assert tools == []
+    assert initialized == []
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        {"use_web": True},
+        {"allow_web_fallback": True},
+        {"visualization": {"allow_web_fallback": True}},
+    ],
+)
+def test_tool_manager_accepts_spider_only_with_explicit_web_access(authorization):
+    initialized = []
+    manager = _spider_only_manager(initialized)
+
+    tools = manager.get_available_tools_for_task(
+        {"tool_requirements": ["spider_tool"], **authorization}
+    )
+
+    assert [tool.name for tool in tools] == ["spider_tool"]
+    assert initialized == ["spider_tool"]
+
+
 def test_worker_web_feedback_preserves_custom_spidertool_identifier():
     execution_task, _, _ = AutonomousToolNode._prepare_execution_task(
         {

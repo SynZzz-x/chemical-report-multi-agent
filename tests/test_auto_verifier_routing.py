@@ -283,3 +283,92 @@ def test_malformed_assessment_collections_use_bounded_verifier_retry_only(
     assert first["task_retry_count"] == state["task_retry_count"]
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
     assert second["task_retry_count"] == state["task_retry_count"]
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("issues", [{}]),
+        ("requirements_missing", [{}]),
+        ("requirements_met", [{}]),
+        (
+            "issues",
+            [
+                {
+                    "code": "TOO_SHORT",
+                    "category": "CONTENT_DEFECT",
+                    "description": "内容过短",
+                    "suggestion": "扩写",
+                    "severity": "major",
+                },
+                {},
+            ],
+        ),
+        ("requirements_missing", ["citation", {}]),
+        ("requirements_met", ["background", {}]),
+    ],
+)
+def test_malformed_assessment_elements_fail_the_entire_contract(
+    field, malformed_value
+):
+    state = _state()
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": [],
+        "requirements_missing": [],
+        field: malformed_value,
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+    first = decide_recovery_action(state, sanitized)
+    second = decide_recovery_action({**state, **first}, sanitized)
+
+    assert sanitized["status"] == "FAILED"
+    assert sanitized["issues"][0]["code"] == "ASSESSMENT_CONTRACT_ERROR"
+    assert sanitized["issues"][0]["category"] == "VERIFIER_FAILURE"
+    assert first["workflow_action"] == "RETRY_VERIFIER"
+    assert first["task_retry_count"] == state["task_retry_count"]
+    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["task_retry_count"] == state["task_retry_count"]
+
+
+@pytest.mark.parametrize(
+    "malformed_issue",
+    [
+        {
+            "code": "TOO_SHORT",
+            "category": 1,
+            "description": "内容过短",
+            "suggestion": "扩写",
+            "severity": "major",
+        },
+        {
+            "code": "TOO_SHORT",
+            "category": "CONTENT_DEFECT",
+            "description": [],
+            "suggestion": "扩写",
+            "severity": "major",
+        },
+        {
+            "code": "TOO_SHORT",
+            "category": "CONTENT_DEFECT",
+            "description": "内容过短",
+            "suggestion": None,
+            "severity": "major",
+        },
+    ],
+)
+def test_issue_detail_types_are_part_of_the_assessment_contract(malformed_issue):
+    assessment = {
+        "status": "FAILED",
+        "issues": [malformed_issue],
+        "requirements_met": [],
+        "requirements_missing": [],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, _state())
+
+    assert sanitized["issues"][0]["code"] == "ASSESSMENT_CONTRACT_ERROR"
+    assert sanitized["issues"][0]["category"] == "VERIFIER_FAILURE"

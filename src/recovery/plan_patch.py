@@ -7,6 +7,7 @@ from os.path import basename
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.limits import MAX_PLAN_TASKS
+from src.task_contract import task_allows_web
 from src.tool_names import canonical_tool_name
 
 from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
@@ -125,14 +126,21 @@ def _normalise_counter(counter: Any, tasks: Sequence[Mapping[str, Any]]) -> Dict
     normalized: Dict[str, int] = {}
     if not isinstance(counter, Mapping):
         return normalized
+    active_task_ids = {
+        str(task.get("task_id"))
+        for task in tasks
+        if task.get("task_id") is not None
+    }
     for key, value in counter.items():
         task_id = None
         cursor_key = None
-        if isinstance(key, int) and not isinstance(key, bool):
+        if isinstance(key, str) and key in active_task_ids:
+            task_id = key
+        elif isinstance(key, int) and not isinstance(key, bool):
             cursor_key = key
         elif isinstance(key, str) and key.isdecimal():
             cursor_key = int(key)
-        if cursor_key is not None and 0 <= cursor_key < len(tasks):
+        if task_id is None and cursor_key is not None and 0 <= cursor_key < len(tasks):
             candidate = tasks[cursor_key].get("task_id")
             if candidate is not None:
                 task_id = str(candidate)
@@ -300,15 +308,7 @@ def _validate_task_consistency(task: Mapping[str, Any]) -> None:
     if spider_requirement is None:
         return
 
-    visualization = task.get("visualization")
-    visualization_allows_web = isinstance(visualization, Mapping) and (
-        visualization.get("allow_web_fallback") is True
-    )
-    if not (
-        task.get("use_web") is True
-        or task.get("allow_web_fallback") is True
-        or visualization_allows_web
-    ):
+    if not task_allows_web(task):
         raise PatchValidationError(
             f"{spider_requirement} requires explicit web permission"
         )

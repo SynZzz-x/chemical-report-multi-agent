@@ -40,7 +40,11 @@ def route_planner(state: State):
 def route_planner_confirm(state: State):
     if state.get("planner_action") == "FULL_REPLAN_RETRY":
         return "Planner"
-    if state.get("planner_action") in {"FULL_REPLAN_REFINED", "FULL_REPLAN_ERROR"}:
+    if state.get("planner_action") in {
+        "INTAKE_SUMMARY_REFINED",
+        "FULL_REPLAN_REFINED",
+        "FULL_REPLAN_ERROR",
+    }:
         return "Planner_Confirm"
     return "Worker"
 

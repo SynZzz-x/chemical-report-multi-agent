@@ -50,6 +50,13 @@ _VALID_CATEGORIES = {
     "EXTERNAL_BLOCKER",
     "VERIFIER_FAILURE",
 }
+_ISSUE_REQUIRED_STRING_FIELDS = {
+    "code",
+    "category",
+    "description",
+    "suggestion",
+    "severity",
+}
 
 
 def _task_name(tasks: list[dict[str, Any]], index: int) -> str:
@@ -165,6 +172,52 @@ def _service_error_assessment(
     }
 
 
+def _contract_error_assessment(
+    assessment: dict[str, Any], tasks: list[dict[str, Any]], cursor: int
+) -> dict[str, Any]:
+    return {
+        "status": "FAILED",
+        "current_section": assessment.get("current_section")
+        or _task_name(tasks, cursor),
+        "issues": [
+            {
+                "code": "ASSESSMENT_CONTRACT_ERROR",
+                "category": "VERIFIER_FAILURE",
+                "description": "Verifier returned malformed collection fields.",
+                "suggestion": "Retry automatic verification with a valid structured assessment.",
+                "severity": "error",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": [],
+    }
+
+
+def _assessment_elements_are_valid(assessment: dict[str, Any]) -> bool:
+    for field in ("requirements_met", "requirements_missing"):
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in assessment[field]
+        ):
+            return False
+    for issue in assessment["issues"]:
+        if not isinstance(issue, dict):
+            return False
+        if any(
+            not isinstance(issue.get(field), str) or not issue[field].strip()
+            for field in _ISSUE_REQUIRED_STRING_FIELDS
+        ):
+            return False
+        if str(issue["category"]).strip().upper() not in _VALID_CATEGORIES:
+            return False
+        if "resource_name" in issue and (
+            not isinstance(issue["resource_name"], str)
+            or not issue["resource_name"].strip()
+        ):
+            return False
+    return True
+
+
 def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, Any]:
     """Normalize the assessment contract and discard inapplicable asset issues."""
     assessment = assessment if isinstance(assessment, dict) else {}
@@ -172,22 +225,9 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     cursor = int(state.get("cursor", 0) or 0)
     collection_fields = ("issues", "requirements_met", "requirements_missing")
     if any(not isinstance(assessment.get(field), list) for field in collection_fields):
-        return {
-            "status": "FAILED",
-            "current_section": assessment.get("current_section")
-            or _task_name(tasks, cursor),
-            "issues": [
-                {
-                    "code": "ASSESSMENT_CONTRACT_ERROR",
-                    "category": "VERIFIER_FAILURE",
-                    "description": "Verifier returned malformed collection fields.",
-                    "suggestion": "Retry automatic verification with a valid structured assessment.",
-                    "severity": "error",
-                }
-            ],
-            "requirements_met": [],
-            "requirements_missing": [],
-        }
+        return _contract_error_assessment(assessment, tasks, cursor)
+    if not _assessment_elements_are_valid(assessment):
+        return _contract_error_assessment(assessment, tasks, cursor)
     current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
     description = str(current_task.get("task_description") or "")
     requires_table = bool(current_task.get("generate_table")) or any(
@@ -198,16 +238,9 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     )
 
     issues: list[dict[str, Any]] = []
-    valid_issue_seen = False
+    valid_issue_seen = bool(assessment["issues"])
     for raw_issue in assessment["issues"]:
-        if isinstance(raw_issue, str):
-            valid_issue_seen = True
-            issue = {"code": raw_issue.upper(), "description": raw_issue}
-        elif isinstance(raw_issue, dict):
-            valid_issue_seen = True
-            issue = dict(raw_issue)
-        else:
-            continue
+        issue = dict(raw_issue)
         code = str(issue.get("code") or "UNSPECIFIED_ISSUE").strip().upper()
         if code == "MISSING_TABLE" and not requires_table:
             continue

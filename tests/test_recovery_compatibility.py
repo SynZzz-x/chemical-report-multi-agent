@@ -174,6 +174,111 @@ def test_initial_plan_confirmation_does_not_start_a_new_revision(monkeypatch):
     assert "results" not in update
 
 
+def test_modified_initial_plan_is_staged_and_requires_second_confirmation(monkeypatch):
+    state = {
+        "tasks": [_replacement_task("T1", "初始任务")],
+        "cursor": 0,
+        "plan_revision": 1,
+        "planner_action": "INTAKE_SUMMARY",
+        "guidance": {"natural_language_guidance": "请确认初始计划"},
+        "messages": [],
+    }
+    revised = [
+        _replacement_task(
+            "T1",
+            "修订任务",
+            tool_requirements=["SpiderTool"],
+            use_web=True,
+            allow_web_fallback=False,
+        )
+    ]
+    monkeypatch.setattr(planner_module, "_refine_tasks", lambda *_: revised)
+    monkeypatch.setattr(
+        planner_module,
+        "_generate_plan_guidance",
+        lambda *_: {"natural_language_guidance": "请确认修订计划"},
+    )
+    responses = iter(
+        (
+            {"text": "修改任务", "docs": []},
+            {"text": "确认", "docs": []},
+        )
+    )
+    payloads = []
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda payload: (payloads.append(payload), next(responses))[1],
+    )
+
+    staged = planner_confirm(state, {})
+
+    assert staged["planner_action"] == "INTAKE_SUMMARY_REFINED"
+    assert staged["tasks"][0]["tool_requirements"] == ["spider_tool"]
+    assert not any(
+        json.loads(message.content).get("type") == "PLAN_RESULT"
+        for message in staged["messages"]
+        if isinstance(message, AIMessage)
+    )
+
+    committed = planner_confirm({**state, **staged}, {})
+
+    assert len(payloads) == 2
+    displayed = payloads[1]["structured_msg"]["tasks"][0]
+    assert displayed["tool_requirements"] == ["spider_tool"]
+    assert displayed["use_web"] is True
+    assert displayed["allow_web_fallback"] is False
+    assert committed["tasks"] == staged["tasks"]
+    assert committed["cursor"] == 0
+    assert any(
+        json.loads(message.content).get("type") == "PLAN_RESULT"
+        for message in committed["messages"]
+        if isinstance(message, AIMessage)
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_refinement",
+    [
+        [
+            _replacement_task(f"T{index}", f"任务 {index}")
+            for index in range(1, 101)
+        ],
+        [_replacement_task("T1", "联网任务", tool_requirements=["SpiderTool"])],
+    ],
+)
+def test_invalid_initial_refinement_preserves_candidate_and_stays_recoverable(
+    monkeypatch, invalid_refinement
+):
+    original_tasks = [_replacement_task("T1", "初始任务")]
+    state = {
+        "tasks": original_tasks,
+        "cursor": 0,
+        "planner_action": "INTAKE_SUMMARY",
+        "guidance": {"natural_language_guidance": "请确认初始计划"},
+        "messages": [],
+    }
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"text": "修改计划", "docs": []},
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_refine_tasks",
+        lambda *_: invalid_refinement,
+    )
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "INTAKE_SUMMARY_REFINED"
+    assert "tasks" not in update
+    assert "cursor" not in update
+    assert "plan_revision" not in update
+    assert update["guidance"]["error"]
+    assert state["tasks"] == original_tasks
+
+
 def test_automatic_planner_filters_full_replan_controls(monkeypatch):
     full_replan = AIMessage(
         content=json.dumps(

@@ -553,3 +553,31 @@ def test_patch_counter_aliases_merge_by_max_without_reopening_cap(counter_items)
         apply_plan_patch(state, update_patch())
 
     assert state == before
+
+
+def test_numeric_string_counter_prefers_exact_active_task_id_over_cursor_alias():
+    state = patch_state(task_patch_count={"2": 1})
+    state["tasks"] = [task(task_id) for task_id in ("2", "T2", "T3", "T4")]
+    state["task_revisions"] = {
+        item["task_id"]: 1 for item in state["tasks"]
+    }
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="task patch limit.*2"):
+        apply_plan_patch(
+            state,
+            update_patch(task_id="2", affected_task_ids=["2"], resume_task_id="2"),
+        )
+
+    assert state == before
+
+
+@pytest.mark.parametrize("legacy_key", [2, "2"])
+def test_patch_counter_keeps_legacy_cursor_alias_when_no_exact_id_exists(legacy_key):
+    state = patch_state(task_patch_count={legacy_key: 1})
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="task patch limit.*T3"):
+        apply_plan_patch(state, update_patch())
+
+    assert state == before
