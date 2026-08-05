@@ -1566,7 +1566,10 @@ class AutonomousToolNode:
 
     @staticmethod
     def _concept_graph_request(task: Task) -> Optional[Dict[str, Any]]:
-        visualization = dict(task.get("visualization") or {})
+        raw_visualization = task.get("visualization")
+        visualization = (
+            dict(raw_visualization) if isinstance(raw_visualization, dict) else {}
+        )
         kind = str(visualization.get("kind") or "").strip().lower()
         if kind in {"concept_graph", "relationship", "relation"}:
             kind = "causal"
@@ -1595,7 +1598,7 @@ class AutonomousToolNode:
                 "title": visualization.get("title") or f"{task.get('task_name', '任务')}关系图",
                 "required_concepts": list(dict.fromkeys(concepts)),
                 "web_queries": list(visualization.get("web_queries") or []),
-                "allow_web_fallback": visualization.get("allow_web_fallback", True),
+                "allow_web_fallback": task_allows_web(task),
             }
         )
         return visualization
@@ -1613,11 +1616,13 @@ class AutonomousToolNode:
         settings = get_app_config().concept_graph_settings
         required_concepts = request["required_concepts"]
         coverage = assess_coverage(evidence, required_concepts)
+        allow_web_fallback = task_allows_web(task)
         if (
             coverage.web_fallback_required
             and settings.web_fallback
             and self.config.SPIDER_ENABLED
-            and request["allow_web_fallback"]
+            and request["allow_web_fallback"] is True
+            and allow_web_fallback
         ):
             try:
                 from ....evidence.coordinator import EvidenceCoordinator
@@ -1639,7 +1644,7 @@ class AutonomousToolNode:
                     evidence,
                     required_concepts=required_concepts,
                     web_queries=web_queries,
-                    allow_web_fallback=request["allow_web_fallback"],
+                    allow_web_fallback=allow_web_fallback,
                 )
             except Exception as exc:
                 print(f"⚠️ 公开网络证据补充失败: {exc}")

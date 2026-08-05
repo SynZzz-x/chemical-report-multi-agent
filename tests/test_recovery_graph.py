@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
+import pytest
 
 from src.nodes.worker.agent.graph import AutonomousToolNode, ToolManager, router_node
 
@@ -155,6 +156,52 @@ def test_evidence_recovery_builds_query_and_honors_task_web_gate():
     web_state["tasks"][1]["visualization"] = {"allow_web_fallback": True}
     web_update = evidence_recovery(web_state, {})
     assert web_update["worker_state"]["execution_feedback"]["allow_web"] is True
+
+
+@pytest.mark.parametrize(
+    "invalid_flags",
+    [
+        {"use_web": "false", "tool_requirements": ["SpiderTool"]},
+        {"allow_web_fallback": 1, "tool_requirements": ["spider_tool"]},
+        {
+            "visualization": {"allow_web_fallback": "true"},
+            "tool_requirements": ["spider_tool"],
+        },
+    ],
+)
+def test_evidence_recovery_fails_closed_for_invalid_web_flag_types(invalid_flags):
+    state = graph_state(assessment=evidence_gap_assessment())
+    state["tasks"][1].update(invalid_flags)
+
+    update = evidence_recovery(state, {})
+    feedback = update["worker_state"]["execution_feedback"]
+    execution_task, _, _ = AutonomousToolNode._prepare_execution_task(
+        state["tasks"][1], update["worker_state"]
+    )
+
+    assert feedback["allow_web"] is False
+    assert execution_task["use_web"] is False
+    assert "spider_tool" not in {
+        canonical_tool_name(requirement)
+        for requirement in execution_task.get("tool_requirements", [])
+    }
+
+
+@pytest.mark.parametrize(
+    "allowed_flags",
+    [
+        {"use_web": True},
+        {"allow_web_fallback": True},
+        {"visualization": {"allow_web_fallback": True}},
+    ],
+)
+def test_evidence_recovery_preserves_explicit_web_authorization(allowed_flags):
+    state = graph_state(assessment=evidence_gap_assessment())
+    state["tasks"][1].update(allowed_flags)
+
+    update = evidence_recovery(state, {})
+
+    assert update["worker_state"]["execution_feedback"]["allow_web"] is True
 
 
 def test_plan_patcher_validates_and_applies_only_local_patch(monkeypatch):

@@ -1,7 +1,10 @@
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
+from src.evidence.models import EvidenceRecord
+from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode, ChemicalKnowledgeBaseTool, ToolManager
 from src.tool_names import canonical_tool_name
 
@@ -203,6 +206,175 @@ def test_worker_web_feedback_preserves_custom_spidertool_identifier():
     )
 
     assert execution_task["tool_requirements"] == ["spidertool"]
+
+
+def _concept_graph_node(monkeypatch, provider_events):
+    settings = SimpleNamespace(
+        web_fallback=True,
+        web_allowed_source_classes=("government",),
+        web_max_queries=3,
+    )
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(concept_graph_settings=settings),
+    )
+
+    class Provider:
+        def __init__(self, *args, **kwargs):
+            provider_events.append("constructed")
+
+        def search(self, queries):
+            provider_events.append(("searched", tuple(queries)))
+            return (
+                EvidenceRecord(
+                    evidence_id="web",
+                    source_type="web",
+                    title="Public source",
+                    supporting_text="alpha beta",
+                    url="https://example.org/source",
+                    accessed_at="2026-08-05T00:00:00Z",
+                ),
+            )
+
+    monkeypatch.setattr(
+        "src.evidence.web.LegacySpiderWebEvidenceProvider",
+        Provider,
+    )
+
+    class GraphTool:
+        def execute(self, task, evidence, output_dir):
+            return {"success": True, "record_count": len(evidence.records)}
+
+    monkeypatch.setattr(
+        "src.nodes.worker.tools.concept_graph_tool.ConceptGraphTool",
+        GraphTool,
+    )
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(
+        SPIDER_ENABLED=True,
+        SPIDER_DIR="/tmp/spider",
+        MAX_SPIDER_RESULTS=3,
+        CHARTS_DIR="/tmp/charts",
+    )
+    return node
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        {
+            "task_name": "Causal graph",
+            "use_web": False,
+            "visualization": {
+                "kind": "causal",
+                "required_concepts": ["alpha"],
+                "web_queries": ["alpha"],
+            },
+        },
+        {
+            "task_name": "Flow chart",
+            "use_web": False,
+            "allow_web_fallback": False,
+            "visualization": {
+                "kind": "flowchart",
+                "required_concepts": ["alpha"],
+                "web_queries": ["alpha"],
+            },
+        },
+        {
+            "task_name": "Legacy graph",
+            "use_web": "false",
+            "visualization": {
+                "kind": "causal",
+                "required_concepts": ["alpha"],
+                "web_queries": ["alpha"],
+                "allow_web_fallback": "false",
+            },
+        },
+    ],
+)
+def test_concept_graph_never_constructs_web_provider_without_explicit_authorization(
+    monkeypatch, task
+):
+    provider_events = []
+    node = _concept_graph_node(monkeypatch, provider_events)
+
+    request = node._concept_graph_request(task)
+    _, coverage, graph_result = node._prepare_concept_graph(task, [])
+
+    assert request["allow_web_fallback"] is False
+    assert provider_events == []
+    assert coverage.status == "unavailable"
+    assert graph_result["success"] is False
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        {"use_web": True},
+        {"allow_web_fallback": True},
+        {"visualization_allow_web": True},
+    ],
+)
+def test_concept_graph_uses_web_provider_only_with_explicit_authorization(
+    monkeypatch, authorization
+):
+    provider_events = []
+    node = _concept_graph_node(monkeypatch, provider_events)
+    visualization = {
+        "kind": "causal",
+        "required_concepts": ["alpha"],
+        "web_queries": ["alpha"],
+    }
+    task = {"task_name": "Authorized graph", "visualization": visualization}
+    if authorization.get("visualization_allow_web") is True:
+        visualization["allow_web_fallback"] = True
+    else:
+        task.update(authorization)
+
+    request = node._concept_graph_request(task)
+    _, coverage, graph_result = node._prepare_concept_graph(task, [])
+
+    assert request["allow_web_fallback"] is True
+    assert provider_events[0] == "constructed"
+    assert provider_events[1][0] == "searched"
+    assert coverage.status == "sufficient"
+    assert graph_result["success"] is True
+
+
+def test_concept_graph_uses_sufficient_internal_rag_without_public_web(monkeypatch):
+    provider_events = []
+    node = _concept_graph_node(monkeypatch, provider_events)
+    task = {
+        "task_name": "RAG graph",
+        "use_web": False,
+        "visualization": {
+            "kind": "causal",
+            "required_concepts": ["alpha", "beta"],
+        },
+    }
+    rag_call = {
+        "tool": "chemical_knowledge_base_tool",
+        "success": True,
+        "parameters": {"query": "alpha beta"},
+        "full_result": {
+            "evidence": [
+                {
+                    "title": "Internal document",
+                    "source": "/job/internal.pdf",
+                    "content": "alpha influences beta",
+                }
+            ]
+        },
+    }
+
+    evidence, coverage, graph_result = node._prepare_concept_graph(task, [rag_call])
+
+    assert provider_events == []
+    assert coverage.status == "sufficient"
+    assert evidence.records[0].source_type == "rag"
+    assert graph_result == {"success": True, "record_count": 1}
 
 
 def test_rag_is_prefetched_before_autonomous_tool_selection():

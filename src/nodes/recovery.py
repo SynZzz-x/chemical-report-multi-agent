@@ -21,6 +21,7 @@ from src.recovery.policy import (
     decide_recovery_action,
 )
 from src.state import State
+from src.task_contract import task_allows_web
 
 
 _RESUME_ACTION_ALIASES = {
@@ -232,15 +233,6 @@ def route_policy(state: State, config: RunnableConfig | None = None, **kwargs) -
     return action
 
 
-def _web_allowed(task: dict[str, Any]) -> bool:
-    visualization = task.get("visualization") or {}
-    return bool(
-        task.get("use_web")
-        or task.get("allow_web_fallback")
-        or visualization.get("allow_web_fallback")
-    )
-
-
 def evidence_recovery(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     """Prepare one evidence-focused Worker retry without changing the plan."""
     assessment = state.get("assessment") or {}
@@ -270,7 +262,7 @@ def evidence_recovery(state: State, config: RunnableConfig, **kwargs) -> dict[st
         "issues": issues,
         "instructions": instructions,
         "recovery_query": recovery_query,
-        "allow_web": _web_allowed(_current_task(state)),
+        "allow_web": task_allows_web(_current_task(state)),
     }
     return {
         "workflow_action": WorkflowAction.REWORK.value,
