@@ -162,6 +162,16 @@ def test_insert_patch_normalizes_legacy_revision_counter_before_reordering():
     assert update["task_revisions"]["T2A"] == 1
 
 
+def test_insert_patch_normalizes_numeric_string_legacy_revision_counter_before_reordering():
+    state = patch_state(cursor=2)
+    state["task_revisions"] = {"2": 5}
+
+    update = apply_plan_patch(state, insert_before_patch())
+
+    assert update["task_revisions"]["T3"] == 6
+    assert update["task_revisions"]["T2A"] == 1
+
+
 def test_apply_is_atomic_and_counts_only_after_a_valid_patch():
     state = patch_state(task_patch_count={"T3": 0})
     before = deepcopy(state)
@@ -207,6 +217,123 @@ def test_validate_rejects_duplicate_or_unknown_task_ids():
 def test_validate_rejects_moving_an_accepted_task():
     with pytest.raises(PatchValidationError, match="accepted"):
         validate_plan_patch(patch_state(accepted_ids=["T4"]), move_before_patch())
+
+
+def test_validate_rejects_moving_before_an_accepted_anchor():
+    with pytest.raises(PatchValidationError, match="accepted anchor"):
+        validate_plan_patch(patch_state(accepted_ids=["T3"]), move_before_patch())
+
+
+def test_validate_rejects_moving_across_an_accepted_task():
+    patch = move_before_patch(
+        before_task_id="T2", affected_task_ids=["T4", "T2", "T3"]
+    )
+
+    with pytest.raises(PatchValidationError, match="accepted crossed"):
+        validate_plan_patch(patch_state(accepted_ids=["T3"]), patch)
+
+
+def test_move_requires_all_crossed_tasks_in_affected_task_ids():
+    patch = move_before_patch(before_task_id="T2")
+
+    with pytest.raises(PatchValidationError, match="affected_task_ids"):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_insert_rejects_an_accepted_anchor():
+    with pytest.raises(PatchValidationError, match="accepted anchor"):
+        validate_plan_patch(patch_state(accepted_ids=["T3"]), insert_before_patch())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("task_id", " ", "task_id"),
+        ("task_name", " ", "task_name"),
+        ("task_description", " ", "task_description"),
+        ("task_type", "unsupported", "task_type"),
+        ("use_rag", 1, "use_rag"),
+        ("use_web", "true", "use_web"),
+        ("generate_table", None, "generate_table"),
+        ("generate_figure", 0, "generate_figure"),
+        ("query", 1, "query"),
+        ("use_resources", "evidence.csv", "use_resources"),
+        ("tool_requirements", ["tool", 1], "tool_requirements"),
+        ("visualization", [], "visualization"),
+    ],
+)
+def test_insert_rejects_invalid_task_schema(field, value, match):
+    patch = insert_before_patch()
+    patch["operations"][0]["task"][field] = value
+
+    with pytest.raises(PatchValidationError, match=match):
+        validate_plan_patch(patch_state(), patch)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("task_name", " ", "task_name"),
+        ("task_description", 1, "task_description"),
+        ("query", None, "query"),
+        ("use_rag", "false", "use_rag"),
+        ("use_web", 0, "use_web"),
+        ("generate_table", "no", "generate_table"),
+        ("generate_figure", 1, "generate_figure"),
+        ("use_resources", ["evidence.csv", 1], "use_resources"),
+        ("tool_requirements", "worker", "tool_requirements"),
+        ("visualization", "table", "visualization"),
+    ],
+)
+def test_update_rejects_invalid_allowed_field_types(field, value, match):
+    with pytest.raises(PatchValidationError, match=match):
+        validate_plan_patch(patch_state(), update_patch(changes={field: value}))
+
+
+def test_resource_aliases_normalize_to_canonical_paths_in_applied_tasks():
+    state = patch_state(
+        docs=[
+            {
+                "name": "evidence.csv",
+                "path": "/job/evidence.csv",
+                "file_id": "file-evidence",
+            }
+        ]
+    )
+    update = apply_plan_patch(
+        state,
+        update_patch(changes={"use_resources": [" file-evidence "]}),
+    )
+
+    assert update["tasks"][2]["use_resources"] == ["/job/evidence.csv"]
+    assert update["plan_patch_history"][0]["operations"][0]["changes"]["use_resources"] == [
+        "/job/evidence.csv"
+    ]
+
+
+def test_insert_normalizes_stripped_task_id_and_resource_aliases():
+    state = patch_state(docs=[{"name": "evidence.csv", "path": "/job/evidence.csv"}])
+    patch = insert_before_patch(inserted_task_id=" T2A ")
+    patch["operations"][0]["task"]["use_resources"] = ["evidence.csv"]
+    patch["affected_task_ids"] = ["T2A", "T3"]
+    patch["resume_task_id"] = "T2A"
+
+    update = apply_plan_patch(state, patch)
+
+    assert update["tasks"][2]["task_id"] == "T2A"
+    assert update["tasks"][2]["use_resources"] == ["/job/evidence.csv"]
+
+
+def test_resource_aliases_shared_by_multiple_docs_are_rejected_as_ambiguous():
+    state = patch_state(
+        docs=[
+            {"name": "evidence.csv", "path": "/job/first/evidence.csv"},
+            {"name": "evidence.csv", "path": "/job/second/evidence.csv"},
+        ]
+    )
+
+    with pytest.raises(PatchValidationError, match="ambiguous resource"):
+        validate_plan_patch(state, update_patch(changes={"use_resources": ["evidence.csv"]}))
 
 
 def test_validate_rejects_undeclared_accepted_result_invalidation():

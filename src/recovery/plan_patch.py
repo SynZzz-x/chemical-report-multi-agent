@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from os.path import basename
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
 
@@ -26,6 +26,24 @@ _UPDATE_FIELDS = {
     "visualization",
 }
 _OPERATION_NAMES = {"update_task", "move_before", "insert_before"}
+_TASK_TYPES = {"analysis", "summary", "inference"}
+_BOOLEAN_TASK_FIELDS = {
+    "use_rag",
+    "use_web",
+    "generate_table",
+    "generate_figure",
+}
+_REQUIRED_INSERTED_TASK_FIELDS = {
+    "task_name",
+    "task_description",
+    "task_type",
+    "use_rag",
+    "use_web",
+    "generate_table",
+    "generate_figure",
+    "query",
+    "use_resources",
+}
 
 
 def _task_id(value: Any, field: str) -> str:
@@ -34,45 +52,61 @@ def _task_id(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _as_resource_names(values: Iterable[Any]) -> set[str]:
-    names: set[str] = set()
-    for value in values:
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            names.update({text, basename(text)})
-    return names
-
-
-def _known_resources(state: Mapping[str, Any]) -> set[str]:
-    identifiers: set[str] = set()
+def _resource_aliases(state: Mapping[str, Any]) -> Dict[str, set[str]]:
+    """Map every known resource alias to its canonical job-local identity."""
+    aliases: Dict[str, set[str]] = {}
     for resource in state.get("docs") or []:
         if not isinstance(resource, Mapping):
             continue
-        identifiers.update(
-            _as_resource_names(
-                resource.get(key)
-                for key in ("name", "path", "file_id", "resource_id")
-            )
+        values = {
+            key: value.strip()
+            for key, value in resource.items()
+            if key in {"name", "path", "file_id", "resource_id"}
+            and isinstance(value, str)
+            and value.strip()
+        }
+        canonical = next(
+            (values[key] for key in ("path", "file_id", "resource_id", "name") if key in values),
+            None,
         )
-    return identifiers
+        if canonical is None:
+            continue
+        for value in values.values():
+            for alias in {value, basename(value)}:
+                aliases.setdefault(alias, set()).add(canonical)
+    return aliases
 
 
-def _validate_resources(resources: Any, known_resources: set[str], field: str) -> None:
+def _normalise_resources(
+    resources: Any, resource_aliases: Mapping[str, set[str]], field: str
+) -> List[str]:
     if not isinstance(resources, list):
         raise PatchValidationError(f"{field} must be a list")
-    unknown = _as_resource_names(resources) - known_resources
-    if unknown:
-        raise PatchValidationError(f"unknown resource: {sorted(unknown)[0]}")
+    normalized: List[str] = []
+    for resource in resources:
+        if not isinstance(resource, str):
+            raise PatchValidationError(f"{field} must be a list of strings")
+        alias = resource.strip()
+        matches = resource_aliases.get(alias, set())
+        if not matches:
+            raise PatchValidationError(f"unknown resource: {alias}")
+        if len(matches) != 1:
+            raise PatchValidationError(f"ambiguous resource: {alias}")
+        normalized.append(next(iter(matches)))
+    return normalized
 
 
 def _normalise_counter(counter: Any, tasks: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
     normalized: Dict[str, int] = {}
     for key, value in (counter or {}).items():
         task_id = None
-        if isinstance(key, int) and 0 <= key < len(tasks):
-            candidate = tasks[key].get("task_id")
+        cursor_key = None
+        if isinstance(key, int) and not isinstance(key, bool):
+            cursor_key = key
+        elif isinstance(key, str) and key.isdecimal():
+            cursor_key = int(key)
+        if cursor_key is not None and 0 <= cursor_key < len(tasks):
+            candidate = tasks[cursor_key].get("task_id")
             if candidate is not None:
                 task_id = str(candidate)
         normalized[task_id or str(key)] = int(value or 0)
@@ -91,6 +125,7 @@ def _state_tasks(state: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], List[s
             raise PatchValidationError("state task must be an object")
         task_copy = deepcopy(dict(task))
         identifier = _task_id(task_copy.get("task_id"), "state task_id")
+        task_copy["task_id"] = identifier
         copied_tasks.append(task_copy)
         identifiers.append(identifier)
 
@@ -120,54 +155,148 @@ def _affected_task_ids(patch: Mapping[str, Any], known_ids: set[str]) -> List[st
     return task_ids
 
 
+def _validate_task_fields(
+    task: Dict[str, Any],
+    resource_aliases: Mapping[str, set[str]],
+    *,
+    required: bool,
+) -> None:
+    if required:
+        missing = _REQUIRED_INSERTED_TASK_FIELDS - set(task)
+        if missing:
+            raise PatchValidationError(f"insert_before.task missing {sorted(missing)[0]}")
+
+    for field in ("task_name", "task_description"):
+        if field in task:
+            if not isinstance(task[field], str) or not task[field].strip():
+                raise PatchValidationError(f"{field} must be a non-empty string")
+        elif required:
+            raise PatchValidationError(f"insert_before.task missing {field}")
+
+    if "task_type" in task:
+        if task["task_type"] not in _TASK_TYPES:
+            raise PatchValidationError("task_type must be analysis, summary, or inference")
+    elif required:
+        raise PatchValidationError("insert_before.task missing task_type")
+
+    for field in _BOOLEAN_TASK_FIELDS:
+        if field in task:
+            if not isinstance(task[field], bool):
+                raise PatchValidationError(f"{field} must be a boolean")
+        elif required:
+            raise PatchValidationError(f"insert_before.task missing {field}")
+
+    if "query" in task:
+        if not isinstance(task["query"], str):
+            raise PatchValidationError("query must be a string")
+    elif required:
+        raise PatchValidationError("insert_before.task missing query")
+
+    if "use_resources" in task:
+        task["use_resources"] = _normalise_resources(
+            task["use_resources"], resource_aliases, "use_resources"
+        )
+    elif required:
+        raise PatchValidationError("insert_before.task missing use_resources")
+
+    if "tool_requirements" in task and (
+        not isinstance(task["tool_requirements"], list)
+        or not all(isinstance(value, str) for value in task["tool_requirements"])
+    ):
+        raise PatchValidationError("tool_requirements must be a list of strings")
+    if "visualization" in task and not isinstance(task["visualization"], Mapping):
+        raise PatchValidationError("visualization must be a mapping")
+
+
 def _validate_update(
-    operation: Mapping[str, Any], known_ids: set[str], known_resources: set[str]
+    operation: Dict[str, Any],
+    known_ids: set[str],
+    resource_aliases: Mapping[str, set[str]],
 ) -> List[str]:
     task_id = _task_id(operation.get("task_id"), "update_task.task_id")
+    operation["task_id"] = task_id
     if task_id not in known_ids:
         raise PatchValidationError(f"unknown task: {task_id}")
     changes = operation.get("changes")
     if not isinstance(changes, Mapping) or not changes:
         raise PatchValidationError("update_task.changes must be a non-empty object")
+    changes = deepcopy(dict(changes))
+    operation["changes"] = changes
     disallowed = set(changes) - _UPDATE_FIELDS
     if disallowed:
         raise PatchValidationError(
             f"update_task change not allowed: {sorted(disallowed)[0]}"
         )
-    if "use_resources" in changes:
-        _validate_resources(changes["use_resources"], known_resources, "use_resources")
+    _validate_task_fields(changes, resource_aliases, required=False)
     return [task_id]
 
 
-def _validate_move(operation: Mapping[str, Any], known_ids: set[str]) -> List[str]:
+def _move_before(order: List[str], task_id: str, before_task_id: str) -> None:
+    task = order.pop(order.index(task_id))
+    order.insert(order.index(before_task_id), task)
+
+
+def _validate_move(
+    operation: Dict[str, Any],
+    known_ids: set[str],
+    current_order: List[str],
+    accepted_ids: set[str],
+) -> List[str]:
     task_id = _task_id(operation.get("task_id"), "move_before.task_id")
     before_task_id = _task_id(
         operation.get("before_task_id"), "move_before.before_task_id"
     )
+    operation["task_id"] = task_id
+    operation["before_task_id"] = before_task_id
     if task_id not in known_ids or before_task_id not in known_ids:
         raise PatchValidationError("move_before references an unknown task")
     if task_id == before_task_id:
         raise PatchValidationError("move_before task_id must differ from before_task_id")
-    return [task_id, before_task_id]
+    task_index = current_order.index(task_id)
+    anchor_index = current_order.index(before_task_id)
+    crossed = (
+        current_order[anchor_index:task_index]
+        if task_index > anchor_index
+        else current_order[task_index + 1 : anchor_index]
+    )
+    if task_id in accepted_ids:
+        raise PatchValidationError("cannot move an accepted task")
+    if before_task_id in accepted_ids:
+        raise PatchValidationError("cannot move before an accepted anchor")
+    accepted_crossed = set(crossed) & accepted_ids
+    if accepted_crossed:
+        raise PatchValidationError("cannot move across an accepted crossed task")
+    _move_before(current_order, task_id, before_task_id)
+    return list(dict.fromkeys([task_id, before_task_id, *crossed]))
 
 
 def _validate_insert(
-    operation: Mapping[str, Any], known_ids: set[str], known_resources: set[str]
+    operation: Dict[str, Any],
+    known_ids: set[str],
+    resource_aliases: Mapping[str, set[str]],
+    current_order: List[str],
+    accepted_ids: set[str],
 ) -> List[str]:
     before_task_id = _task_id(
         operation.get("before_task_id"), "insert_before.before_task_id"
     )
+    operation["before_task_id"] = before_task_id
     if before_task_id not in known_ids:
         raise PatchValidationError(f"unknown task: {before_task_id}")
+    if before_task_id in accepted_ids:
+        raise PatchValidationError("cannot insert before an accepted anchor")
     task = operation.get("task")
     if not isinstance(task, Mapping):
         raise PatchValidationError("insert_before.task must be an object")
+    task = deepcopy(dict(task))
+    operation["task"] = task
     task_id = _task_id(task.get("task_id"), "insert_before.task.task_id")
+    task["task_id"] = task_id
     if task_id in known_ids:
         raise PatchValidationError(f"duplicate task_id: {task_id}")
-    if "use_resources" in task:
-        _validate_resources(task["use_resources"], known_resources, "use_resources")
+    _validate_task_fields(task, resource_aliases, required=True)
     known_ids.add(task_id)
+    current_order.insert(current_order.index(before_task_id), task_id)
     return [task_id, before_task_id]
 
 
@@ -217,7 +346,7 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     reason_code = _require_nonempty_string(patch, "reason_code")
     reason = _require_nonempty_string(patch, "reason")
     expected_resolution = _require_nonempty_string(patch, "expected_resolution")
-    known_resources = _known_resources(state)
+    resource_aliases = _resource_aliases(state)
     operations = patch.get("operations")
     if not isinstance(operations, list) or not operations:
         raise PatchValidationError("operations must be a non-empty list")
@@ -228,7 +357,7 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
         for result in state.get("results") or []
         if isinstance(result, Mapping) and result.get("task_id") is not None
     }
-    moving_task_ids: set[str] = set()
+    current_order = list(task_ids)
     operation_copies: List[Dict[str, Any]] = []
     for raw_operation in operations:
         if not isinstance(raw_operation, Mapping):
@@ -239,15 +368,21 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
             raise PatchValidationError(f"unsupported operation: {operation_name}")
         if operation_name == "update_task":
             operation_task_ids.extend(
-                _validate_update(operation, known_ids, known_resources)
+                _validate_update(operation, known_ids, resource_aliases)
             )
         elif operation_name == "move_before":
-            affected = _validate_move(operation, known_ids)
-            moving_task_ids.add(affected[0])
-            operation_task_ids.extend(affected)
+            operation_task_ids.extend(
+                _validate_move(operation, known_ids, current_order, accepted_ids)
+            )
         else:
             operation_task_ids.extend(
-                _validate_insert(operation, known_ids, known_resources)
+                _validate_insert(
+                    operation,
+                    known_ids,
+                    resource_aliases,
+                    current_order,
+                    accepted_ids,
+                )
             )
         operation_copies.append(operation)
 
@@ -260,12 +395,8 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
         raise PatchValidationError("accepted result invalidation was not declared by an operation")
     if operation_set != affected_set:
         raise PatchValidationError("operations must match affected_task_ids")
-    if moving_task_ids & accepted_ids:
-        raise PatchValidationError("cannot move an accepted task")
 
-    simulated_tasks = deepcopy(tasks)
-    _apply_operations(simulated_tasks, operation_copies)
-    final_task_ids = [str(task["task_id"]) for task in simulated_tasks]
+    final_task_ids = current_order
     resume_task_id = _task_id(patch.get("resume_task_id"), "resume_task_id")
     if resume_task_id not in final_task_ids or resume_task_id not in affected_set:
         raise PatchValidationError("resume_task_id must name an affected task")
