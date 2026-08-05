@@ -124,3 +124,100 @@ def test_pass_commits_current_result_once_and_uses_done_at_final_task():
     assert [result["task_id"] for result in first["results"]] == ["T2"]
     assert [result["task_id"] for result in second["results"]] == ["T2"]
     assert [result["task_id"] for result in commit_current_result({**state, **first})] == ["T2"]
+
+
+def test_non_final_pass_commits_current_result_and_returns_next():
+    state = recovery_state(task_id="T2")
+    state["tasks"].append({"task_id": "T3", "use_resources": []})
+
+    decision = decide_recovery_action(state, {"status": "PASS", "issues": []})
+
+    assert decision["workflow_action"] == WorkflowAction.NEXT
+    assert [result["task_id"] for result in decision["results"]] == ["T2"]
+
+
+def test_plan_patch_per_task_limit_requires_user_input_without_consuming_counts():
+    state = recovery_state(task_id="T2", task_patch_count={"T2": 1})
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("RESOURCE_NOT_ASSIGNED", None),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_patch_count"] == {"T2": 1}
+    assert decision["job_patch_count"] == 0
+
+
+def test_plan_patch_per_job_limit_requires_user_input_without_consuming_counts():
+    state = recovery_state(task_id="T2", job_patch_count=3)
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("RESOURCE_NOT_ASSIGNED", None),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_patch_count"] == {}
+    assert decision["job_patch_count"] == 3
+
+
+def test_plan_patch_decision_does_not_increment_applied_patch_counts():
+    state = recovery_state(
+        task_id="T2",
+        docs=[{"name": "data.csv", "path": "/job/data.csv"}],
+    )
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("MISSING_RESOURCE", None, resource_name="data.csv"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.PLAN_PATCH
+    assert decision["task_patch_count"] == {}
+    assert decision["job_patch_count"] == 0
+
+
+def test_retry_limit_warning_has_structured_fields_and_is_idempotent():
+    previous_warning = {"code": "EARLIER_WARNING", "task_id": "T1"}
+    state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
+    state["verification_warnings"] = [previous_warning]
+    assessment = assessment_with("TOO_SHORT", "CONTENT_DEFECT")
+
+    first = decide_recovery_action(state, assessment)
+    second = decide_recovery_action({**state, **first}, assessment)
+
+    warning = first["verification_warning"]
+    assert warning["code"] == "CONTENT_RETRY_LIMIT_REACHED"
+    assert warning["category"] == "CONTENT_DEFECT"
+    assert warning["task_id"] == "T2"
+    assert warning["issues"] == assessment["issues"]
+    assert first["verification_warnings"] == [previous_warning, warning]
+    assert second["verification_warning"] == warning
+    assert second["verification_warnings"] == [previous_warning, warning]
+
+
+def test_only_explicit_auto_fixable_codes_are_local_plan_defects():
+    state = recovery_state(task_id="T2")
+    for code in (
+        "CONTRADICTORY_REQUIREMENTS",
+        "REQUIREMENTS_CONFLICT",
+        "UNEXECUTABLE_TASK",
+        "BAD_PLAN",
+        "INVALID_PLAN",
+    ):
+        assert (
+            classify_assessment(assessment_with(code, None), state)
+            is IssueCategory.EXTERNAL_BLOCKER
+        )
+
+    for code in (
+        "RESOURCE_NOT_ASSIGNED",
+        "INVALID_TASK_ORDER",
+        "MISSING_DEPENDENCY",
+        "TASK_GRANULARITY",
+    ):
+        assert (
+            classify_assessment(assessment_with(code, None), state)
+            is IssueCategory.LOCAL_PLAN_DEFECT
+        )

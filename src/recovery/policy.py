@@ -55,16 +55,20 @@ _EVIDENCE_CODES = {
     "SOURCE_UNSUPPORTED",
 }
 _LOCAL_PLAN_CODES = {
-    "BAD_PLAN",
-    "CONTRADICTORY_REQUIREMENTS",
-    "INVALID_PLAN",
-    "UNEXECUTABLE_TASK",
+    "INVALID_TASK_ORDER",
+    "MISSING_DEPENDENCY",
+    "RESOURCE_NOT_ASSIGNED",
+    "TASK_GRANULARITY",
 }
 _EXTERNAL_CODES = {
+    "BAD_PLAN",
+    "CONTRADICTORY_REQUIREMENTS",
     "EXTERNAL_BLOCKER",
+    "INVALID_PLAN",
     "PERMISSION_DENIED",
     "REQUIREMENTS_CONFLICT",
     "RESOURCE_UNAVAILABLE",
+    "UNEXECUTABLE_TASK",
 }
 
 
@@ -213,6 +217,25 @@ def _pending_user_action(
     }
 
 
+def _content_retry_warning(
+    warnings: List[Dict[str, Any]],
+    task_id: str,
+    assessment: Dict[str, Any],
+) -> Dict[str, Any]:
+    for warning in warnings:
+        if (
+            warning.get("code") == "CONTENT_RETRY_LIMIT_REACHED"
+            and str(warning.get("task_id")) == task_id
+        ):
+            return warning
+    return {
+        "code": "CONTENT_RETRY_LIMIT_REACHED",
+        "category": IssueCategory.CONTENT_DEFECT.value,
+        "task_id": task_id,
+        "issues": list(assessment.get("issues") or []),
+    }
+
+
 def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) -> Dict[str, Any]:
     """Choose a bounded recovery action without invoking models or graph nodes."""
     task_id = _current_task_id(state)
@@ -242,19 +265,19 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             update["workflow_action"] = WorkflowAction.REWORK.value
             return update
 
-        warning = {
-            "code": "CONTENT_RETRY_LIMIT_REACHED",
-            "category": category.value,
-            "task_id": task_id,
-            "issues": list(assessment.get("issues") or []),
-        }
+        warning = _content_retry_warning(
+            update["verification_warnings"], task_id, assessment
+        )
         continuation = _continuation_action(state)
+        warnings = update["verification_warnings"]
+        if warning not in warnings:
+            warnings = [*warnings, warning]
         update.update(
             {
                 "workflow_action": WorkflowAction.ACCEPT_WITH_WARNING.value,
                 "continuation_action": continuation.value,
                 "verification_warning": warning,
-                "verification_warnings": [*update["verification_warnings"], warning],
+                "verification_warnings": warnings,
                 "results": commit_current_result(state),
             }
         )
@@ -270,8 +293,6 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     if category is IssueCategory.LOCAL_PLAN_DEFECT:
         patches = task_patch_count.get(task_id, 0)
         if patches < MAX_TASK_PATCHES and job_patch_count < MAX_JOB_PATCHES:
-            task_patch_count[task_id] = patches + 1
-            update["job_patch_count"] = job_patch_count + 1
             update["workflow_action"] = WorkflowAction.PLAN_PATCH.value
             return update
 
