@@ -1,0 +1,240 @@
+from copy import deepcopy
+
+import pytest
+
+from src.recovery.plan_patch import PatchValidationError, apply_plan_patch, validate_plan_patch
+
+
+def task(task_id):
+    return {
+        "task_id": task_id,
+        "task_name": f"Task {task_id}",
+        "task_description": f"Description for {task_id}",
+        "task_type": "analysis",
+        "use_rag": True,
+        "use_web": False,
+        "generate_table": False,
+        "generate_figure": False,
+        "query": f"query {task_id}",
+        "use_resources": [],
+    }
+
+
+def patch_state(
+    *,
+    cursor=0,
+    accepted_ids=(),
+    docs=None,
+    plan_revision=1,
+    task_patch_count=None,
+    job_patch_count=0,
+):
+    tasks = [task(task_id) for task_id in ("T1", "T2", "T3", "T4")]
+    return {
+        "tasks": tasks,
+        "cursor": cursor,
+        "docs": list(docs if docs is not None else [{"name": "evidence.csv"}]),
+        "results": [
+            {"task_id": task_id, "text_output": f"accepted {task_id}"}
+            for task_id in accepted_ids
+        ],
+        "plan_revision": plan_revision,
+        "task_revisions": {item["task_id"]: 1 for item in tasks},
+        "task_patch_count": dict(task_patch_count or {}),
+        "job_patch_count": job_patch_count,
+        "pending_user_action": {"category": "LOCAL_PLAN_DEFECT"},
+        "plan_patch_history": [],
+    }
+
+
+def update_patch(
+    *,
+    task_id="T3",
+    changes=None,
+    affected_task_ids=None,
+    resume_task_id=None,
+    base_plan_revision=1,
+    **overrides,
+):
+    return {
+        "base_plan_revision": base_plan_revision,
+        "reason_code": "RESOURCE_NOT_ASSIGNED",
+        "reason": "The task needs the existing evidence file.",
+        "affected_task_ids": affected_task_ids or [task_id],
+        "operations": [
+            {
+                "op": "update_task",
+                "task_id": task_id,
+                "changes": (
+                    {"use_resources": ["evidence.csv"]}
+                    if changes is None
+                    else changes
+                ),
+            }
+        ],
+        "resume_task_id": resume_task_id or task_id,
+        "expected_resolution": "The task can use the required evidence.",
+        **overrides,
+    }
+
+
+def insert_before_patch(*, before_task_id="T3", inserted_task_id="T2A", **overrides):
+    return {
+        "base_plan_revision": 1,
+        "reason_code": "MISSING_DEPENDENCY",
+        "reason": "A prerequisite evidence task is required.",
+        "affected_task_ids": [inserted_task_id, before_task_id],
+        "operations": [
+            {
+                "op": "insert_before",
+                "before_task_id": before_task_id,
+                "task": {**task(inserted_task_id), "task_name": "Evidence prerequisite"},
+            }
+        ],
+        "resume_task_id": inserted_task_id,
+        "expected_resolution": "The prerequisite completes before the blocked task.",
+        **overrides,
+    }
+
+
+def move_before_patch(*, task_id="T4", before_task_id="T3", **overrides):
+    return {
+        "base_plan_revision": 1,
+        "reason_code": "INVALID_TASK_ORDER",
+        "reason": "The dependency needs to run first.",
+        "affected_task_ids": [task_id, before_task_id],
+        "operations": [
+            {"op": "move_before", "task_id": task_id, "before_task_id": before_task_id}
+        ],
+        "resume_task_id": task_id,
+        "expected_resolution": "The prerequisite precedes its dependent task.",
+        **overrides,
+    }
+
+
+def test_update_patch_preserves_unaffected_results_and_cursor_progress():
+    state = patch_state(cursor=2, accepted_ids=["T1", "T2"])
+    patch = update_patch(task_id="T3", resume_task_id="T3")
+
+    update = apply_plan_patch(state, patch)
+
+    assert [item["task_id"] for item in update["results"]] == ["T1", "T2"]
+    assert update["cursor"] == 2
+    assert update["plan_revision"] == 2
+
+
+def test_patch_rejects_stale_base_revision_without_partial_write():
+    state = patch_state(plan_revision=2)
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="base_plan_revision"):
+        apply_plan_patch(state, update_patch(base_plan_revision=1))
+
+    assert state == before
+
+
+def test_patch_rejects_unknown_resource():
+    state = patch_state(docs=[])
+    patch = update_patch(changes={"use_resources": ["invented.csv"]})
+
+    with pytest.raises(PatchValidationError, match="resource"):
+        validate_plan_patch(state, patch)
+
+
+def test_inserted_task_gets_unique_stable_id_and_resume_position():
+    state = patch_state(cursor=2)
+    patch = insert_before_patch(before_task_id="T3", inserted_task_id="T2A")
+
+    update = apply_plan_patch(state, patch)
+
+    assert [task["task_id"] for task in update["tasks"]] == ["T1", "T2", "T2A", "T3", "T4"]
+    assert update["cursor"] == 2
+    assert update["task_revisions"] == {"T1": 1, "T2": 1, "T3": 2, "T4": 1, "T2A": 1}
+
+
+def test_insert_patch_normalizes_legacy_revision_counter_before_reordering():
+    state = patch_state(cursor=2)
+    state["task_revisions"] = {2: 5}
+
+    update = apply_plan_patch(state, insert_before_patch())
+
+    assert update["task_revisions"]["T3"] == 6
+    assert update["task_revisions"]["T2A"] == 1
+
+
+def test_apply_is_atomic_and_counts_only_after_a_valid_patch():
+    state = patch_state(task_patch_count={"T3": 0})
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="unsupported"):
+        apply_plan_patch(state, update_patch(operations=[{"op": "delete_task"}]))
+
+    assert state == before
+    update = apply_plan_patch(state, update_patch())
+    assert update["task_patch_count"] == {"T3": 1}
+    assert update["job_patch_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("patch", "match"),
+    [
+        (update_patch(reason=" "), "reason"),
+        (update_patch(reason_code=" "), "reason_code"),
+        (update_patch(expected_resolution=" "), "expected_resolution"),
+        (update_patch(resume_task_id="missing"), "resume_task_id"),
+        (move_before_patch(resume_task_id="T3"), "earliest"),
+        (update_patch(affected_task_ids=["T3", "T3"]), "duplicate"),
+        (update_patch(affected_task_ids=["missing"]), "unknown task"),
+        (update_patch(affected_task_ids=["T2"]), "affected_task_ids"),
+        (update_patch(changes={"task_id": "T2"}), "not allowed"),
+        (update_patch(changes={}), "changes"),
+        (update_patch(operations=[{"op": "delete_task", "task_id": "T3"}]), "unsupported"),
+    ],
+)
+def test_validate_rejects_invalid_patch_contract(patch, match):
+    with pytest.raises(PatchValidationError, match=match):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_validate_rejects_duplicate_or_unknown_task_ids():
+    with pytest.raises(PatchValidationError, match="duplicate task_id"):
+        validate_plan_patch(patch_state(), insert_before_patch(inserted_task_id="T3"))
+
+    with pytest.raises(PatchValidationError, match="unknown task"):
+        validate_plan_patch(patch_state(), update_patch(task_id="missing"))
+
+
+def test_validate_rejects_moving_an_accepted_task():
+    with pytest.raises(PatchValidationError, match="accepted"):
+        validate_plan_patch(patch_state(accepted_ids=["T4"]), move_before_patch())
+
+
+def test_validate_rejects_undeclared_accepted_result_invalidation():
+    patch = update_patch(affected_task_ids=["T2", "T3"])
+
+    with pytest.raises(PatchValidationError, match="accepted result"):
+        validate_plan_patch(patch_state(accepted_ids=["T2"]), patch)
+
+
+def test_move_and_update_apply_in_order_and_record_history():
+    state = patch_state(cursor=2)
+    patch = move_before_patch()
+
+    update = apply_plan_patch(state, patch)
+
+    assert [item["task_id"] for item in update["tasks"]] == ["T1", "T2", "T4", "T3"]
+    assert update["cursor"] == 2
+    assert update["task_revisions"] == {"T1": 1, "T2": 1, "T3": 2, "T4": 2}
+    assert update["pending_user_action"] == {}
+    assert update["plan_patch_history"] == [
+        {
+            "base_plan_revision": 1,
+            "plan_revision": 2,
+            "reason_code": "INVALID_TASK_ORDER",
+            "reason": "The dependency needs to run first.",
+            "affected_task_ids": ["T4", "T3"],
+            "operations": patch["operations"],
+            "resume_task_id": "T4",
+            "expected_resolution": "The prerequisite precedes its dependent task.",
+        }
+    ]
