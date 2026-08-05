@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 """
 Planner 节点：
 - 职责：读取最新一条发给 Planner 的指令（messages content 为 JSON，且 `to="Planner"`），
-  根据指令类型（INTAKE_SUMMARY / PROCEED / REPLAN）选择流程，生成任务列表与下游消息。
+  根据指令类型（INTAKE_SUMMARY / PROCEED / FULL_REPLAN）选择流程，生成任务列表与下游消息。
 - 输入：
   - 来自 Intake 的 INTAKE_SUMMARY：初始化任务规划
   - 来自 Verifier 的 PROCEED：根据决策推进 cursor
-  - 来自 Verifier 的 REPLAN：重新规划任务并重置 cursor=0
+  - 来自人工 Verifier 的 FULL_REPLAN：暂存新计划，等待用户确认后才重置执行状态
 - 输出：
   - 更新 `tasks` 与 `cursor`
   - 设置 `planner_action`
@@ -39,6 +39,16 @@ def _latest_to_planner(messages):
         except Exception:
             continue
     return None
+
+
+def _is_user_full_replan(parsed: Dict[str, Any] | None) -> bool:
+    """Accept full replanning only from the manual, user-feedback verifier."""
+    return bool(
+        isinstance(parsed, dict)
+        and parsed.get("from") == "Verifier"
+        and parsed.get("to") == "Planner"
+        and str(parsed.get("type") or "").upper() == "FULL_REPLAN"
+    )
 
 
 def _read_prompt(rel_path: str) -> str:
@@ -408,7 +418,7 @@ def _generate_plan_guidance(tasks: List[Dict[str, Any]], initial_resources: List
 
 def planner(state: State, config: RunnableConfig, **kwargs):
     """Planner 主流程：
-    - 确定 Action (INTAKE_SUMMARY / REPLAN / PROCEED)
+    - 确定 Action (INTAKE_SUMMARY / FULL_REPLAN / PROCEED)
     - 生成/更新任务列表
     - 若 PROCEED，生成消息
     - 若其他，推迟消息生成到 planner_confirm
@@ -421,8 +431,8 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     # 确定 Action
     if parsed and parsed.get("type") == "INTAKE_SUMMARY":
         planner_action = "INTAKE_SUMMARY"
-    elif decision == "REPLAN" or (parsed and parsed.get("type") == "REPLAN"):
-        planner_action = "REPLAN"
+    elif _is_user_full_replan(parsed):
+        planner_action = "FULL_REPLAN"
     else:
         planner_action = "PROCEED"
 
@@ -434,10 +444,9 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         cursor = 0
         overview = "初始规划已生成。"
     
-    elif planner_action == "REPLAN":
+    elif planner_action == "FULL_REPLAN":
         tasks = _build_tasks_from_replan_feedback(state, config, tasks)
-        cursor = 0
-        overview = "因验证阻塞，已根据反馈重做任务列表。"
+        overview = "已按用户请求生成替换计划，等待确认后执行。"
     
     elif planner_action == "PROCEED":
         # 如果是 PROCEED 且有明确的 PROCEED 指令，移动 cursor
@@ -571,11 +580,35 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     }
     message = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
 
-    return {
+    update = {
         "messages": [feedback_message, message],
         "tasks": tasks,
         "cursor": 0,
         # 只提交本轮新增附件，State.merge_docs 会负责合并。
         "docs": resumed_docs,
     }
-
+    if state.get("planner_action") == "FULL_REPLAN":
+        # The replacement plan is staged above, but it becomes a new execution
+        # revision only when this explicit confirmation resumes the node.
+        task_revisions = {
+            str(task["task_id"]): 1
+            for task in tasks
+            if isinstance(task, dict) and task.get("task_id") is not None
+        }
+        update.update(
+            {
+                "plan_revision": int(state.get("plan_revision", 1) or 1) + 1,
+                "task_revisions": task_revisions,
+                "current_result": {},
+                "results": [],
+                "all_results": [],
+                "task_retry_count": {},
+                "evidence_recovery_count": {},
+                "task_patch_count": {},
+                "job_patch_count": 0,
+                "pending_user_action": {},
+                "plan_patch_history": [],
+                "verification_warnings": [],
+            }
+        )
+    return update

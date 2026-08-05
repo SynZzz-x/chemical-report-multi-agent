@@ -39,7 +39,7 @@ def route_planner(state: State):
 
 _MANUAL_VERIFIER_ROUTES = {
     "RETRY_WORKER": "Worker",
-    "REPLAN": "Planner",
+    "FULL_REPLAN": "Planner",
     "NEXT": "Planner",
     "DONE": "Summarizer",
 }

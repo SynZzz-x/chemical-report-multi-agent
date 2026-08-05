@@ -56,6 +56,11 @@ def _is_internal_control_message(content: str) -> bool:
         "PLAN_RESULT",
         "PROCEED",
         "REPLAN",
+        "FULL_REPLAN",
+        "PLAN_PATCH",
+        "EVIDENCE_RECOVERY",
+        "NEEDS_USER_INPUT",
+        "needs_user_input",
         "REWORK",
         "SUMMARIZE",
     }

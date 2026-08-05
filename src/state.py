@@ -75,7 +75,7 @@ class State(TypedDict, total=False):
 
     decision: Literal[
         "RETRY_WORKER",
-        "REPLAN",
+        "FULL_REPLAN",
         "NEXT",
         "DONE",
         "END",

@@ -41,9 +41,10 @@ _DECISION_ALIASES = {
     "RETRY_WORKER": "REWORK",
     "修改": "REWORK",
     "返工": "REWORK",
-    "REPLAN": "REPLAN",
-    "BAD_PLAN": "REPLAN",
-    "重新规划": "REPLAN",
+    "FULL_REPLAN": "FULL_REPLAN",
+    "REPLAN": "FULL_REPLAN",
+    "BAD_PLAN": "FULL_REPLAN",
+    "重新规划": "FULL_REPLAN",
 }
 
 
@@ -139,7 +140,8 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
     1. 展示当前结果摘要
     2. Interrupt 等待用户反馈
     3. Resume 后 LLM 分析反馈
-    4. 路由：PASS -> NEXT/DONE; REWORK -> RETRY_WORKER; REPLAN -> REPLAN
+    4. 路由：PASS -> NEXT/DONE; REWORK -> RETRY_WORKER;
+       FULL_REPLAN -> Planner（仅用户触发）
     """
     current_result = state.get("current_result", {}) or {}
     tasks = state.get("tasks", []) or []
@@ -254,12 +256,12 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
         output_updates["worker_state"] = worker_updates
         output_updates["results"] = previous_results # 不追加当前结果
         
-    elif decision_code == "REPLAN":
-        final_decision = "REPLAN"
+    elif decision_code == "FULL_REPLAN":
+        final_decision = "FULL_REPLAN"
         content_obj = {
             "from": "Verifier",
             "to": "Planner",
-            "type": "REPLAN",
+            "type": "FULL_REPLAN",
             "reason": reason,
             "current_section": task_name,
         }

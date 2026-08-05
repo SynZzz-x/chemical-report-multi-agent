@@ -502,6 +502,11 @@ def _is_internal_control_message(content: str) -> bool:
         "PLAN_RESULT",
         "PROCEED",
         "REPLAN",
+        "FULL_REPLAN",
+        "PLAN_PATCH",
+        "EVIDENCE_RECOVERY",
+        "NEEDS_USER_INPUT",
+        "needs_user_input",
         "REWORK",
         "SUMMARIZE",
     }:
@@ -607,6 +612,13 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
         )
         with st.chat_message("assistant"):
             _render_verify(payload)
+        return True
+
+    if payload_type == "needs_user_input":
+        guidance = payload.get("guidance_text") or "需要你的输入后才能继续当前任务。"
+        _append_ui_message("assistant", guidance)
+        with st.chat_message("assistant"):
+            st.write(guidance)
         return True
 
     guidance = payload.get("guidance_text") or json.dumps(payload, ensure_ascii=False)

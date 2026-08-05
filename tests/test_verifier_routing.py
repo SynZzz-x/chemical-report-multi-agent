@@ -9,7 +9,7 @@ from src.nodes.verifier_manual import decision, verifier_manual
 
 def test_decision_returns_state_decision():
     assert decision({"decision": "NEXT"}, {}) == "NEXT"
-    assert decision({"decision": "REPLAN"}, {}) == "REPLAN"
+    assert decision({"decision": "FULL_REPLAN"}, {}) == "FULL_REPLAN"
     assert decision({"decision": "RETRY_WORKER"}, {}) == "RETRY_WORKER"
     assert decision({"decision": "DONE"}, {}) == "DONE"
 
@@ -168,7 +168,7 @@ def test_manual_rework_keeps_cursor_result_unaccepted(monkeypatch):
     assert control_message["type"] == "REWORK"
 
 
-def test_manual_replan_preserves_results_and_routes_to_planner(monkeypatch):
+def test_manual_full_replan_preserves_results_and_routes_to_planner(monkeypatch):
     accepted_result = {"task_id": "T0", "text_output": "已完成结果"}
     state = _manual_state(results=[accepted_result])
     monkeypatch.setattr(
@@ -192,8 +192,8 @@ def test_manual_replan_preserves_results_and_routes_to_planner(monkeypatch):
 
     verifier_update = verifier_manual(state, {})
 
-    assert verifier_update["decision"] == "REPLAN"
+    assert verifier_update["decision"] == "FULL_REPLAN"
     assert verifier_update["results"] == [accepted_result]
     control_message = json.loads(verifier_update["messages"][-1].content)
-    assert control_message["type"] == "REPLAN"
+    assert control_message["type"] == "FULL_REPLAN"
     assert control_message["to"] == "Planner"

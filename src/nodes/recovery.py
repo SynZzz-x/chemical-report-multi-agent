@@ -61,7 +61,7 @@ def _resume_action(resumed: Any) -> str | None:
     )
 
 
-def _is_legacy_replan_message(message: Any) -> bool:
+def _is_replan_control_message(message: Any) -> bool:
     try:
         payload = json.loads(str(getattr(message, "content", "") or "").strip())
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -69,20 +69,21 @@ def _is_legacy_replan_message(message: Any) -> bool:
     return (
         isinstance(payload, dict)
         and payload.get("to") == "Planner"
-        and str(payload.get("type") or "").strip().upper() == "REPLAN"
+        and str(payload.get("type") or "").strip().upper()
+        in {"REPLAN", "FULL_REPLAN"}
     )
 
 
 def automatic_planner(
     state: State, config: RunnableConfig, **kwargs
 ) -> dict[str, Any]:
-    """Run Planner on an auto-safe copy of legacy checkpoint state."""
+    """Run Planner on an auto-safe copy that cannot invoke full replanning."""
     sanitized_state = dict(state)
     sanitized_state["decision"] = WorkflowAction.NEXT.value
     sanitized_state["messages"] = [
         message
         for message in state.get("messages", []) or []
-        if not _is_legacy_replan_message(message)
+        if not _is_replan_control_message(message)
     ]
     return planner_node(sanitized_state, config, **kwargs)
 
