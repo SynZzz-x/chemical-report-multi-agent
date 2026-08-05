@@ -106,6 +106,25 @@ def _normalize_replacement_tasks(
     return normalized
 
 
+def _counter_task_ids(counter: Any, tasks: List[Dict[str, Any]]) -> list[str]:
+    """Return task IDs from a legacy task-keyed counter without cursor aliases."""
+    task_ids: list[str] = []
+    for key in (counter or {}):
+        if isinstance(key, int) and not isinstance(key, bool):
+            if 0 <= key < len(tasks):
+                task = tasks[key]
+                if isinstance(task, dict) and str(task.get("task_id") or "").strip():
+                    task_ids.append(str(task["task_id"]))
+            # Integer keys in old checkpoints were cursor positions.  If the
+            # matching task is unavailable, ignoring them avoids reserving a
+            # bogus literal ID such as "3".
+            continue
+        task_id = str(key).strip()
+        if task_id:
+            task_ids.append(task_id)
+    return task_ids
+
+
 def _job_task_ids(state: State) -> list[str]:
     """Return all task IDs ever committed or currently active for this job."""
     task_ids = [str(task_id) for task_id in state.get("task_id_registry") or []]
@@ -141,7 +160,7 @@ def _job_task_ids(state: State) -> list[str]:
     ):
         counter = state.get(key)
         if isinstance(counter, dict):
-            task_ids.extend(str(task_id) for task_id in counter)
+            task_ids.extend(_counter_task_ids(counter, state.get("tasks") or []))
 
     for event in state.get("plan_patch_history") or []:
         if not isinstance(event, dict):

@@ -196,6 +196,87 @@ def test_automatic_planner_clears_restored_full_replan_retry_state(monkeypatch):
     assert update["guidance"] == {}
 
 
+def test_automatic_planner_preserves_initial_plan_confirmation(monkeypatch):
+    intake = AIMessage(
+        content=json.dumps(
+            {
+                "from": "Intake",
+                "to": "Planner",
+                "type": "INTAKE_SUMMARY",
+                "sections": ["摘要"],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_with_llm",
+        lambda *_: [{"task_id": "T1", "task_name": "初始任务"}],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_generate_plan_guidance",
+        lambda *_: {"natural_language_guidance": "请确认初始计划"},
+    )
+
+    update = automatic_planner({"messages": [intake]}, {})
+
+    assert update["planner_action"] == "INTAKE_SUMMARY"
+    assert update["guidance"] == {"natural_language_guidance": "请确认初始计划"}
+    assert update["planner_action"] != "PROCEED"
+
+
+def test_automatic_planner_clears_stale_full_replan_state_but_keeps_initial_confirmation(
+    monkeypatch,
+):
+    full_replan = AIMessage(
+        content=json.dumps(
+            {"from": "Verifier", "to": "Planner", "type": "FULL_REPLAN"}
+        )
+    )
+    intake = AIMessage(
+        content=json.dumps(
+            {
+                "from": "Intake",
+                "to": "Planner",
+                "type": "INTAKE_SUMMARY",
+                "sections": ["摘要"],
+            }
+        )
+    )
+    state = {
+        "planner_action": "FULL_REPLAN_RETRY",
+        "full_replan_previous_task_ids": ["T1"],
+        "full_replan_reason": "stale retry",
+        "full_replan_candidate_tasks": [{"task_id": "T9"}],
+        "guidance": {"error": "stale replacement failure"},
+        "messages": [full_replan, intake],
+    }
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: (_ for _ in ()).throw(AssertionError("automatic full replan")),
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_with_llm",
+        lambda *_: [{"task_id": "T2", "task_name": "初始任务"}],
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_generate_plan_guidance",
+        lambda *_: {"natural_language_guidance": "请确认新的初始计划"},
+    )
+
+    update = automatic_planner(state, {})
+
+    assert update["planner_action"] == "INTAKE_SUMMARY"
+    assert update["guidance"] == {"natural_language_guidance": "请确认新的初始计划"}
+    assert update["planner_action"] != "PROCEED"
+    assert update["full_replan_previous_task_ids"] == []
+    assert update["full_replan_reason"] == ""
+    assert update["full_replan_candidate_tasks"] == []
+
+
 def test_legacy_checkpoint_uses_safe_recovery_defaults_without_full_replan():
     legacy_state = {
         "tasks": [{"task_id": "T1", "task_name": "任务"}],
@@ -368,6 +449,17 @@ def test_restored_checkpoint_without_registry_reserves_historical_task_ids(monke
 
     assert "unrelated-record-id" not in planner_module._job_task_ids(state)
     assert staged["full_replan_candidate_tasks"][0]["task_id"] == "T14"
+
+
+def test_legacy_integer_counter_keys_map_to_tasks_or_are_ignored():
+    task_ids = planner_module._counter_task_ids(
+        {0: 1, 3: 1, "T_HISTORICAL": 1},
+        [{"task_id": "T1"}, {"task_id": "T2"}],
+    )
+
+    assert task_ids == ["T1", "T_HISTORICAL"]
+    assert "0" not in task_ids
+    assert "3" not in task_ids
 
 
 def test_invalid_full_replan_interrupts_only_with_safe_blocker_guidance(monkeypatch):

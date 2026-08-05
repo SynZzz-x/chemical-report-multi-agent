@@ -42,6 +42,14 @@ _RESUME_ACTION_ALIASES = {
     "扩大检索": WorkflowAction.EVIDENCE_RECOVERY.value,
 }
 
+_FULL_REPLAN_ACTIONS = {
+    "FULL_REPLAN",
+    "FULL_REPLAN_RETRY",
+    "FULL_REPLAN_REFINED",
+    "FULL_REPLAN_ERROR",
+}
+_FULL_REPLAN_DECISIONS = {"REPLAN", "FULL_REPLAN"}
+
 
 def _canonical_resume_action(value: Any) -> str | None:
     normalized = str(value or "").strip()
@@ -79,36 +87,52 @@ def automatic_planner(
 ) -> dict[str, Any]:
     """Run Planner on an auto-safe copy that cannot invoke full replanning."""
     sanitized_state = dict(state)
-    sanitized_state.update(
-        {
-            "decision": WorkflowAction.NEXT.value,
-            # A restored manual checkpoint may still be waiting to retry or
-            # confirm a replacement plan.  Automatic recovery must discard
-            # that staging state rather than letting Planner re-enter it.
-            "planner_action": "PROCEED",
-            "full_replan_previous_task_ids": [],
-            "full_replan_reason": "",
-            "full_replan_candidate_tasks": [],
-            "guidance": {},
-        }
+    planner_action = str(state.get("planner_action") or "")
+    decision = str(state.get("decision") or "")
+    has_full_replan_staging = bool(
+        state.get("full_replan_previous_task_ids")
+        or state.get("full_replan_reason")
+        or state.get("full_replan_candidate_tasks")
+        or planner_action in _FULL_REPLAN_ACTIONS
+        or decision in _FULL_REPLAN_DECISIONS
     )
+    if has_full_replan_staging:
+        # A restored manual checkpoint may still be waiting to retry or
+        # confirm a replacement plan.  Automatic recovery discards only that
+        # staging state; normal Planner actions (notably INTAKE_SUMMARY) and
+        # their confirmation guidance remain Planner's responsibility.
+        sanitized_state.update(
+            {
+                "full_replan_previous_task_ids": [],
+                "full_replan_reason": "",
+                "full_replan_candidate_tasks": [],
+                "guidance": {},
+            }
+        )
+        if planner_action in _FULL_REPLAN_ACTIONS:
+            sanitized_state["planner_action"] = ""
+        if decision in _FULL_REPLAN_DECISIONS:
+            sanitized_state["decision"] = WorkflowAction.NEXT.value
     sanitized_state["messages"] = [
         message
         for message in state.get("messages", []) or []
         if not _is_replan_control_message(message)
     ]
     update = planner_node(sanitized_state, config, **kwargs)
-    # Return the cleared values as well: LangGraph state updates are partial,
-    # so sanitizing only the local planner input would leave stale checkpoint
-    # staging fields behind for a later route.
-    return {
+    if not has_full_replan_staging:
+        return update
+
+    # LangGraph state updates are partial, so return the clears persistently.
+    # Do not overwrite Planner's normal action or guidance: an automatic
+    # initial plan must still route through Planner_Confirm.
+    update = {
         **update,
-        "planner_action": "PROCEED",
         "full_replan_previous_task_ids": [],
         "full_replan_reason": "",
         "full_replan_candidate_tasks": [],
-        "guidance": {},
     }
+    update.setdefault("guidance", {})
+    return update
 
 
 def _current_task(state: State) -> dict[str, Any]:
