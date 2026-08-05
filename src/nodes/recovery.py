@@ -79,13 +79,36 @@ def automatic_planner(
 ) -> dict[str, Any]:
     """Run Planner on an auto-safe copy that cannot invoke full replanning."""
     sanitized_state = dict(state)
-    sanitized_state["decision"] = WorkflowAction.NEXT.value
+    sanitized_state.update(
+        {
+            "decision": WorkflowAction.NEXT.value,
+            # A restored manual checkpoint may still be waiting to retry or
+            # confirm a replacement plan.  Automatic recovery must discard
+            # that staging state rather than letting Planner re-enter it.
+            "planner_action": "PROCEED",
+            "full_replan_previous_task_ids": [],
+            "full_replan_reason": "",
+            "full_replan_candidate_tasks": [],
+            "guidance": {},
+        }
+    )
     sanitized_state["messages"] = [
         message
         for message in state.get("messages", []) or []
         if not _is_replan_control_message(message)
     ]
-    return planner_node(sanitized_state, config, **kwargs)
+    update = planner_node(sanitized_state, config, **kwargs)
+    # Return the cleared values as well: LangGraph state updates are partial,
+    # so sanitizing only the local planner input would leave stale checkpoint
+    # staging fields behind for a later route.
+    return {
+        **update,
+        "planner_action": "PROCEED",
+        "full_replan_previous_task_ids": [],
+        "full_replan_reason": "",
+        "full_replan_candidate_tasks": [],
+        "guidance": {},
+    }
 
 
 def _current_task(state: State) -> dict[str, Any]:

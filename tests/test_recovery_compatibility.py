@@ -167,6 +167,35 @@ def test_automatic_planner_filters_full_replan_controls(monkeypatch):
     assert update["cursor"] == 2
 
 
+def test_automatic_planner_clears_restored_full_replan_retry_state(monkeypatch):
+    proceed = AIMessage(content=json.dumps({"to": "Planner", "type": "PROCEED"}))
+    state = {
+        "tasks": [{"task_id": "T1"}, {"task_id": "T2"}, {"task_id": "T3"}],
+        "cursor": 1,
+        "decision": "FULL_REPLAN",
+        "planner_action": "FULL_REPLAN_RETRY",
+        "full_replan_previous_task_ids": ["T1", "T2"],
+        "full_replan_reason": "stale retry",
+        "full_replan_candidate_tasks": [{"task_id": "T9", "task_name": "stale"}],
+        "guidance": {"error": "stale replacement failure"},
+        "messages": [proceed],
+    }
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: (_ for _ in ()).throw(AssertionError("automatic full replan")),
+    )
+
+    update = automatic_planner(state, {})
+
+    assert update["planner_action"] == "PROCEED"
+    assert update["cursor"] == 2
+    assert update["full_replan_previous_task_ids"] == []
+    assert update["full_replan_reason"] == ""
+    assert update["full_replan_candidate_tasks"] == []
+    assert update["guidance"] == {}
+
+
 def test_legacy_checkpoint_uses_safe_recovery_defaults_without_full_replan():
     legacy_state = {
         "tasks": [{"task_id": "T1", "task_name": "任务"}],
@@ -250,6 +279,95 @@ def test_empty_full_replan_is_staged_as_a_safe_failure(monkeypatch):
     assert update["tasks"] == state["tasks"]
     assert "plan_revision" not in update
     assert "results" not in update
+
+
+class _ReplanResponse:
+    def __init__(self, content):
+        self.content = content
+
+
+class _ReplanModel:
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+
+    def invoke(self, *_args, **_kwargs):
+        if self.error is not None:
+            raise self.error
+        return _ReplanResponse(self.response)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not valid json",
+        json.dumps({"task_id": "T9"}),
+        json.dumps([{"task_name": "valid"}, "not-a-task"]),
+    ],
+)
+def test_invalid_replacement_generation_stages_recoverable_error(response, monkeypatch):
+    state = _full_replan_state()
+    monkeypatch.setattr(planner_module, "get_llm", lambda *_: _ReplanModel(response))
+
+    update = planner(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert update["tasks"] == state["tasks"]
+    assert "full_replan_candidate_tasks" not in update
+    assert "plan_revision" not in update
+
+
+def test_replacement_model_failure_stages_error_and_can_resume_old_plan(monkeypatch):
+    state = _full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_: _ReplanModel(error=RuntimeError("model unavailable")),
+    )
+
+    failed = planner(state, {})
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "CANCEL", "text": "continue old", "docs": []},
+    )
+    resumed = planner_confirm({**state, **failed}, {})
+
+    assert failed["planner_action"] == "FULL_REPLAN_ERROR"
+    assert failed["tasks"] == state["tasks"]
+    assert resumed["planner_action"] == "PROCEED"
+    assert "tasks" not in resumed
+    assert "results" not in resumed
+
+
+def test_restored_checkpoint_without_registry_reserves_historical_task_ids(monkeypatch):
+    state = _full_replan_state()
+    state.pop("task_id_registry", None)
+    state["current_task"] = {"task_id": "T3"}
+    state["current_result"] = {"task_id": "T4"}
+    state["results"] = [{"task_id": "T5"}]
+    state["all_results"] = [{"task_id": "T6"}]
+    state["tool_execution_history"] = [
+        {"task_id": "T7", "id": "unrelated-record-id"},
+        {"id": "also-unrelated"},
+    ]
+    state["task_revisions"] = {"T8": 1}
+    state["task_retry_count"] = {"T9": 1}
+    state["evidence_recovery_count"] = {"T10": 1}
+    state["task_patch_count"] = {"T11": 1}
+    state["verification_warnings"] = [{"task_id": "T12"}]
+    state["pending_user_action"] = {"task_id": "T13"}
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: [{"task_id": "T1", "task_name": "replacement"}],
+    )
+    monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
+
+    staged = planner(state, {})
+
+    assert "unrelated-record-id" not in planner_module._job_task_ids(state)
+    assert staged["full_replan_candidate_tasks"][0]["task_id"] == "T14"
 
 
 def test_invalid_full_replan_interrupts_only_with_safe_blocker_guidance(monkeypatch):

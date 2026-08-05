@@ -110,6 +110,39 @@ def _job_task_ids(state: State) -> list[str]:
     """Return all task IDs ever committed or currently active for this job."""
     task_ids = [str(task_id) for task_id in state.get("task_id_registry") or []]
     task_ids.extend(_task_ids(state.get("tasks") or []))
+
+    # Older SQLite checkpoints predate the registry and full-replan audit.
+    # Recover their history only from fields whose schema explicitly carries a
+    # task_id (or mappings explicitly keyed by task ID), never from generic
+    # record IDs such as tool invocation IDs.
+    for key in ("current_task", "current_result", "pending_user_action"):
+        record = state.get(key)
+        if isinstance(record, dict) and str(record.get("task_id") or "").strip():
+            task_ids.append(str(record["task_id"]))
+    for key in (
+        "results",
+        "all_results",
+        "tool_execution_history",
+        "verification_warnings",
+    ):
+        task_ids.extend(_task_ids(state.get(key) or []))
+    for key in ("feedback", "assessment"):
+        payload = state.get(key)
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("task_id") or "").strip():
+            task_ids.append(str(payload["task_id"]))
+        task_ids.extend(_task_ids(payload.get("issues") or []))
+    for key in (
+        "task_revisions",
+        "task_retry_count",
+        "evidence_recovery_count",
+        "task_patch_count",
+    ):
+        counter = state.get(key)
+        if isinstance(counter, dict):
+            task_ids.extend(str(task_id) for task_id in counter)
+
     for event in state.get("plan_patch_history") or []:
         if not isinstance(event, dict):
             continue
@@ -353,37 +386,21 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
         )
         resp = model.invoke(messages, config=config)
         tasks = json.loads(_clean_json_fences(str(resp.content).strip()))
-        if not isinstance(tasks, list):
-            raise ValueError("bad tasks")
-        for i, t in enumerate(tasks):
-            t.setdefault("task_id", f"T{i+1}")
-            t.setdefault("generate_figure", False)
-            t.setdefault("generate_table", False)
-            t.setdefault("use_resources", [])
-        tasks = _ensure_use_resources_paths(tasks, resource_objs)
-        return tasks
-    except Exception:
-        if current_tasks:
-            return current_tasks
-
-        fallback = []
-        base = resource_objs
-        names = []
-        for r in base:
-            if isinstance(r, dict):
-                p = r.get("path") or r.get("file_path") or r.get("name")
-                if p:
-                    names.append(p)
-        for i, ct in enumerate([t.get("task_name", f"任务{i+1}") for t in current_tasks or []] or ["重做任务"]):
-            fallback.append({
-                "task_id": f"T{i+1}",
-                "task_name": ct,
-                "task_description": f"依据建议重做：{suggestion}",
-                "generate_figure": False,
-                "generate_table": False,
-                "use_resources": names,
-            })
-        return fallback
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError("replacement plan must be a non-empty task list")
+        for i, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                raise ValueError("replacement tasks must be objects")
+            task.setdefault("task_id", f"T{i+1}")
+            task.setdefault("generate_figure", False)
+            task.setdefault("generate_table", False)
+            task.setdefault("use_resources", [])
+        return _ensure_use_resources_paths(tasks, resource_objs)
+    except Exception as exc:
+        # A full replan must never silently clone the active plan.  Planner
+        # converts this explicit failure into FULL_REPLAN_ERROR, which gives
+        # the user a retry/cancel path without mutating the old plan.
+        raise ValueError(f"replacement plan generation failed: {exc}") from exc
 
 
 def _resource_identity(resource: Dict[str, Any]) -> str:
