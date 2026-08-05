@@ -1,7 +1,10 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from src.nodes import verifier as auto_verifier_module
+from src.recovery.policy import decide_recovery_action
 
 
 def _state(*, cursor=0):
@@ -161,3 +164,38 @@ def test_sanitizer_keeps_malformed_failed_assessment_from_becoming_pass():
 
     assert sanitized["status"] == "FAILED"
     assert sanitized["issues"][0]["code"] == "ASSESSMENT_CONTRACT_ERROR"
+
+
+@pytest.mark.parametrize("code", ["LLM_ERROR", "LLM_NOT_ENABLED"])
+def test_verifier_service_failures_require_user_input_without_consuming_retry(
+    monkeypatch, code
+):
+    state = _state()
+    original_results = list(state["results"])
+    if code == "LLM_ERROR":
+        class FailingModel:
+            def invoke(self, payload):
+                raise RuntimeError("verification unavailable")
+
+        monkeypatch.setattr(
+            auto_verifier_module,
+            "get_llm",
+            lambda *args, **kwargs: FailingModel(),
+        )
+        config = {"configurable": {"use_llm": True}}
+    else:
+        monkeypatch.setattr(
+            auto_verifier_module,
+            "get_app_config",
+            lambda: SimpleNamespace(deepseek_api_key=None),
+        )
+        config = {"configurable": {"use_llm": False}}
+
+    sanitized = auto_verifier_module.verifier(state, config)["assessment"]
+    update = decide_recovery_action(state, sanitized)
+
+    assert sanitized["issues"][0]["category"] == "EXTERNAL_BLOCKER"
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert update["task_retry_count"] == {"T1": 1}
+    assert "results" not in update
+    assert state["results"] == original_results

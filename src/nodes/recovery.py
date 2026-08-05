@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from src.llm import get_llm
+from src.nodes.planner import planner as planner_node
 from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
 from src.recovery.policy import (
     WorkflowAction,
@@ -20,6 +21,70 @@ from src.recovery.policy import (
     decide_recovery_action,
 )
 from src.state import State
+
+
+_RESUME_ACTION_ALIASES = {
+    "NEXT": WorkflowAction.NEXT.value,
+    "CONTINUE": WorkflowAction.NEXT.value,
+    "继续": WorkflowAction.NEXT.value,
+    "带限制继续": WorkflowAction.NEXT.value,
+    "接受当前结果": WorkflowAction.NEXT.value,
+    "跳过": WorkflowAction.NEXT.value,
+    "DONE": WorkflowAction.DONE.value,
+    "完成": WorkflowAction.DONE.value,
+    "结束": WorkflowAction.DONE.value,
+    "REWORK": WorkflowAction.REWORK.value,
+    "RETRY": WorkflowAction.REWORK.value,
+    "返工": WorkflowAction.REWORK.value,
+    "重试": WorkflowAction.REWORK.value,
+    "EVIDENCE_RECOVERY": WorkflowAction.EVIDENCE_RECOVERY.value,
+    "证据恢复": WorkflowAction.EVIDENCE_RECOVERY.value,
+    "扩大检索": WorkflowAction.EVIDENCE_RECOVERY.value,
+}
+
+
+def _canonical_resume_action(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return _RESUME_ACTION_ALIASES.get(normalized.upper())
+
+
+def _resume_action(resumed: Any) -> str | None:
+    if isinstance(resumed, dict):
+        candidates = (resumed.get("action"), resumed.get("text"))
+    else:
+        candidates = (resumed,)
+    return next(
+        (action for value in candidates if (action := _canonical_resume_action(value))),
+        None,
+    )
+
+
+def _is_legacy_replan_message(message: Any) -> bool:
+    try:
+        payload = json.loads(str(getattr(message, "content", "") or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("to") == "Planner"
+        and str(payload.get("type") or "").strip().upper() == "REPLAN"
+    )
+
+
+def automatic_planner(
+    state: State, config: RunnableConfig, **kwargs
+) -> dict[str, Any]:
+    """Run Planner on an auto-safe copy of legacy checkpoint state."""
+    sanitized_state = dict(state)
+    sanitized_state["decision"] = WorkflowAction.NEXT.value
+    sanitized_state["messages"] = [
+        message
+        for message in state.get("messages", []) or []
+        if not _is_legacy_replan_message(message)
+    ]
+    return planner_node(sanitized_state, config, **kwargs)
 
 
 def _current_task(state: State) -> dict[str, Any]:
@@ -261,11 +326,10 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
     if isinstance(resumed, dict):
         text = str(resumed.get("text") or "").strip()
         resumed_docs = list(resumed.get("docs") or [])
-        requested_action = str(resumed.get("action") or "").strip().upper()
     else:
         text = str(resumed or "").strip()
         resumed_docs = []
-        requested_action = ""
+    requested_action = _resume_action(resumed)
 
     routable_choices = {
         WorkflowAction.REWORK.value,
@@ -273,7 +337,11 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
         WorkflowAction.NEXT.value,
         WorkflowAction.DONE.value,
     }
-    accepted_action_names = {str(choice).strip().upper() for choice in accepted_choices}
+    accepted_action_names = {
+        action
+        for choice in accepted_choices
+        if (action := _canonical_resume_action(choice)) is not None
+    }
     if requested_action in routable_choices and requested_action in accepted_action_names:
         action = requested_action
     elif category == "EVIDENCE_GAP":

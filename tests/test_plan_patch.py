@@ -254,6 +254,7 @@ def test_insert_rejects_an_accepted_anchor():
         ("task_type", "unsupported", "task_type"),
         ("use_rag", 1, "use_rag"),
         ("use_web", "true", "use_web"),
+        ("allow_web_fallback", "true", "allow_web_fallback"),
         ("generate_table", None, "generate_table"),
         ("generate_figure", 0, "generate_figure"),
         ("query", 1, "query"),
@@ -270,6 +271,46 @@ def test_insert_rejects_invalid_task_schema(field, value, match):
         validate_plan_patch(patch_state(), patch)
 
 
+def test_insert_rejects_unknown_and_internal_task_fields():
+    patch = insert_before_patch()
+    patch["operations"][0]["task"]["_recovery_allow_web"] = True
+
+    with pytest.raises(PatchValidationError, match="unknown.*_recovery_allow_web"):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_insert_rejects_spider_tool_without_explicit_web_permission():
+    patch = insert_before_patch()
+    patch["operations"][0]["task"]["tool_requirements"] = ["SpiderTool"]
+
+    with pytest.raises(PatchValidationError, match="SpiderTool.*web"):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_update_rejects_spider_tool_after_simulating_all_task_changes():
+    patch = update_patch(
+        changes={"tool_requirements": ["spider_tool"], "use_web": False}
+    )
+
+    with pytest.raises(PatchValidationError, match="spider_tool.*web"):
+        validate_plan_patch(patch_state(), patch)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"tool_requirements": ["spider_tool"], "use_web": True},
+        {"tool_requirements": ["SpiderTool"], "allow_web_fallback": True},
+        {
+            "tool_requirements": ["spider_tool"],
+            "visualization": {"allow_web_fallback": True},
+        },
+    ],
+)
+def test_update_allows_spider_tool_with_an_explicit_web_permission(changes):
+    validate_plan_patch(patch_state(), update_patch(changes=changes))
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [
@@ -278,6 +319,7 @@ def test_insert_rejects_invalid_task_schema(field, value, match):
         ("query", None, "query"),
         ("use_rag", "false", "use_rag"),
         ("use_web", 0, "use_web"),
+        ("allow_web_fallback", 1, "allow_web_fallback"),
         ("generate_table", "no", "generate_table"),
         ("generate_figure", 1, "generate_figure"),
         ("use_resources", ["evidence.csv", 1], "use_resources"),

@@ -19,6 +19,7 @@ _UPDATE_FIELDS = {
     "query",
     "use_rag",
     "use_web",
+    "allow_web_fallback",
     "generate_table",
     "generate_figure",
     "use_resources",
@@ -43,6 +44,12 @@ _REQUIRED_INSERTED_TASK_FIELDS = {
     "generate_figure",
     "query",
     "use_resources",
+}
+_ALLOWED_INSERTED_TASK_FIELDS = _REQUIRED_INSERTED_TASK_FIELDS | {
+    "task_id",
+    "allow_web_fallback",
+    "tool_requirements",
+    "visualization",
 }
 
 
@@ -162,6 +169,11 @@ def _validate_task_fields(
     required: bool,
 ) -> None:
     if required:
+        unknown = set(task) - _ALLOWED_INSERTED_TASK_FIELDS
+        if unknown:
+            raise PatchValidationError(
+                f"insert_before.task unknown field: {sorted(unknown)[0]}"
+            )
         missing = _REQUIRED_INSERTED_TASK_FIELDS - set(task)
         if missing:
             raise PatchValidationError(f"insert_before.task missing {sorted(missing)[0]}")
@@ -185,6 +197,10 @@ def _validate_task_fields(
                 raise PatchValidationError(f"{field} must be a boolean")
         elif required:
             raise PatchValidationError(f"insert_before.task missing {field}")
+    if "allow_web_fallback" in task and not isinstance(
+        task["allow_web_fallback"], bool
+    ):
+        raise PatchValidationError("allow_web_fallback must be a boolean")
 
     if "query" in task:
         if not isinstance(task["query"], str):
@@ -204,8 +220,43 @@ def _validate_task_fields(
         or not all(isinstance(value, str) for value in task["tool_requirements"])
     ):
         raise PatchValidationError("tool_requirements must be a list of strings")
-    if "visualization" in task and not isinstance(task["visualization"], Mapping):
-        raise PatchValidationError("visualization must be a mapping")
+    if "visualization" in task:
+        visualization = task["visualization"]
+        if not isinstance(visualization, Mapping):
+            raise PatchValidationError("visualization must be a mapping")
+        if "allow_web_fallback" in visualization and not isinstance(
+            visualization["allow_web_fallback"], bool
+        ):
+            raise PatchValidationError(
+                "visualization.allow_web_fallback must be a boolean"
+            )
+
+
+def _validate_task_consistency(task: Mapping[str, Any]) -> None:
+    spider_requirement = next(
+        (
+            requirement
+            for requirement in task.get("tool_requirements") or []
+            if isinstance(requirement, str)
+            and requirement.strip().lower() in {"spider_tool", "spidertool"}
+        ),
+        None,
+    )
+    if spider_requirement is None:
+        return
+
+    visualization = task.get("visualization")
+    visualization_allows_web = isinstance(visualization, Mapping) and (
+        visualization.get("allow_web_fallback") is True
+    )
+    if not (
+        task.get("use_web") is True
+        or task.get("allow_web_fallback") is True
+        or visualization_allows_web
+    ):
+        raise PatchValidationError(
+            f"{spider_requirement} requires explicit web permission"
+        )
 
 
 def _validate_update(
@@ -385,6 +436,11 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
                 )
             )
         operation_copies.append(operation)
+
+    simulated_tasks = deepcopy(tasks)
+    _apply_operations(simulated_tasks, operation_copies)
+    for task in simulated_tasks:
+        _validate_task_consistency(task)
 
     affected_task_ids = _affected_task_ids(patch, known_ids)
     affected_set = set(affected_task_ids)

@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+from langchain_core.messages import AIMessage
+
 from src.nodes.worker.agent.graph import AutonomousToolNode, ToolManager, router_node
 
 try:
@@ -19,6 +21,7 @@ def _missing_recovery(*args, **kwargs):
 
 decision_policy = getattr(recovery_module, "decision_policy", _missing_recovery)
 evidence_recovery = getattr(recovery_module, "evidence_recovery", _missing_recovery)
+automatic_planner = getattr(recovery_module, "automatic_planner", _missing_recovery)
 needs_user_input = getattr(recovery_module, "needs_user_input", _missing_recovery)
 plan_patcher = getattr(recovery_module, "plan_patcher", _missing_recovery)
 route_after_blocker = getattr(recovery_module, "route_after_blocker", _missing_recovery)
@@ -331,6 +334,85 @@ def test_explicit_next_resume_commits_current_result_before_advancing(monkeypatc
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
 
 
+def test_resume_dict_text_alias_honors_only_an_accepted_action(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"text": "带限制继续", "docs": []},
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EXTERNAL_BLOCKER",
+            "task_id": "T2",
+            "issues": [{"code": "RESOURCE_UNAVAILABLE"}],
+            "accepted_choices": ["REWORK", "NEXT", "DONE"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "NEXT"
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+
+
+def test_resume_plain_string_alias_routes_to_done(monkeypatch):
+    monkeypatch.setattr(recovery_module, "interrupt", lambda payload: "结束")
+    state = graph_state(
+        pending_user_action={
+            "category": "EXTERNAL_BLOCKER",
+            "task_id": "T2",
+            "issues": [{"code": "RESOURCE_UNAVAILABLE"}],
+            "accepted_choices": ["REWORK", "NEXT", "DONE"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "DONE"
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+
+
+def test_resume_aliases_are_deterministic_and_restricted_to_accepted_choices(
+    monkeypatch,
+):
+    aliases = {
+        "NEXT": ["NEXT", "CONTINUE", "继续", "带限制继续", "接受当前结果", "跳过"],
+        "DONE": ["DONE", "完成", "结束"],
+        "REWORK": ["REWORK", "RETRY", "返工", "重试"],
+        "EVIDENCE_RECOVERY": ["EVIDENCE_RECOVERY", "证据恢复", "扩大检索"],
+    }
+    accepted_choices = list(aliases)
+
+    for expected, values in aliases.items():
+        for value in values:
+            monkeypatch.setattr(recovery_module, "interrupt", lambda payload, value=value: value)
+            update = needs_user_input(
+                graph_state(
+                    pending_user_action={
+                        "category": "EXTERNAL_BLOCKER",
+                        "task_id": "T2",
+                        "accepted_choices": accepted_choices,
+                    }
+                ),
+                {},
+            )
+            assert update["workflow_action"] == expected
+
+    monkeypatch.setattr(recovery_module, "interrupt", lambda payload: "跳过")
+    rejected = needs_user_input(
+        graph_state(
+            pending_user_action={
+                "category": "EXTERNAL_BLOCKER",
+                "task_id": "T2",
+                "accepted_choices": ["REWORK"],
+            }
+        ),
+        {},
+    )
+    assert rejected["workflow_action"] == "REWORK"
+    assert "results" not in rejected
+
+
 def test_worker_feedback_is_execution_only_and_web_is_explicitly_gated():
     task = _task(
         "T2",
@@ -440,6 +522,72 @@ def test_worker_router_preserves_feedback_until_execution_node_consumes_it():
     assert update["worker_state"]["retained"] is True
 
 
+def _worker_node_for_process_test(*, fail=False):
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    def create_tools(task):
+        if fail:
+            raise RuntimeError("tool setup failed")
+        return []
+
+    node.tool_manager = SimpleNamespace(create_langchain_tools=create_tools)
+    node.llm_client = SimpleNamespace()
+    node._build_system_prompt = lambda task, tools: "system"
+    node._build_task_prompt = lambda task: "task"
+    node._prefetch_rag = lambda task, tools: []
+    node._execute_tool_loop = lambda *args, **kwargs: ("completed", [], {})
+    node._prepare_concept_graph = lambda task, calls: (
+        SimpleNamespace(records=[]),
+        {},
+        None,
+    )
+    node._create_task_result = lambda task, *args, **kwargs: {
+        "task_id": task["task_id"],
+        "status": "COMPLETED",
+    }
+    node._create_error_result = lambda task, cursor, error: {
+        "task_id": task["task_id"],
+        "status": "FAILED",
+        "error": error,
+    }
+    return node
+
+
+def _state_with_web_recovery_feedback():
+    return graph_state(
+        worker_state={
+            "retained": True,
+            "execution_feedback": {
+                "mode": "evidence_recovery",
+                "instructions": "Search the permitted web source",
+                "allow_web": True,
+            },
+        },
+        all_results=[],
+        tool_execution_history=[],
+    )
+
+
+def test_worker_success_return_strips_execution_only_web_marker():
+    update = _worker_node_for_process_test().process(
+        _state_with_web_recovery_feedback()
+    )
+
+    assert update["current_task"]["task_id"] == "T2"
+    assert update["current_task"]["use_web"] is True
+    assert "_recovery_allow_web" not in update["current_task"]
+
+
+def test_worker_error_return_strips_execution_only_web_marker():
+    update = _worker_node_for_process_test(fail=True).process(
+        _state_with_web_recovery_feedback()
+    )
+
+    assert update["current_task"]["task_id"] == "T2"
+    assert update["current_task"]["use_web"] is True
+    assert "_recovery_allow_web" not in update["current_task"]
+
+
 def test_auto_graph_has_no_replan_route_to_planner():
     graph_path = Path(__file__).parents[1] / "src" / "graph.py"
     module = ast.parse(graph_path.read_text(encoding="utf-8"))
@@ -460,6 +608,45 @@ def test_auto_graph_has_no_replan_route_to_planner():
     assert '"DecisionPolicy"' in source
     assert '"PlanPatcher"' in source
     assert '"NeedsUserInput"' in source
+
+
+def test_automatic_planner_filters_legacy_replan_without_resetting_cursor(monkeypatch):
+    planner_module = importlib.import_module("src.nodes.planner")
+    legacy_replan = AIMessage(
+        content=json.dumps({"to": "Planner", "type": "REPLAN"})
+    )
+    proceed = AIMessage(
+        content=json.dumps({"to": "Planner", "type": "PROCEED"})
+    )
+    state = graph_state(
+        cursor=1,
+        decision="REPLAN",
+        messages=[proceed, legacy_replan],
+    )
+
+    def forbidden_full_replan(*args, **kwargs):
+        raise AssertionError("automatic workflow invoked full replan")
+
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        forbidden_full_replan,
+    )
+
+    update = automatic_planner(state, {})
+
+    assert update["planner_action"] == "PROCEED"
+    assert update["cursor"] == 2
+    assert update["cursor"] != 0
+    assert state["decision"] == "REPLAN"
+    assert state["messages"] == [proceed, legacy_replan]
+
+
+def test_auto_graph_uses_guarded_planner_but_manual_keeps_legacy_planner():
+    graph_path = Path(__file__).parents[1] / "src" / "graph.py"
+    source = graph_path.read_text(encoding="utf-8")
+
+    assert "automatic_planner if self.use_auto_verifier else planner" in source
 
 
 def test_graph_schema_persists_recovery_handoff_fields():

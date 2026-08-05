@@ -30,7 +30,7 @@ Return one JSON object with exactly this top-level schema:
 ```
 
 For `update_task`, `changes` may contain only:
-task_name, task_description, query, use_rag, use_web, generate_table,
+task_name, task_description, query, use_rag, use_web, allow_web_fallback, generate_table,
 generate_figure, use_resources, tool_requirements, visualization.
 
 Use only task IDs and resources present in the supplied state. Do not delete completed

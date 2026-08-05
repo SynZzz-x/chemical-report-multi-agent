@@ -8,6 +8,7 @@ from .nodes.planner import planner, planner_confirm
 from .nodes.verifier import verifier as verifier_auto
 from .nodes.verifier_manual import verifier_manual, decision
 from .nodes.recovery import (
+    automatic_planner,
     decision_policy,
     evidence_recovery,
     needs_user_input,
@@ -62,7 +63,10 @@ class WorkFlowBase(StateGraph):
         self.add_node("Intake", intake)
         self.add_edge("Intake", "Planner")
 
-        self.add_node("Planner", planner)
+        self.add_node(
+            "Planner",
+            automatic_planner if self.use_auto_verifier else planner,
+        )
         self.add_conditional_edges(
             "Planner",
             route_planner

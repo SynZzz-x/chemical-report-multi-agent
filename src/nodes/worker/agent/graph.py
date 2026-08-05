@@ -1414,6 +1414,12 @@ class AutonomousToolNode:
 
         return execution_task, instructions, cleaned_worker_state
 
+    @staticmethod
+    def _persistable_execution_task(task: Task) -> Task:
+        persisted_task = deepcopy(task)
+        persisted_task.pop("_recovery_allow_web", None)
+        return persisted_task
+
     def process(self, state: State) -> Dict[str, Any]:
         """处理任务：让大模型自主调用工具"""
         tasks = state.get("tasks", [])
@@ -1532,7 +1538,7 @@ class AutonomousToolNode:
             })
 
             return {
-                "current_task": current_task,
+                "current_task": self._persistable_execution_task(current_task),
                 "current_result": task_result,
                 "cursor": cursor,
                 "all_results": all_results,
@@ -1559,7 +1565,7 @@ class AutonomousToolNode:
             })
 
             return {
-                "current_task": current_task,
+                "current_task": self._persistable_execution_task(current_task),
                 "current_result": task_result,
                 "cursor": cursor,
                 "all_results": all_results,

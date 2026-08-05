@@ -36,6 +36,8 @@ _CATEGORY_BY_CODE = {
     "CONTRADICTORY_REQUIREMENTS": "EXTERNAL_BLOCKER",
     "EXTERNAL_BLOCKER": "EXTERNAL_BLOCKER",
     "INVALID_PLAN": "EXTERNAL_BLOCKER",
+    "LLM_ERROR": "EXTERNAL_BLOCKER",
+    "LLM_NOT_ENABLED": "EXTERNAL_BLOCKER",
     "PERMISSION_DENIED": "EXTERNAL_BLOCKER",
     "REQUIREMENTS_CONFLICT": "EXTERNAL_BLOCKER",
     "RESOURCE_UNAVAILABLE": "EXTERNAL_BLOCKER",
@@ -151,7 +153,7 @@ def _service_error_assessment(
         "issues": [
             {
                 "code": code,
-                "category": "CONTENT_DEFECT",
+                "category": "EXTERNAL_BLOCKER",
                 "description": description,
                 "suggestion": "Retry automatic verification after checking model configuration.",
                 "severity": "error",
@@ -192,9 +194,14 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             continue
         if code in {"MISSING_IMAGE", "MISSING_FIGURE"} and not requires_image:
             continue
-        category = str(issue.get("category") or "").strip().upper()
-        if category not in _VALID_CATEGORIES:
-            category = _CATEGORY_BY_CODE.get(code, "CONTENT_DEFECT")
+        supplied_category = str(issue.get("category") or "").strip().upper()
+        category = _CATEGORY_BY_CODE.get(code)
+        if category is None:
+            category = (
+                supplied_category
+                if supplied_category in _VALID_CATEGORIES
+                else "CONTENT_DEFECT"
+            )
         normalized = {
             "code": code,
             "category": category,
