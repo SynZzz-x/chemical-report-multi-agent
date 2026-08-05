@@ -13,6 +13,7 @@ import sys
 import asyncio
 from datetime import datetime
 from dataclasses import dataclass, field
+from copy import deepcopy
 from abc import ABC, abstractmethod
 import importlib
 import inspect
@@ -1278,10 +1279,13 @@ class ToolManager:
             if task.get("use_rag"):
                 tool_requirements.append("chemical_knowledge_base_tool")
             description = str(task.get("task_description") or "")
-            needs_public_web = task.get("use_web") or any(
-                keyword in description
-                for keyword in ("公开网络", "网络公开", "外部公开", "最新公开信息")
-            )
+            if "_recovery_allow_web" in task:
+                needs_public_web = task.get("_recovery_allow_web") is True
+            else:
+                needs_public_web = task.get("use_web") or any(
+                    keyword in description
+                    for keyword in ("公开网络", "网络公开", "外部公开", "最新公开信息")
+                )
             if needs_public_web and not task.get("visualization"):
                 tool_requirements.append("spider_tool")
             if task.get("generate_table"):
@@ -1371,6 +1375,45 @@ class AutonomousToolNode:
         # Worker节点需要自主调用工具并生成文本报告，不强制JSON模式
         self.llm_client = get_llm(llm_config, json_mode=False)
 
+    @staticmethod
+    def _prepare_execution_task(
+        task: Task, worker_state: Dict[str, Any]
+    ) -> tuple[Task, str, Dict[str, Any]]:
+        """Consume recovery feedback into a task copy used only for this execution."""
+        execution_task = deepcopy(task)
+        cleaned_worker_state = deepcopy(worker_state or {})
+        feedback = cleaned_worker_state.pop("execution_feedback", None)
+        if not isinstance(feedback, dict):
+            return execution_task, "", cleaned_worker_state
+
+        instructions = str(feedback.get("instructions") or "").strip()
+        recovery_query = str(feedback.get("recovery_query") or "").strip()
+        if recovery_query:
+            execution_task["query"] = recovery_query
+
+        if "allow_web" in feedback:
+            allow_web = feedback.get("allow_web") is True
+            execution_task["_recovery_allow_web"] = allow_web
+            execution_task["use_web"] = allow_web
+            tool_requirements = list(execution_task.get("tool_requirements") or [])
+            tool_requirements = [
+                requirement
+                for requirement in tool_requirements
+                if str(requirement).lower() not in {"spidertool", "spider_tool"}
+            ]
+            if allow_web:
+                tool_requirements.append("spider_tool")
+            if execution_task.get("tool_requirements") is not None or tool_requirements:
+                execution_task["tool_requirements"] = tool_requirements
+
+            visualization = execution_task.get("visualization")
+            if isinstance(visualization, dict):
+                visualization = deepcopy(visualization)
+                visualization["allow_web_fallback"] = allow_web
+                execution_task["visualization"] = visualization
+
+        return execution_task, instructions, cleaned_worker_state
+
     def process(self, state: State) -> Dict[str, Any]:
         """处理任务：让大模型自主调用工具"""
         tasks = state.get("tasks", [])
@@ -1379,7 +1422,11 @@ class AutonomousToolNode:
         if cursor >= len(tasks):
             return {"worker_state": {"next_node": "generate_final_result_node"}}
 
-        current_task = tasks[cursor]
+        current_task, feedback_instructions, consumed_worker_state = (
+            self._prepare_execution_task(
+                tasks[cursor], state.get("worker_state", {}) or {}
+            )
+        )
         task_name = current_task.get("task_name", f"任务{cursor + 1}")
 
         print(f"\n{'=' * 60}")
@@ -1399,9 +1446,15 @@ class AutonomousToolNode:
 
             system_prompt = self._build_system_prompt(current_task, tools)
 
+            task_prompt = self._build_task_prompt(current_task)
+            if feedback_instructions:
+                task_prompt += (
+                    "\n\nRecovery instructions for this execution only:\n"
+                    + feedback_instructions
+                )
             messages = [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=self._build_task_prompt(current_task))
+                HumanMessage(content=task_prompt)
             ]
 
             prefetched_calls = self._prefetch_rag(current_task, tools)
@@ -1455,7 +1508,7 @@ class AutonomousToolNode:
             all_results = state.get("all_results", []).copy()
             all_results.append(task_result)
 
-            worker_state = state.get("worker_state", {}).copy()
+            worker_state = consumed_worker_state
             worker_state.update({
                 "next_node": "generate_task_result_node",
                 "current_section": task_name,
@@ -1498,7 +1551,7 @@ class AutonomousToolNode:
             all_results = state.get("all_results", []).copy()
             all_results.append(task_result)
 
-            worker_state = state.get("worker_state", {}).copy()
+            worker_state = consumed_worker_state
             worker_state.update({
                 "next_node": "generate_task_result_node",
                 "current_section": task_name,
@@ -2489,23 +2542,28 @@ def router_node(state: State) -> Dict[str, Any]:
     tasks = state.get("tasks", [])
     cursor = state.get("cursor", 0)
 
+    def routed_worker_state(next_node: str) -> Dict[str, Any]:
+        worker_state = deepcopy(state.get("worker_state", {}) or {})
+        worker_state["next_node"] = next_node
+        return worker_state
+
     # 1. 如果 state 中已经有任务列表
     if tasks:
         if cursor < len(tasks):
             print(f"📥 继续执行任务 {cursor + 1}/{len(tasks)}")
-            return {"worker_state": {"next_node": "autonomous_tool_node"}}
+            return {"worker_state": routed_worker_state("autonomous_tool_node")}
         else:
             print(f"📥 所有任务已执行完毕，准备生成最终结果报告")
-            return {"worker_state": {"next_node": "generate_final_result_node"}}
+            return {"worker_state": routed_worker_state("generate_final_result_node")}
 
     # 2. 如果没有任务列表，尝试从最新消息中提取
     if not state.get("messages"):
-        return {"worker_state": {"next_node": "end"}}
+        return {"worker_state": routed_worker_state("end")}
 
     last_message = state["messages"][-1]
 
     if not isinstance(last_message, AIMessage):
-        return {"worker_state": {"next_node": "end"}}
+        return {"worker_state": routed_worker_state("end")}
 
     try:
         message_data = json.loads(last_message.content)
@@ -2520,13 +2578,13 @@ def router_node(state: State) -> Dict[str, Any]:
                 return {
                     "tasks": tasks,
                     "cursor": 0,
-                    "worker_state": {"next_node": "autonomous_tool_node"}
+                    "worker_state": routed_worker_state("autonomous_tool_node")
                 }
 
-        return {"worker_state": {"next_node": "end"}}
+        return {"worker_state": routed_worker_state("end")}
 
     except json.JSONDecodeError:
-        return {"worker_state": {"next_node": "end"}}
+        return {"worker_state": routed_worker_state("end")}
 
 
 def route_decision(state: State) -> str:
