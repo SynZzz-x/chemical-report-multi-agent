@@ -123,6 +123,48 @@ def test_update_patch_preserves_unaffected_results_and_cursor_progress():
     assert update["plan_revision"] == 2
 
 
+def test_update_patch_rejects_accepted_task_without_any_partial_mutation():
+    state = patch_state(cursor=1, accepted_ids=["T1"])
+    before = deepcopy(state)
+    patch = update_patch(
+        task_id="T1",
+        affected_task_ids=["T1"],
+        resume_task_id="T1",
+        changes={"task_description": "mutated accepted task"},
+    )
+
+    with pytest.raises(PatchValidationError, match="completed|accepted"):
+        apply_plan_patch(state, patch)
+
+    assert state == before
+
+
+def test_update_patch_rejects_cursor_completed_task_without_results():
+    state = patch_state(cursor=2, accepted_ids=[])
+    before = deepcopy(state)
+    patch = update_patch(
+        task_id="T1",
+        affected_task_ids=["T1"],
+        resume_task_id="T1",
+    )
+
+    with pytest.raises(PatchValidationError, match="completed|accepted"):
+        apply_plan_patch(state, patch)
+
+    assert state == before
+
+
+def test_move_patch_rejects_task_marked_completed_without_results():
+    state = patch_state(cursor=0, accepted_ids=[])
+    state["tasks"][3]["status"] = "COMPLETED"
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="completed|accepted"):
+        apply_plan_patch(state, move_before_patch(task_id="T4", before_task_id="T3"))
+
+    assert state == before
+
+
 def test_patch_rejects_stale_base_revision_without_partial_write():
     state = patch_state(plan_revision=2)
     before = deepcopy(state)

@@ -80,19 +80,96 @@ def _next_task_number(task_ids: List[str]) -> int:
     return max(numbers, default=0) + 1
 
 
+_REPLACEMENT_TASK_TYPES = {"analysis", "summary", "inference"}
+_REPLACEMENT_BOOLEAN_FIELDS = {
+    "generate_figure",
+    "generate_table",
+    "use_rag",
+    "use_web",
+    "allow_web_fallback",
+}
+_REPLACEMENT_TASK_FIELDS = {
+    "task_id",
+    "task_name",
+    "task_description",
+    "generate_figure",
+    "generate_table",
+    "use_rag",
+    "use_web",
+    "allow_web_fallback",
+    "task_type",
+    "query",
+    "use_resources",
+    "tool_requirements",
+    "visualization",
+}
+
+
+def _validate_string_list(value: Any, field: str) -> None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError(f"{field} must be a list of non-empty strings")
+
+
+def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
+    """Reject malformed replacement tasks before assigning stable IDs."""
+    if not isinstance(candidate_tasks, list) or not candidate_tasks:
+        raise ValueError("Replacement plan must contain at least one task")
+    for task in candidate_tasks:
+        if not isinstance(task, dict):
+            raise ValueError("Replacement tasks must be objects")
+        unknown = set(task) - _REPLACEMENT_TASK_FIELDS
+        if unknown:
+            raise ValueError(f"replacement task has unknown field: {sorted(unknown)[0]}")
+        for field in ("task_name", "task_description"):
+            if not isinstance(task.get(field), str) or not task[field].strip():
+                raise ValueError(f"{field} must be a non-empty string")
+        if "task_id" in task and not isinstance(task["task_id"], str):
+            raise ValueError("task_id must be a string when provided")
+        for field in _REPLACEMENT_BOOLEAN_FIELDS:
+            if field in task and not isinstance(task[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+        if "task_type" in task and task["task_type"] not in _REPLACEMENT_TASK_TYPES:
+            raise ValueError("task_type must be analysis, summary, or inference")
+        if "query" in task and not isinstance(task["query"], str):
+            raise ValueError("query must be a string")
+        for field in ("use_resources", "tool_requirements"):
+            if field in task:
+                _validate_string_list(task[field], field)
+        if "visualization" in task and task["visualization"] is not None:
+            visualization = task["visualization"]
+            if not isinstance(visualization, dict):
+                raise ValueError("visualization must be an object or null")
+            for field in ("kind", "title"):
+                if field in visualization and (
+                    not isinstance(visualization[field], str)
+                    or not visualization[field].strip()
+                ):
+                    raise ValueError(f"visualization.{field} must be a non-empty string")
+            for field in ("required_concepts", "web_queries"):
+                if field in visualization:
+                    _validate_string_list(
+                        visualization[field], f"visualization.{field}"
+                    )
+            if "allow_web_fallback" in visualization and not isinstance(
+                visualization["allow_web_fallback"], bool
+            ):
+                raise ValueError(
+                    "visualization.allow_web_fallback must be a boolean"
+                )
+
+
 def _normalize_replacement_tasks(
     candidate_tasks: List[Dict[str, Any]], previous_task_ids: List[str]
 ) -> List[Dict[str, Any]]:
     """Give a replacement plan stable IDs that cannot collide with prior work."""
-    if not isinstance(candidate_tasks, list) or not candidate_tasks:
-        raise ValueError("Replacement plan must contain at least one task")
+    _validate_replacement_task_schema(candidate_tasks)
 
     normalized: List[Dict[str, Any]] = []
     used_ids = {str(task_id).strip() for task_id in previous_task_ids if str(task_id).strip()}
     next_number = _next_task_number(list(used_ids))
     for candidate in candidate_tasks:
-        if not isinstance(candidate, dict):
-            raise ValueError("Replacement tasks must be objects")
         task = dict(candidate)
         task_id = str(task.get("task_id") or "").strip()
         if not task_id or task_id in used_ids:
@@ -157,6 +234,7 @@ def _job_task_ids(state: State) -> list[str]:
         "task_retry_count",
         "evidence_recovery_count",
         "task_patch_count",
+        "verifier_retry_count",
     ):
         counter = state.get(key)
         if isinstance(counter, dict):
@@ -187,6 +265,39 @@ def _error_resume_action(value: Any) -> str:
     if normalized in {"RETRY_FULL_REPLAN", "RETRY", "REFINE", "重新生成", "重试"}:
         return "RETRY_FULL_REPLAN"
     return "RESUME_OLD_PLAN"
+
+
+def _full_replan_confirmation_action(value: Any, resumed_docs: List[Any]) -> str:
+    """Return CONFIRM, REFINE, CANCEL, or RESUME_OLD_PLAN deterministically."""
+    if isinstance(value, dict):
+        explicit = str(value.get("action") or "").strip().upper()
+        text = str(value.get("text") or "").strip()
+    else:
+        explicit = ""
+        text = str(value or "").strip()
+    aliases = {
+        "CONFIRM": "CONFIRM",
+        "REFINE": "REFINE",
+        "CANCEL": "CANCEL",
+        "RESUME_OLD_PLAN": "RESUME_OLD_PLAN",
+    }
+    if explicit in aliases:
+        return aliases[explicit]
+
+    normalized = text.upper()
+    if normalized in {"CANCEL", "取消", "取消整体重规划", "取消重规划"}:
+        return "CANCEL"
+    if normalized in {
+        "RESUME_OLD_PLAN",
+        "恢复旧计划",
+        "继续旧计划",
+        "恢复原计划",
+        "继续原计划",
+    }:
+        return "RESUME_OLD_PLAN"
+    if resumed_docs:
+        return "REFINE"
+    return "CONFIRM" if _is_confirmation_feedback(text) else "REFINE"
 
 
 def _full_replan_reason(state: State, parsed: Dict[str, Any] | None = None) -> str:
@@ -438,6 +549,7 @@ def _refine_tasks(
     state_docs,
     intake_data,
     config,
+    fail_closed=False,
 ):
     """依据计划确认反馈和本轮新增附件优化任务列表。"""
     current_docs = merge_docs([], state_docs or [])
@@ -509,6 +621,8 @@ def _refine_tasks(
         return _ensure_use_resources_paths(tasks, all_resources)
     except Exception as exc:
         logger.exception("Failed to refine tasks: %s", exc)
+        if fail_closed:
+            raise ValueError(f"replacement plan refinement failed: {exc}") from exc
         if current_tasks:
             return current_tasks
 
@@ -745,6 +859,12 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         feedback_message_id = None
         resumed_docs = []
 
+    full_replan_confirmation_action = (
+        _full_replan_confirmation_action(resume_value, resumed_docs)
+        if is_full_replan
+        else ""
+    )
+
     if not feedback_text:
         feedback_text = "继续"
 
@@ -767,7 +887,23 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     # 当前节点内需要完整资源视图；写回 State 时仍只返回 resumed_docs 增量。
     combined_docs = merge_docs(state.get("docs") or [], resumed_docs)
     intake_data = _get_intake_data(state)
-    is_confirmation = _is_confirmation_feedback(feedback_text) and not resumed_docs
+    if is_full_replan and full_replan_confirmation_action in {
+        "CANCEL",
+        "RESUME_OLD_PLAN",
+    }:
+        return {
+            "messages": [feedback_message],
+            "docs": resumed_docs,
+            "planner_action": "PROCEED",
+            "decision": "NEXT",
+            "guidance": {},
+            **_clear_full_replan_staging(),
+        }
+    is_confirmation = (
+        full_replan_confirmation_action == "CONFIRM"
+        if is_full_replan
+        else _is_confirmation_feedback(feedback_text) and not resumed_docs
+    )
     if is_full_replan and not is_confirmation:
         try:
             refined_tasks = _normalize_replacement_tasks(
@@ -778,6 +914,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                     combined_docs,
                     intake_data,
                     config,
+                    True,
                 ),
                 _job_task_ids(state),
             )
@@ -885,6 +1022,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "verification_warning": {},
                 "task_retry_count": {},
                 "evidence_recovery_count": {},
+                "verifier_retry_count": {},
                 "task_patch_count": {},
                 "job_patch_count": 0,
                 "replan_count": 0,

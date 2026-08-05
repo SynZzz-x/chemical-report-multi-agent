@@ -96,6 +96,7 @@ class State(TypedDict, total=False):
     plan_revision: int
     task_revisions: Dict[str, int]
     evidence_recovery_count: Dict[str, int]
+    verifier_retry_count: Dict[str, int]
     task_patch_count: Dict[str, int]
     job_patch_count: int
     pending_user_action: Dict[str, Any]

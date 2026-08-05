@@ -151,6 +151,26 @@ def test_sanitizer_rejects_pass_assessment_that_still_contains_issues():
     assert sanitized["status"] == "FAILED"
 
 
+def test_sanitizer_downgrades_pass_with_missing_requirements_to_structured_failure():
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["包含背景"],
+        "requirements_missing": ["关键结论来源", "正文深度"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, _state())
+    decision = decide_recovery_action(_state(), sanitized)
+
+    assert sanitized["status"] == "FAILED"
+    assert [issue["code"] for issue in sanitized["issues"]] == [
+        "REQUIREMENT_MISSING",
+        "REQUIREMENT_MISSING",
+    ]
+    assert decision["workflow_action"] != "DONE"
+
+
 def test_sanitizer_keeps_malformed_failed_assessment_from_becoming_pass():
     assessment = {
         "status": "BLOCKED",
@@ -167,7 +187,7 @@ def test_sanitizer_keeps_malformed_failed_assessment_from_becoming_pass():
 
 
 @pytest.mark.parametrize("code", ["LLM_ERROR", "LLM_NOT_ENABLED"])
-def test_verifier_service_failures_require_user_input_without_consuming_retry(
+def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     monkeypatch, code
 ):
     state = _state()
@@ -192,10 +212,33 @@ def test_verifier_service_failures_require_user_input_without_consuming_retry(
         config = {"configurable": {"use_llm": False}}
 
     sanitized = auto_verifier_module.verifier(state, config)["assessment"]
-    update = decide_recovery_action(state, sanitized)
+    first = decide_recovery_action(state, sanitized)
+    second = decide_recovery_action({**state, **first}, sanitized)
 
-    assert sanitized["issues"][0]["category"] == "EXTERNAL_BLOCKER"
-    assert update["workflow_action"] == "NEEDS_USER_INPUT"
-    assert update["task_retry_count"] == {"T1": 1}
-    assert "results" not in update
+    assert first["workflow_action"] == "RETRY_VERIFIER"
+    assert first["verifier_retry_count"] == {"T1": 1}
+    assert first["task_retry_count"] == {"T1": 1}
+    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+    assert second["task_retry_count"] == {"T1": 1}
+    assert "results" not in second
     assert state["results"] == original_results
+
+
+def test_assessment_contract_error_never_consumes_worker_content_retries():
+    state = _state()
+    malformed = {
+        "status": "FAILED",
+        "issues": [],
+        "requirements_missing": [],
+    }
+    sanitized = auto_verifier_module._sanitize_assessment(malformed, state)
+
+    first = decide_recovery_action(state, sanitized)
+    second = decide_recovery_action({**state, **first}, sanitized)
+
+    assert sanitized["issues"][0]["category"] == "VERIFIER_FAILURE"
+    assert first["workflow_action"] == "RETRY_VERIFIER"
+    assert first["task_retry_count"] == state["task_retry_count"]
+    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["task_retry_count"] == state["task_retry_count"]

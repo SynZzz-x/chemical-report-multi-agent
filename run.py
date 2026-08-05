@@ -17,6 +17,7 @@ from src.config import (
 from src.control_messages import blocker_guidance, is_displayable_assistant_message
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
+from src.runtime_config import execution_config
 
 
 TEST_QUERY = "撰写电力数据集ETTh2与ETTm1统计对比分析报告"
@@ -195,14 +196,14 @@ def main():
             checkpointer=persistence.checkpointer,
             store=persistence.store,
         )
-        config = {
+        config = execution_config({
             "configurable": {"thread_id": thread_id},
             "metadata": {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "job_id": thread_id,
             },
-        }
+        })
         if (
             resume_requested
             and persistence.checkpointer.get_tuple(config) is None
@@ -211,6 +212,7 @@ def main():
             return
 
         snapshot = app.get_state(config)
+        config = execution_config(config, getattr(snapshot, "values", {}) or {})
         last_interrupt_value = interrupt_from_snapshot(snapshot)
         is_interrupted = last_interrupt_value is not None
         job_record_created = existing_job is not None

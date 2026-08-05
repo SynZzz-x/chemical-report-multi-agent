@@ -21,6 +21,7 @@ def _full_replan_state():
         "all_results": [{"task_id": "T1", "text_output": "全部结果"}],
         "task_retry_count": {"T2": 2},
         "evidence_recovery_count": {"T2": 1},
+        "verifier_retry_count": {"T2": 1},
         "task_patch_count": {"T2": 1},
         "job_patch_count": 2,
         "replan_count": 4,
@@ -54,9 +55,39 @@ def _full_replan_state():
     }
 
 
+def _replacement_task(task_id="T3", task_name="新任务", **overrides):
+    return {
+        "task_id": task_id,
+        "task_name": task_name,
+        "task_description": f"执行{task_name}",
+        "generate_figure": False,
+        "generate_table": False,
+        "use_rag": False,
+        "use_web": False,
+        "task_type": "analysis",
+        "query": "",
+        "use_resources": [],
+        **overrides,
+    }
+
+
+def _staged_full_replan_state():
+    state = _full_replan_state()
+    state.update(
+        {
+            "planner_action": "FULL_REPLAN",
+            "full_replan_candidate_tasks": [_replacement_task()],
+            "full_replan_previous_task_ids": ["T1", "T2"],
+            "full_replan_reason": "用户请求整体重规划",
+            "guidance": {"natural_language_guidance": "请确认替换计划"},
+        }
+    )
+    return state
+
+
 def test_full_replan_commits_new_revision_only_after_confirmation(monkeypatch):
     state = _full_replan_state()
-    replacement_tasks = [{"task_id": "T3", "task_name": "新任务"}]
+    replacement_tasks = [_replacement_task()]
     monkeypatch.setattr(
         planner_module,
         "_build_tasks_from_replan_feedback",
@@ -92,6 +123,7 @@ def test_full_replan_commits_new_revision_only_after_confirmation(monkeypatch):
     assert committed["all_results"] == []
     assert committed["task_retry_count"] == {}
     assert committed["evidence_recovery_count"] == {}
+    assert committed["verifier_retry_count"] == {}
     assert committed["task_patch_count"] == {}
     assert committed["job_patch_count"] == 0
     assert committed["replan_count"] == 0
@@ -293,8 +325,8 @@ def test_legacy_checkpoint_uses_safe_recovery_defaults_without_full_replan():
 
 def test_full_replan_refinement_requires_a_second_confirmation(monkeypatch):
     state = _full_replan_state()
-    staged_tasks = [{"task_id": "T3", "task_name": "初始替换任务"}]
-    refined_tasks = [{"task_id": "T4", "task_name": "已修改替换任务"}]
+    staged_tasks = [_replacement_task(task_name="初始替换任务")]
+    refined_tasks = [_replacement_task(task_id="T4", task_name="已修改替换任务")]
     monkeypatch.setattr(planner_module, "_build_tasks_from_replan_feedback", lambda *_: staged_tasks)
     monkeypatch.setattr(planner_module, "_refine_tasks", lambda *_: refined_tasks)
     monkeypatch.setattr(
@@ -333,9 +365,21 @@ def test_full_replan_refinement_requires_a_second_confirmation(monkeypatch):
 @pytest.mark.parametrize(
     ("candidate_tasks", "expected_ids"),
     [
-        ([{"task_id": "T1"}, {"task_id": "T1"}], ["T3", "T4"]),
-        ([{"task_id": "T2"}, {"task_id": "T4"}], ["T3", "T4"]),
-        ([{"task_id": ""}, {"task_name": "missing"}], ["T3", "T4"]),
+        (
+            [_replacement_task("T1", "一"), _replacement_task("T1", "二")],
+            ["T3", "T4"],
+        ),
+        (
+            [_replacement_task("T2", "一"), _replacement_task("T4", "二")],
+            ["T3", "T4"],
+        ),
+        (
+            [
+                _replacement_task("", "一"),
+                {key: value for key, value in _replacement_task("T9", "二").items() if key != "task_id"},
+            ],
+            ["T3", "T4"],
+        ),
     ],
 )
 def test_replacement_task_identity_is_nonempty_unique_and_never_reuses_old_ids(
@@ -360,6 +404,134 @@ def test_empty_full_replan_is_staged_as_a_safe_failure(monkeypatch):
     assert update["tasks"] == state["tasks"]
     assert "plan_revision" not in update
     assert "results" not in update
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {},
+        _replacement_task(_recovery_allow_web=True),
+    ],
+)
+def test_malformed_full_replan_candidate_is_staged_as_safe_failure(
+    monkeypatch, candidate
+):
+    state = _full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: [candidate],
+    )
+
+    update = planner(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert update["tasks"] == state["tasks"]
+    assert "full_replan_candidate_tasks" not in update
+    assert "plan_revision" not in update
+
+
+def test_malformed_refined_full_replan_candidate_is_recoverable_error(monkeypatch):
+    state = _staged_full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "REFINE", "text": "修改第二项", "docs": []},
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_refine_tasks",
+        lambda *_: [_replacement_task(generate_table="false")],
+    )
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert "tasks" not in update
+    assert "results" not in update
+    assert "plan_revision" not in update
+
+
+def test_full_replan_refinement_model_error_is_recoverable(monkeypatch):
+    state = _staged_full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "REFINE", "text": "修改第二项", "docs": []},
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_: _ReplanModel("not valid json"),
+    )
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert "tasks" not in update
+    assert "results" not in update
+    assert "plan_revision" not in update
+
+
+@pytest.mark.parametrize(
+    "resume_value",
+    [
+        {"action": "CANCEL", "text": "取消", "docs": []},
+        {"action": "RESUME_OLD_PLAN", "text": "继续旧计划", "docs": []},
+        "取消整体重规划",
+        "恢复旧计划",
+    ],
+)
+def test_staged_full_replan_can_resume_old_plan_without_mutation(
+    monkeypatch, resume_value
+):
+    state = _staged_full_replan_state()
+    monkeypatch.setattr(planner_module, "interrupt", lambda _: resume_value)
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "PROCEED"
+    assert update["decision"] == "NEXT"
+    assert update["full_replan_candidate_tasks"] == []
+    assert update["full_replan_previous_task_ids"] == []
+    assert update["full_replan_reason"] == ""
+    for field in ("tasks", "results", "all_results", "cursor", "plan_revision"):
+        assert field not in update
+
+
+def test_staged_full_replan_explicit_confirm_action_commits(monkeypatch):
+    state = _staged_full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "CONFIRM", "text": "执行", "docs": []},
+    )
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "PROCEED"
+    assert update["tasks"] == state["full_replan_candidate_tasks"]
+    assert update["plan_revision"] == state["plan_revision"] + 1
+
+
+def test_staged_full_replan_explicit_refine_action_overrides_confirmation_text(
+    monkeypatch,
+):
+    state = _staged_full_replan_state()
+    refined = [_replacement_task(task_id="T4", task_name="已细化任务")]
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "REFINE", "text": "确认", "docs": []},
+    )
+    monkeypatch.setattr(planner_module, "_refine_tasks", lambda *_: refined)
+    monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_REFINED"
+    assert update["full_replan_candidate_tasks"] == refined
+    assert "plan_revision" not in update
 
 
 class _ReplanResponse:
@@ -438,17 +610,18 @@ def test_restored_checkpoint_without_registry_reserves_historical_task_ids(monke
     state["task_patch_count"] = {"T11": 1}
     state["verification_warnings"] = [{"task_id": "T12"}]
     state["pending_user_action"] = {"task_id": "T13"}
+    state["verifier_retry_count"] = {"T14": 1}
     monkeypatch.setattr(
         planner_module,
         "_build_tasks_from_replan_feedback",
-        lambda *_: [{"task_id": "T1", "task_name": "replacement"}],
+        lambda *_: [_replacement_task("T1", "replacement")],
     )
     monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
 
     staged = planner(state, {})
 
     assert "unrelated-record-id" not in planner_module._job_task_ids(state)
-    assert staged["full_replan_candidate_tasks"][0]["task_id"] == "T14"
+    assert staged["full_replan_candidate_tasks"][0]["task_id"] == "T15"
 
 
 def test_legacy_integer_counter_keys_map_to_tasks_or_are_ignored():
@@ -490,8 +663,8 @@ def test_invalid_full_replan_interrupts_only_with_safe_blocker_guidance(monkeypa
 
 def test_attachment_only_full_replan_response_refines_before_confirmation(monkeypatch):
     state = _full_replan_state()
-    staged_tasks = [{"task_id": "T3", "task_name": "初始替换任务"}]
-    refined_tasks = [{"task_id": "T4", "task_name": "含附件的替换任务"}]
+    staged_tasks = [_replacement_task(task_name="初始替换任务")]
+    refined_tasks = [_replacement_task(task_id="T4", task_name="含附件的替换任务")]
     monkeypatch.setattr(planner_module, "_build_tasks_from_replan_feedback", lambda *_: staged_tasks)
     monkeypatch.setattr(planner_module, "_refine_tasks", lambda *_: refined_tasks)
     monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
@@ -630,7 +803,11 @@ def test_sequential_full_replans_use_lifetime_ids_and_fresh_reasons(monkeypatch)
     state["messages"] = [
         AIMessage(content=json.dumps({"from": "Verifier", "to": "Planner", "type": "FULL_REPLAN", "reason": "first"}))
     ]
-    monkeypatch.setattr(planner_module, "_build_tasks_from_replan_feedback", lambda *_: [{"task_id": "T1"}])
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: [_replacement_task("T1")],
+    )
     monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
     monkeypatch.setattr(planner_module, "interrupt", lambda _: {"text": "确认", "docs": []})
 

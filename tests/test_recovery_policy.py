@@ -15,6 +15,7 @@ def recovery_state(
     task_retry_count=None,
     evidence_recovery_count=None,
     task_patch_count=None,
+    verifier_retry_count=None,
     job_patch_count=0,
     results=None,
 ):
@@ -27,6 +28,7 @@ def recovery_state(
         "task_retry_count": dict(task_retry_count or {}),
         "evidence_recovery_count": dict(evidence_recovery_count or {}),
         "task_patch_count": dict(task_patch_count or {}),
+        "verifier_retry_count": dict(verifier_retry_count or {}),
         "job_patch_count": job_patch_count,
         "verification_warnings": [],
     }
@@ -112,6 +114,30 @@ def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
 
     assert decision["workflow_action"] == WorkflowAction.REWORK
     assert decision["task_retry_count"] == {"T2": 2}
+
+
+def test_json_restored_numeric_string_counter_preserves_content_retry_cap():
+    state = recovery_state(task_id="T2", task_retry_count={"0": 2})
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["task_retry_count"] == {"T2": 2}
+
+
+def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
+    state = recovery_state(task_id="0", task_retry_count={"0": 2})
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["task_retry_count"] == {"0": 2}
 
 
 def test_pass_commits_current_result_once_and_uses_done_at_final_task():

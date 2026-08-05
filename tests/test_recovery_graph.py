@@ -233,6 +233,7 @@ def test_plan_patcher_prompt_contains_each_task2_operation_schema():
     assert '"before_task_id"' in prompt
     assert '"task_type": "analysis"' in prompt
     assert "task_name, task_description, query, use_rag, use_web" in prompt
+    assert "completed or accepted task" in prompt
 
 
 def test_needs_user_input_interrupt_payload_and_incremental_resume(monkeypatch):
@@ -608,6 +609,28 @@ def test_auto_graph_has_no_replan_route_to_planner():
     assert '"DecisionPolicy"' in source
     assert '"PlanPatcher"' in source
     assert '"NeedsUserInput"' in source
+    assert '"RETRY_VERIFIER": "Verifier"' in source
+
+
+def test_verifier_contract_failure_routes_only_back_to_verifier_once():
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "ASSESSMENT_CONTRACT_ERROR",
+                    "category": "VERIFIER_FAILURE",
+                }
+            ],
+        }
+    )
+
+    update = decision_policy(state, {})
+
+    assert update["workflow_action"] == "RETRY_VERIFIER"
+    assert route_policy({**state, **update}, {}) == "RETRY_VERIFIER"
+    assert "worker_state" not in update
+    assert update["task_retry_count"] == {}
 
 
 def test_automatic_planner_filters_legacy_replan_without_resetting_cursor(monkeypatch):

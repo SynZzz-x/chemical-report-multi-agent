@@ -16,6 +16,7 @@ class WorkflowAction(str, Enum):
     PLAN_PATCH = "PLAN_PATCH"
     NEEDS_USER_INPUT = "NEEDS_USER_INPUT"
     ACCEPT_WITH_WARNING = "ACCEPT_WITH_WARNING"
+    RETRY_VERIFIER = "RETRY_VERIFIER"
 
 
 class IssueCategory(str, Enum):
@@ -23,18 +24,21 @@ class IssueCategory(str, Enum):
     EVIDENCE_GAP = "EVIDENCE_GAP"
     LOCAL_PLAN_DEFECT = "LOCAL_PLAN_DEFECT"
     EXTERNAL_BLOCKER = "EXTERNAL_BLOCKER"
+    VERIFIER_FAILURE = "VERIFIER_FAILURE"
 
 
 MAX_CONTENT_RETRIES = 2
 MAX_EVIDENCE_RECOVERIES = 1
 MAX_TASK_PATCHES = 1
 MAX_JOB_PATCHES = 3
+MAX_VERIFIER_RETRIES = 1
 
 _CATEGORY_PRIORITY = {
     IssueCategory.CONTENT_DEFECT: 0,
     IssueCategory.EVIDENCE_GAP: 1,
     IssueCategory.LOCAL_PLAN_DEFECT: 2,
     IssueCategory.EXTERNAL_BLOCKER: 3,
+    IssueCategory.VERIFIER_FAILURE: 4,
 }
 
 _CONTENT_CODES = {
@@ -44,6 +48,14 @@ _CONTENT_CODES = {
     "MISSING_FIGURE",
     "MISSING_TABLE",
     "TOO_SHORT",
+    "REQUIREMENT_MISSING",
+}
+_VERIFIER_CODES = {
+    "ASSESSMENT_CONTRACT_ERROR",
+    "LLM_ERROR",
+    "LLM_NOT_ENABLED",
+    "VERIFIER_ERROR",
+    "VERIFIER_SERVICE_ERROR",
 }
 _EVIDENCE_CODES = {
     "EVIDENCE_GAP",
@@ -65,8 +77,6 @@ _EXTERNAL_CODES = {
     "CONTRADICTORY_REQUIREMENTS",
     "EXTERNAL_BLOCKER",
     "INVALID_PLAN",
-    "LLM_ERROR",
-    "LLM_NOT_ENABLED",
     "PERMISSION_DENIED",
     "REQUIREMENTS_CONFLICT",
     "RESOURCE_UNAVAILABLE",
@@ -94,10 +104,22 @@ def _normalise_counter(counter: Any, state: Dict[str, Any]) -> Dict[str, int]:
     """Convert old cursor-keyed checkpoints into stable task-id keyed counts."""
     normalized: Dict[str, int] = {}
     tasks = state.get("tasks") or []
+    active_task_ids = {
+        str(task.get("task_id"))
+        for task in tasks
+        if isinstance(task, dict) and task.get("task_id") is not None
+    }
     for key, value in (counter or {}).items():
         task_id = None
-        if isinstance(key, int) and 0 <= key < len(tasks):
-            task = tasks[key]
+        cursor_key = None
+        if isinstance(key, str) and key in active_task_ids:
+            task_id = key
+        elif isinstance(key, int) and not isinstance(key, bool):
+            cursor_key = key
+        elif isinstance(key, str) and key.isdecimal():
+            cursor_key = int(key)
+        if task_id is None and cursor_key is not None and 0 <= cursor_key < len(tasks):
+            task = tasks[cursor_key]
             if isinstance(task, dict) and task.get("task_id") is not None:
                 task_id = str(task["task_id"])
         if task_id is None:
@@ -155,6 +177,8 @@ def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCatego
     code = str(issue.get("code") or "").strip().upper()
     if code == "MISSING_RESOURCE":
         return _missing_resource_category(issue, state)
+    if code in _VERIFIER_CODES:
+        return IssueCategory.VERIFIER_FAILURE
     if code in _EVIDENCE_CODES:
         return IssueCategory.EVIDENCE_GAP
     if code in _EXTERNAL_CODES:
@@ -246,11 +270,13 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     task_retry_count = _counter_update(state, "task_retry_count")
     evidence_recovery_count = _counter_update(state, "evidence_recovery_count")
     task_patch_count = _counter_update(state, "task_patch_count")
+    verifier_retry_count = _counter_update(state, "verifier_retry_count")
     job_patch_count = int(state.get("job_patch_count", 0) or 0)
     update: Dict[str, Any] = {
         "task_retry_count": task_retry_count,
         "evidence_recovery_count": evidence_recovery_count,
         "task_patch_count": task_patch_count,
+        "verifier_retry_count": verifier_retry_count,
         "job_patch_count": job_patch_count,
         "pending_user_action": {},
         "verification_warnings": list(state.get("verification_warnings") or []),
@@ -262,6 +288,13 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         return update
 
     category = classify_assessment(assessment, state)
+    if category is IssueCategory.VERIFIER_FAILURE:
+        retries = verifier_retry_count.get(task_id, 0)
+        if retries < MAX_VERIFIER_RETRIES:
+            verifier_retry_count[task_id] = retries + 1
+            update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
+            return update
+
     if category is IssueCategory.CONTENT_DEFECT:
         retries = task_retry_count.get(task_id, 0)
         if retries < MAX_CONTENT_RETRIES:

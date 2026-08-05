@@ -32,6 +32,8 @@ from src.control_messages import blocker_guidance, is_displayable_assistant_mess
 from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
+from src.runtime_config import execution_config
+from src.ui_projection import summarize_step as _summarize_step
 from src.utils.path_manager import get_session_cache_dir
 
 
@@ -121,19 +123,18 @@ def _scope() -> dict[str, str]:
     }
 
 
-def _graph_config() -> dict[str, Any]:
+def _graph_config(state: dict[str, Any] | None = None) -> dict[str, Any]:
     scope = _scope()
     # A LangGraph thread represents one report-generation job, not one user and
     # not an entire conversation.
-    return {
+    return execution_config({
         "configurable": {"thread_id": scope["job_id"]},
         "tags": ["ChemicalReportAgent", "Streamlit", "LangGraph"],
         "metadata": {
             "app": "ChemicalReportAgent",
             **scope,
         },
-        "recursion_limit": 100,
-    }
+    }, state)
 
 
 def _job_metadata() -> dict[str, Any]:
@@ -484,27 +485,6 @@ def _message_id(message: Any, node: str, content: str) -> str:
     # A stable fallback is useful if Streamlit rerenders an already-seen update.
     raw = f"{_scope()['job_id']}|{node}|{content}".encode("utf-8")
     return f"graph_{hashlib.sha256(raw).hexdigest()[:24]}"
-
-
-def _summarize_step(node: str, delta: dict[str, Any]) -> str:
-    if node == "Intake":
-        return "已解析当前用户输入"
-    if node == "Planner":
-        tasks = delta.get("tasks") or []
-        cursor = int(delta.get("cursor") or 0)
-        return f"任务数：{len(tasks)}，当前序号：{cursor + 1 if tasks else 0}"
-    if node == "Worker":
-        result = delta.get("current_result") or {}
-        name = result.get("section_name") or result.get("task_id") or "当前任务"
-        status = result.get("status") or "-"
-        return f"{name}：{status}"
-    if node == "Verifier":
-        return f"审核决策：{delta.get('decision', '-')}"
-    if node == "Summarizer":
-        return "报告及评价已生成"
-    if node == "Exit":
-        return "流程结束"
-    return ""
 
 
 def _recover_stream_failure(
@@ -942,6 +922,7 @@ if chat_value:
                     "plan_revision": 1,
                     "task_revisions": {},
                     "evidence_recovery_count": {},
+                    "verifier_retry_count": {},
                     "task_patch_count": {},
                     "job_patch_count": 0,
                     "pending_user_action": {},
@@ -958,7 +939,7 @@ if chat_value:
         for update in _safe_stream_updates(
             st.session_state["app"],
             stream_input,
-            _graph_config(),
+            _graph_config(existing_values),
             fallback_interrupt=pending_interrupt,
         ):
             if _handle_interrupt(update):

@@ -33,6 +33,7 @@ For `update_task`, `changes` may contain only:
 task_name, task_description, query, use_rag, use_web, allow_web_fallback, generate_table,
 generate_figure, use_resources, tool_requirements, visualization.
 
-Use only task IDs and resources present in the supplied state. Do not delete completed
-tasks, touch undeclared tasks, reset execution to the first task, or emit a `tasks`
-field. `resume_task_id` must be the earliest affected task. Output JSON only.
+Use only task IDs and resources present in the supplied state. Never update, move,
+delete, cross, or insert before a completed or accepted task. Do not touch undeclared
+tasks, reset execution to the first task, or emit a `tasks` field. `resume_task_id`
+must be the earliest affected task. Output JSON only.

@@ -110,6 +110,7 @@ class WorkFlowBase(StateGraph):
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
+                    "RETRY_VERIFIER": "Verifier",
                 },
             )
 

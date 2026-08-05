@@ -36,8 +36,8 @@ _CATEGORY_BY_CODE = {
     "CONTRADICTORY_REQUIREMENTS": "EXTERNAL_BLOCKER",
     "EXTERNAL_BLOCKER": "EXTERNAL_BLOCKER",
     "INVALID_PLAN": "EXTERNAL_BLOCKER",
-    "LLM_ERROR": "EXTERNAL_BLOCKER",
-    "LLM_NOT_ENABLED": "EXTERNAL_BLOCKER",
+    "LLM_ERROR": "VERIFIER_FAILURE",
+    "LLM_NOT_ENABLED": "VERIFIER_FAILURE",
     "PERMISSION_DENIED": "EXTERNAL_BLOCKER",
     "REQUIREMENTS_CONFLICT": "EXTERNAL_BLOCKER",
     "RESOURCE_UNAVAILABLE": "EXTERNAL_BLOCKER",
@@ -48,6 +48,7 @@ _VALID_CATEGORIES = {
     "EVIDENCE_GAP",
     "LOCAL_PLAN_DEFECT",
     "EXTERNAL_BLOCKER",
+    "VERIFIER_FAILURE",
 }
 
 
@@ -218,6 +219,20 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     status = str(assessment.get("status") or "FAILED").strip().upper()
     if status not in {"PASS", "FAILED", "BLOCKED"}:
         status = "FAILED"
+    if requirements_missing and status == "PASS":
+        status = "FAILED"
+        if not issues:
+            issues = [
+                {
+                    "code": "REQUIREMENT_MISSING",
+                    "category": "CONTENT_DEFECT",
+                    "description": f"Required outcome is missing: {requirement}",
+                    "suggestion": f"Address the missing requirement: {requirement}",
+                    "severity": "major",
+                }
+                for requirement in requirements_missing
+                if str(requirement).strip()
+            ]
     if issues and status == "PASS":
         status = "FAILED"
     if not issues and status in {"FAILED", "BLOCKED"}:
@@ -228,7 +243,7 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             issues = [
                 {
                     "code": "ASSESSMENT_CONTRACT_ERROR",
-                    "category": "CONTENT_DEFECT",
+                    "category": "VERIFIER_FAILURE",
                     "description": "Verifier returned a failure without usable issue details.",
                     "suggestion": "Retry automatic verification with a valid structured assessment.",
                     "severity": "error",

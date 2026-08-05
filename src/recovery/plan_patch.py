@@ -53,6 +53,7 @@ _ALLOWED_INSERTED_TASK_FIELDS = _REQUIRED_INSERTED_TASK_FIELDS | {
     "tool_requirements",
     "visualization",
 }
+_COMPLETED_TASK_STATUSES = {"ACCEPTED", "COMPLETED", "DONE", "PASS", "PASSED"}
 
 
 def _task_id(value: Any, field: str) -> str:
@@ -155,6 +156,32 @@ def _state_tasks(state: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], List[s
     if len(set(identifiers)) != len(identifiers):
         raise PatchValidationError("duplicate task_id in state")
     return copied_tasks, identifiers
+
+
+def _completed_task_ids(
+    state: Mapping[str, Any], tasks: Sequence[Mapping[str, Any]]
+) -> set[str]:
+    """Return tasks that a local patch must never mutate or reorder."""
+    completed = {
+        str(result.get("task_id"))
+        for result in state.get("results") or []
+        if isinstance(result, Mapping) and result.get("task_id") is not None
+    }
+    try:
+        cursor = max(0, int(state.get("cursor", 0) or 0))
+    except (TypeError, ValueError):
+        cursor = 0
+    for task in tasks[:cursor]:
+        if task.get("task_id") is not None:
+            completed.add(str(task["task_id"]))
+    for task in tasks:
+        if (
+            str(task.get("status") or "").strip().upper()
+            in _COMPLETED_TASK_STATUSES
+            and task.get("task_id") is not None
+        ):
+            completed.add(str(task["task_id"]))
+    return completed
 
 
 def _require_nonempty_string(patch: Mapping[str, Any], field: str) -> str:
@@ -281,11 +308,14 @@ def _validate_update(
     operation: Dict[str, Any],
     known_ids: set[str],
     resource_aliases: Mapping[str, set[str]],
+    completed_ids: set[str],
 ) -> List[str]:
     task_id = _task_id(operation.get("task_id"), "update_task.task_id")
     operation["task_id"] = task_id
     if task_id not in known_ids:
         raise PatchValidationError(f"unknown task: {task_id}")
+    if task_id in completed_ids:
+        raise PatchValidationError("cannot update a completed or accepted task")
     changes = operation.get("changes")
     if not isinstance(changes, Mapping) or not changes:
         raise PatchValidationError("update_task.changes must be a non-empty object")
@@ -309,7 +339,7 @@ def _validate_move(
     operation: Dict[str, Any],
     known_ids: set[str],
     current_order: List[str],
-    accepted_ids: set[str],
+    completed_ids: set[str],
 ) -> List[str]:
     task_id = _task_id(operation.get("task_id"), "move_before.task_id")
     before_task_id = _task_id(
@@ -328,13 +358,15 @@ def _validate_move(
         if task_index > anchor_index
         else current_order[task_index + 1 : anchor_index]
     )
-    if task_id in accepted_ids:
-        raise PatchValidationError("cannot move an accepted task")
-    if before_task_id in accepted_ids:
-        raise PatchValidationError("cannot move before an accepted anchor")
-    accepted_crossed = set(crossed) & accepted_ids
-    if accepted_crossed:
-        raise PatchValidationError("cannot move across an accepted crossed task")
+    if task_id in completed_ids:
+        raise PatchValidationError("cannot move a completed or accepted task")
+    if before_task_id in completed_ids:
+        raise PatchValidationError("cannot move before a completed or accepted anchor")
+    completed_crossed = set(crossed) & completed_ids
+    if completed_crossed:
+        raise PatchValidationError(
+            "cannot move across a completed or accepted crossed task"
+        )
     _move_before(current_order, task_id, before_task_id)
     return list(dict.fromkeys([task_id, before_task_id, *crossed]))
 
@@ -344,7 +376,7 @@ def _validate_insert(
     known_ids: set[str],
     resource_aliases: Mapping[str, set[str]],
     current_order: List[str],
-    accepted_ids: set[str],
+    completed_ids: set[str],
 ) -> List[str]:
     before_task_id = _task_id(
         operation.get("before_task_id"), "insert_before.before_task_id"
@@ -352,8 +384,10 @@ def _validate_insert(
     operation["before_task_id"] = before_task_id
     if before_task_id not in known_ids:
         raise PatchValidationError(f"unknown task: {before_task_id}")
-    if before_task_id in accepted_ids:
-        raise PatchValidationError("cannot insert before an accepted anchor")
+    if before_task_id in completed_ids:
+        raise PatchValidationError(
+            "cannot insert before a completed or accepted anchor"
+        )
     task = operation.get("task")
     if not isinstance(task, Mapping):
         raise PatchValidationError("insert_before.task must be an object")
@@ -421,11 +455,7 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
         raise PatchValidationError("operations must be a non-empty list")
 
     operation_task_ids: List[str] = []
-    accepted_ids = {
-        str(result.get("task_id"))
-        for result in state.get("results") or []
-        if isinstance(result, Mapping) and result.get("task_id") is not None
-    }
+    completed_ids = _completed_task_ids(state, tasks)
     current_order = list(task_ids)
     operation_copies: List[Dict[str, Any]] = []
     for raw_operation in operations:
@@ -437,11 +467,13 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
             raise PatchValidationError(f"unsupported operation: {operation_name}")
         if operation_name == "update_task":
             operation_task_ids.extend(
-                _validate_update(operation, known_ids, resource_aliases)
+                _validate_update(
+                    operation, known_ids, resource_aliases, completed_ids
+                )
             )
         elif operation_name == "move_before":
             operation_task_ids.extend(
-                _validate_move(operation, known_ids, current_order, accepted_ids)
+                _validate_move(operation, known_ids, current_order, completed_ids)
             )
         else:
             operation_task_ids.extend(
@@ -450,7 +482,7 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
                     known_ids,
                     resource_aliases,
                     current_order,
-                    accepted_ids,
+                    completed_ids,
                 )
             )
         operation_copies.append(operation)
@@ -464,7 +496,7 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     affected_set = set(affected_task_ids)
     operation_set = set(operation_task_ids)
     extra_affected = affected_set - operation_set
-    invalidated_accepted = extra_affected & accepted_ids
+    invalidated_accepted = extra_affected & completed_ids
     if invalidated_accepted:
         raise PatchValidationError("accepted result invalidation was not declared by an operation")
     if operation_set != affected_set:
