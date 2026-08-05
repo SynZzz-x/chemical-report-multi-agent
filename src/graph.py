@@ -37,6 +37,12 @@ def route_planner(state: State):
     return "Planner_Confirm"
 
 
+def route_planner_confirm(state: State):
+    if state.get("planner_action") in {"FULL_REPLAN_REFINED", "FULL_REPLAN_ERROR"}:
+        return "Planner_Confirm"
+    return "Worker"
+
+
 _MANUAL_VERIFIER_ROUTES = {
     "RETRY_WORKER": "Worker",
     "FULL_REPLAN": "Planner",
@@ -73,7 +79,11 @@ class WorkFlowBase(StateGraph):
         )
 
         self.add_node("Planner_Confirm", planner_confirm)
-        self.add_edge("Planner_Confirm", "Worker")
+        self.add_conditional_edges(
+            "Planner_Confirm",
+            route_planner_confirm,
+            {"Planner_Confirm": "Planner_Confirm", "Worker": "Worker"},
+        )
         
         # Worker子图
         worker = create_worker_workflow()

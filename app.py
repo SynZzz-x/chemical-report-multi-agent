@@ -28,6 +28,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from src.config import get_cache_root, get_local_user_id, missing_key_message
+from src.control_messages import blocker_guidance, is_internal_control_message
 from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
@@ -485,35 +486,6 @@ def _message_id(message: Any, node: str, content: str) -> str:
     return f"graph_{hashlib.sha256(raw).hexdigest()[:24]}"
 
 
-def _is_internal_control_message(content: str) -> bool:
-    try:
-        parsed = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        return False
-
-    if not isinstance(parsed, dict):
-        return False
-
-    # These messages coordinate nodes and should not appear as normal chat text.
-    if parsed.get("from") and parsed.get("to") and parsed.get("type"):
-        return True
-    if parsed.get("type") in {
-        "INTAKE_SUMMARY",
-        "PLAN_RESULT",
-        "PROCEED",
-        "REPLAN",
-        "FULL_REPLAN",
-        "PLAN_PATCH",
-        "EVIDENCE_RECOVERY",
-        "NEEDS_USER_INPUT",
-        "needs_user_input",
-        "REWORK",
-        "SUMMARIZE",
-    }:
-        return True
-    return False
-
-
 def _summarize_step(node: str, delta: dict[str, Any]) -> str:
     if node == "Intake":
         return "已解析当前用户输入"
@@ -615,7 +587,7 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
         return True
 
     if payload_type == "needs_user_input":
-        guidance = payload.get("guidance_text") or "需要你的输入后才能继续当前任务。"
+        guidance = blocker_guidance(payload) or "需要你的输入后才能继续当前任务。"
         _append_ui_message("assistant", guidance)
         with st.chat_message("assistant"):
             st.write(guidance)

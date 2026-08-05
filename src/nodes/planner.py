@@ -31,8 +31,20 @@ Planner 节点：
 def _latest_to_planner(messages):
     """获取 messages 中最新一条发给 Planner 的指令，解析其 JSON content。"""
     for m in reversed(messages or []):
+        if isinstance(m, dict):
+            role = str(m.get("role") or m.get("type") or "").lower()
+        else:
+            role = str(
+                getattr(m, "type", None) or getattr(m, "role", None) or ""
+            ).lower()
+        if role not in {"ai", "assistant"}:
+            continue
         try:
-            c = str(getattr(m, "content", "") or "").strip()
+            c = (
+                str(m.get("content") or "")
+                if isinstance(m, dict)
+                else str(getattr(m, "content", "") or "")
+            ).strip()
             parsed = json.loads(c)
             if isinstance(parsed, dict) and parsed.get("to") == "Planner":
                 return parsed
@@ -49,6 +61,71 @@ def _is_user_full_replan(parsed: Dict[str, Any] | None) -> bool:
         and parsed.get("to") == "Planner"
         and str(parsed.get("type") or "").upper() == "FULL_REPLAN"
     )
+
+
+def _task_ids(tasks: List[Dict[str, Any]]) -> list[str]:
+    return [
+        str(task.get("task_id") or "").strip()
+        for task in tasks or []
+        if isinstance(task, dict) and str(task.get("task_id") or "").strip()
+    ]
+
+
+def _next_task_number(task_ids: List[str]) -> int:
+    numbers = [
+        int(task_id[1:])
+        for task_id in task_ids
+        if re.fullmatch(r"T\d+", task_id)
+    ]
+    return max(numbers, default=0) + 1
+
+
+def _normalize_replacement_tasks(
+    candidate_tasks: List[Dict[str, Any]], previous_task_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Give a replacement plan stable IDs that cannot collide with prior work."""
+    if not isinstance(candidate_tasks, list) or not candidate_tasks:
+        raise ValueError("Replacement plan must contain at least one task")
+
+    normalized: List[Dict[str, Any]] = []
+    used_ids = {str(task_id).strip() for task_id in previous_task_ids if str(task_id).strip()}
+    next_number = _next_task_number(list(used_ids))
+    for candidate in candidate_tasks:
+        if not isinstance(candidate, dict):
+            raise ValueError("Replacement tasks must be objects")
+        task = dict(candidate)
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id or task_id in used_ids:
+            while f"T{next_number}" in used_ids:
+                next_number += 1
+            task_id = f"T{next_number}"
+            next_number += 1
+        task["task_id"] = task_id
+        used_ids.add(task_id)
+        normalized.append(task)
+    return normalized
+
+
+def _full_replan_reason(state: State, parsed: Dict[str, Any] | None = None) -> str:
+    if state.get("full_replan_reason"):
+        return str(state["full_replan_reason"])
+    if parsed and parsed.get("reason"):
+        return str(parsed["reason"])
+    feedback = state.get("feedback") or {}
+    issues = feedback.get("issues") if isinstance(feedback, dict) else []
+    if issues and isinstance(issues[0], dict):
+        return str(issues[0].get("description") or "")
+    return ""
+
+
+def _full_replan_error_guidance(error: Exception | str) -> Dict[str, Any]:
+    return {
+        "natural_language_guidance": (
+            "无法安全生成替换计划，请提供新的整体目标或重试。"
+        ),
+        "resource_mapping": {},
+        "error": str(error),
+    }
 
 
 def _read_prompt(rel_path: str) -> str:
@@ -445,8 +522,19 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         overview = "初始规划已生成。"
     
     elif planner_action == "FULL_REPLAN":
-        tasks = _build_tasks_from_replan_feedback(state, config, tasks)
-        overview = "已按用户请求生成替换计划，等待确认后执行。"
+        previous_tasks = list(tasks)
+        previous_task_ids = _task_ids(previous_tasks)
+        try:
+            tasks = _normalize_replacement_tasks(
+                _build_tasks_from_replan_feedback(state, config, previous_tasks),
+                previous_task_ids,
+            )
+        except ValueError as exc:
+            planner_action = "FULL_REPLAN_ERROR"
+            tasks = previous_tasks
+            overview = "替换计划无效，等待用户输入。"
+        else:
+            overview = "已按用户请求生成替换计划，等待确认后执行。"
     
     elif planner_action == "PROCEED":
         # 如果是 PROCEED 且有明确的 PROCEED 指令，移动 cursor
@@ -468,6 +556,9 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         "planner_action": planner_action,
         "decision": "NEXT" # 默认重置决策
     }
+    if planner_action == "FULL_REPLAN":
+        result["full_replan_previous_task_ids"] = _task_ids(state.get("tasks") or [])
+        result["full_replan_reason"] = _full_replan_reason(state, parsed)
     
     # 如果是 PROCEED，生成消息
     if planner_action == "PROCEED":
@@ -487,7 +578,11 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         intake_data = _get_intake_data(state)
         initial_resources_names = [r.get("name") for r in intake_data.get("resources", []) if isinstance(r, dict)]
         
-        guidance_result = _generate_plan_guidance(tasks, initial_resources_names, config)
+        guidance_result = (
+            _full_replan_error_guidance("empty or invalid replacement plan")
+            if planner_action == "FULL_REPLAN_ERROR"
+            else _generate_plan_guidance(tasks, initial_resources_names, config)
+        )
         result["guidance"] = guidance_result
     
     return result
@@ -496,6 +591,8 @@ def planner(state: State, config: RunnableConfig, **kwargs):
 def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     """等待用户确认计划，并按反馈或新增附件调整任务。"""
     tasks = state.get("tasks", []) or []
+    planner_action = str(state.get("planner_action") or "")
+    is_full_replan = planner_action in {"FULL_REPLAN", "FULL_REPLAN_REFINED"}
     guidance_result = state.get("guidance") or {}
 
     if not guidance_result:
@@ -510,6 +607,16 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
             initial_resource_names,
             config,
         )
+
+    if planner_action == "FULL_REPLAN_ERROR":
+        interrupt(
+            {
+                "type": "needs_user_input",
+                "guidance_text": guidance_result.get("natural_language_guidance"),
+                "error": guidance_result.get("error"),
+            }
+        )
+        return {"planner_action": "FULL_REPLAN_ERROR", "decision": "NEXT"}
 
     structured_tasks = [
         {
@@ -560,14 +667,65 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     # 当前节点内需要完整资源视图；写回 State 时仍只返回 resumed_docs 增量。
     combined_docs = merge_docs(state.get("docs") or [], resumed_docs)
     intake_data = _get_intake_data(state)
-    tasks = _refine_tasks(
-        state,
-        tasks,
-        feedback_text,
-        combined_docs,
-        intake_data,
-        config,
-    )
+    is_confirmation = _is_confirmation_feedback(feedback_text) and not resumed_docs
+    if is_full_replan and not is_confirmation:
+        try:
+            refined_tasks = _normalize_replacement_tasks(
+                _refine_tasks(
+                    state,
+                    tasks,
+                    feedback_text,
+                    combined_docs,
+                    intake_data,
+                    config,
+                ),
+                list(state.get("full_replan_previous_task_ids") or []),
+            )
+        except ValueError as exc:
+            return {
+                "planner_action": "FULL_REPLAN_ERROR",
+                "guidance": _full_replan_error_guidance(exc),
+                "messages": [feedback_message],
+                "docs": resumed_docs,
+            }
+        initial_resource_names = [
+            resource.get("name")
+            for resource in intake_data.get("resources", [])
+            if isinstance(resource, dict) and resource.get("name")
+        ]
+        return {
+            "messages": [feedback_message],
+            "tasks": refined_tasks,
+            "cursor": int(state.get("cursor", 0) or 0),
+            "planner_action": "FULL_REPLAN_REFINED",
+            "guidance": _generate_plan_guidance(
+                refined_tasks, initial_resource_names, config
+            ),
+            "docs": resumed_docs,
+        }
+
+    if not is_full_replan:
+        tasks = _refine_tasks(
+            state,
+            tasks,
+            feedback_text,
+            combined_docs,
+            intake_data,
+            config,
+        )
+    else:
+        try:
+            tasks = _normalize_replacement_tasks(
+                tasks,
+                list(state.get("full_replan_previous_task_ids") or []),
+            )
+        except ValueError as exc:
+            return {
+                "planner_action": "FULL_REPLAN_ERROR",
+                "guidance": _full_replan_error_guidance(exc),
+                "messages": [feedback_message],
+                "docs": resumed_docs,
+            }
 
     content_obj = {
         "from": "Planner",
@@ -587,7 +745,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         # 只提交本轮新增附件，State.merge_docs 会负责合并。
         "docs": resumed_docs,
     }
-    if state.get("planner_action") == "FULL_REPLAN":
+    if is_full_replan:
         # The replacement plan is staged above, but it becomes a new execution
         # revision only when this explicit confirmation resumes the node.
         task_revisions = {
@@ -595,20 +753,47 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
             for task in tasks
             if isinstance(task, dict) and task.get("task_id") is not None
         }
+        old_task_ids = list(state.get("full_replan_previous_task_ids") or [])
+        new_task_ids = _task_ids(tasks)
+        plan_revision = int(state.get("plan_revision", 1) or 1) + 1
+        history = list(state.get("plan_patch_history") or [])
+        history.append(
+            {
+                "type": "FULL_REPLAN",
+                "previous_plan_revision": plan_revision - 1,
+                "new_plan_revision": plan_revision,
+                "reason": _full_replan_reason(state),
+                "old_task_ids": old_task_ids,
+                "new_task_ids": new_task_ids,
+            }
+        )
         update.update(
             {
-                "plan_revision": int(state.get("plan_revision", 1) or 1) + 1,
+                "planner_action": "PROCEED",
+                "plan_revision": plan_revision,
                 "task_revisions": task_revisions,
                 "current_result": {},
                 "results": [],
                 "all_results": [],
+                "current_task": {},
+                "worker_state": {},
+                "tool_execution_history": [],
+                "feedback": {},
+                "assessment": {},
+                "workflow_action": "",
+                "continuation_action": "",
+                "verification_warning": {},
                 "task_retry_count": {},
                 "evidence_recovery_count": {},
                 "task_patch_count": {},
                 "job_patch_count": 0,
+                "replan_count": 0,
                 "pending_user_action": {},
-                "plan_patch_history": [],
+                "plan_patch_history": history,
                 "verification_warnings": [],
+                "guidance": {},
+                "final_result": {},
+                "decision": "NEXT",
             }
         )
     return update

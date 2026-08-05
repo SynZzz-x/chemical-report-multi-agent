@@ -75,6 +75,7 @@ class State(TypedDict, total=False):
 
     decision: Literal[
         "RETRY_WORKER",
+        "REPLAN",
         "FULL_REPLAN",
         "NEXT",
         "DONE",
@@ -103,6 +104,8 @@ class State(TypedDict, total=False):
     current_task: Dict[str, Any]
     all_results: List[Dict[str, Any]]
     tool_execution_history: List[Dict[str, Any]]
+    full_replan_previous_task_ids: List[str]
+    full_replan_reason: str
 
 
 class ConfigSchema(TypedDict, total=False):

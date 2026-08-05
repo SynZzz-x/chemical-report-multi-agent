@@ -14,6 +14,7 @@ from src.config import (
     get_local_user_id,
     missing_key_message,
 )
+from src.control_messages import blocker_guidance, is_internal_control_message
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 
@@ -40,30 +41,6 @@ def _message_role(message: Any) -> str:
         or getattr(message, "role", None)
         or ""
     ).lower()
-
-
-def _is_internal_control_message(content: str) -> bool:
-    try:
-        parsed = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    if parsed.get("from") and parsed.get("to") and parsed.get("type"):
-        return True
-    return parsed.get("type") in {
-        "INTAKE_SUMMARY",
-        "PLAN_RESULT",
-        "PROCEED",
-        "REPLAN",
-        "FULL_REPLAN",
-        "PLAN_PATCH",
-        "EVIDENCE_RECOVERY",
-        "NEEDS_USER_INPUT",
-        "needs_user_input",
-        "REWORK",
-        "SUMMARIZE",
-    }
 
 
 def _project_snapshot(
@@ -131,7 +108,8 @@ def _interrupt_ui_message(
     if isinstance(value, dict):
         payload = value
         content = str(
-            value.get("guidance_text")
+            blocker_guidance(value)
+            or value.get("guidance_text")
             or value.get("content_summary")
             or json.dumps(value, ensure_ascii=False, default=str)
         )

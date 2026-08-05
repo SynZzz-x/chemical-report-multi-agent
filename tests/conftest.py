@@ -17,6 +17,22 @@ class _Message:
         self.additional_kwargs = kwargs
 
 
+class _AIMessage(_Message):
+    type = "ai"
+
+
+class _HumanMessage(_Message):
+    type = "human"
+
+
+class _SystemMessage(_Message):
+    type = "system"
+
+
+class _ToolMessage(_Message):
+    type = "tool"
+
+
 class _ChatPromptTemplate:
     @classmethod
     def from_messages(cls, messages):
@@ -46,10 +62,10 @@ langchain_core = _install_module("langchain_core")
 langchain_core.runnables = _install_module("langchain_core.runnables")
 langchain_core.runnables.RunnableConfig = dict
 langchain_core.messages = _install_module("langchain_core.messages")
-langchain_core.messages.AIMessage = _Message
-langchain_core.messages.SystemMessage = _Message
-langchain_core.messages.HumanMessage = _Message
-langchain_core.messages.ToolMessage = _Message
+langchain_core.messages.AIMessage = _AIMessage
+langchain_core.messages.SystemMessage = _SystemMessage
+langchain_core.messages.HumanMessage = _HumanMessage
+langchain_core.messages.ToolMessage = _ToolMessage
 langchain_core.messages.AnyMessage = _Message
 langchain_core.messages.BaseMessage = _Message
 langchain_core.prompts = _install_module("langchain_core.prompts")
