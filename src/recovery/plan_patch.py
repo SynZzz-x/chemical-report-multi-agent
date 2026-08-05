@@ -6,6 +6,8 @@ from copy import deepcopy
 from os.path import basename
 from typing import Any, Dict, List, Mapping, Sequence
 
+from src.tool_names import canonical_tool_name
+
 from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
 
 
@@ -100,6 +102,20 @@ def _normalise_resources(
         if len(matches) != 1:
             raise PatchValidationError(f"ambiguous resource: {alias}")
         normalized.append(next(iter(matches)))
+    return normalized
+
+
+def _normalise_tool_requirements(requirements: Any) -> List[str]:
+    if not isinstance(requirements, list):
+        raise PatchValidationError("tool_requirements must be a list of strings")
+    normalized: List[str] = []
+    for requirement in requirements:
+        canonical_name = canonical_tool_name(requirement)
+        if canonical_name is None:
+            raise PatchValidationError(
+                "tool_requirements contains an invalid tool requirement"
+            )
+        normalized.append(canonical_name)
     return normalized
 
 
@@ -215,11 +231,10 @@ def _validate_task_fields(
     elif required:
         raise PatchValidationError("insert_before.task missing use_resources")
 
-    if "tool_requirements" in task and (
-        not isinstance(task["tool_requirements"], list)
-        or not all(isinstance(value, str) for value in task["tool_requirements"])
-    ):
-        raise PatchValidationError("tool_requirements must be a list of strings")
+    if "tool_requirements" in task:
+        task["tool_requirements"] = _normalise_tool_requirements(
+            task["tool_requirements"]
+        )
     if "visualization" in task:
         visualization = task["visualization"]
         if not isinstance(visualization, Mapping):
@@ -233,12 +248,15 @@ def _validate_task_fields(
 
 
 def _validate_task_consistency(task: Mapping[str, Any]) -> None:
+    raw_requirements = task.get("tool_requirements")
+    if raw_requirements is None:
+        return
+    tool_requirements = _normalise_tool_requirements(raw_requirements)
     spider_requirement = next(
         (
             requirement
-            for requirement in task.get("tool_requirements") or []
-            if isinstance(requirement, str)
-            and requirement.strip().lower() in {"spider_tool", "spidertool"}
+            for requirement in tool_requirements
+            if canonical_tool_name(requirement) == "spider_tool"
         ),
         None,
     )

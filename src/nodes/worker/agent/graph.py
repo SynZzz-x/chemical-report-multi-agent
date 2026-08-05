@@ -4,6 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
 from ....config import get_app_config, get_rag_settings
 from ....llm import get_llm
+from ....tool_names import canonical_tool_name
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -1303,24 +1304,18 @@ class ToolManager:
         if not tool_requirements:
             return []
 
-        class_to_runtime_name = {
-            "ChemicalKnowledgeBaseTool": "chemical_knowledge_base_tool",
-            "CSVTool": "csv_analysis_tool",
-            "ChartTool": "chart_generator_tool",
-            "SpiderTool": "spider_tool",
+        required = {
+            canonical_name
+            for requirement in tool_requirements
+            if (canonical_name := canonical_tool_name(requirement)) is not None
         }
-        required = set(tool_requirements)
+        if not required:
+            return []
 
         for tool_name in self.config.ENABLED_TOOLS:
             tool_class = self.tool_classes.get(tool_name)
-            runtime_name = class_to_runtime_name.get(tool_name, tool_name)
-            matches_requirement = any(
-                requirement == tool_name
-                or requirement == runtime_name
-                or requirement in runtime_name
-                for requirement in required
-            )
-            if required and not matches_requirement:
+            runtime_name = canonical_tool_name(tool_name)
+            if runtime_name is None or runtime_name not in required:
                 continue
             if not tool_class:
                 continue
@@ -1399,7 +1394,7 @@ class AutonomousToolNode:
             tool_requirements = [
                 requirement
                 for requirement in tool_requirements
-                if str(requirement).lower() not in {"spidertool", "spider_tool"}
+                if canonical_tool_name(requirement) != "spider_tool"
             ]
             if allow_web:
                 tool_requirements.append("spider_tool")

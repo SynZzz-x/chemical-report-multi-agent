@@ -283,7 +283,7 @@ def test_insert_rejects_spider_tool_without_explicit_web_permission():
     patch = insert_before_patch()
     patch["operations"][0]["task"]["tool_requirements"] = ["SpiderTool"]
 
-    with pytest.raises(PatchValidationError, match="SpiderTool.*web"):
+    with pytest.raises(PatchValidationError, match="spider_tool.*web"):
         validate_plan_patch(patch_state(), patch)
 
 
@@ -309,6 +309,39 @@ def test_update_rejects_spider_tool_after_simulating_all_task_changes():
 )
 def test_update_allows_spider_tool_with_an_explicit_web_permission(changes):
     validate_plan_patch(patch_state(), update_patch(changes=changes))
+
+
+@pytest.mark.parametrize("requirement", ["", "   "])
+def test_plan_patch_rejects_blank_tool_requirement_names(requirement):
+    patch = update_patch(changes={"tool_requirements": [requirement]})
+
+    with pytest.raises(PatchValidationError, match="invalid tool requirement"):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_plan_patch_canonicalizes_supported_tool_aliases_on_apply():
+    update = apply_plan_patch(
+        patch_state(),
+        update_patch(
+            changes={"tool_requirements": ["SpiderTool"], "use_web": True}
+        ),
+    )
+
+    assert update["tasks"][2]["tool_requirements"] == ["spider_tool"]
+    assert update["plan_patch_history"][0]["operations"][0]["changes"][
+        "tool_requirements"
+    ] == ["spider_tool"]
+
+
+def test_plan_patch_preserves_spider_as_an_exact_custom_tool_name():
+    update = apply_plan_patch(
+        patch_state(),
+        update_patch(
+            changes={"tool_requirements": ["spider"], "use_web": False}
+        ),
+    )
+
+    assert update["tasks"][2]["tool_requirements"] == ["spider"]
 
 
 @pytest.mark.parametrize(
