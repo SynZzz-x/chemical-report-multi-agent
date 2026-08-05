@@ -957,6 +957,15 @@ if chat_value:
                     "worker_state": {},
                     "task_retry_count": {},
                     "replan_count": 0,
+                    "workflow_action": "",
+                    "plan_revision": 1,
+                    "task_revisions": {},
+                    "evidence_recovery_count": {},
+                    "task_patch_count": {},
+                    "job_patch_count": 0,
+                    "pending_user_action": {},
+                    "plan_patch_history": [],
+                    "verification_warnings": [],
                 }
             )
 

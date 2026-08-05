@@ -91,6 +91,15 @@ class State(TypedDict, total=False):
     guidance: Dict[str, Any]
     task_retry_count: Dict[str, int]
     replan_count: int
+    workflow_action: str
+    plan_revision: int
+    task_revisions: Dict[str, int]
+    evidence_recovery_count: Dict[str, int]
+    task_patch_count: Dict[str, int]
+    job_patch_count: int
+    pending_user_action: Dict[str, Any]
+    plan_patch_history: List[Dict[str, Any]]
+    verification_warnings: List[Dict[str, Any]]
     current_task: Dict[str, Any]
     all_results: List[Dict[str, Any]]
     tool_execution_history: List[Dict[str, Any]]
