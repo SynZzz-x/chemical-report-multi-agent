@@ -71,7 +71,8 @@ def test_full_replan_commits_new_revision_only_after_confirmation(monkeypatch):
     staged = planner(state, {})
 
     assert staged["planner_action"] == "FULL_REPLAN"
-    assert staged["tasks"] == replacement_tasks
+    assert staged["tasks"] == state["tasks"]
+    assert staged["full_replan_candidate_tasks"] == replacement_tasks
     assert staged["cursor"] == 1
     assert "results" not in staged
     assert "task_retry_count" not in staged
@@ -108,6 +109,10 @@ def test_full_replan_commits_new_revision_only_after_confirmation(monkeypatch):
     assert committed["guidance"] == {}
     assert committed["final_result"] == {}
     assert committed["decision"] == "NEXT"
+    assert committed["full_replan_previous_task_ids"] == []
+    assert committed["full_replan_reason"] == ""
+    assert committed["full_replan_candidate_tasks"] == []
+    assert committed["task_id_registry"] == ["T1", "T2", "T3"]
     assert committed["plan_patch_history"][-1] == {
         "type": "FULL_REPLAN",
         "previous_plan_revision": 3,
@@ -199,7 +204,8 @@ def test_full_replan_refinement_requires_a_second_confirmation(monkeypatch):
     refined = planner_confirm({**state, **staged}, {})
 
     assert refined["planner_action"] == "FULL_REPLAN_REFINED"
-    assert refined["tasks"] == refined_tasks
+    assert "tasks" not in refined
+    assert refined["full_replan_candidate_tasks"] == refined_tasks
     assert refined["cursor"] == 1
     assert "plan_revision" not in refined
     assert "results" not in refined
@@ -266,9 +272,10 @@ def test_invalid_full_replan_interrupts_only_with_safe_blocker_guidance(monkeypa
             "type": "needs_user_input",
             "guidance_text": "无法安全生成替换计划",
             "error": "empty",
+            "accepted_choices": ["RETRY_FULL_REPLAN", "RESUME_OLD_PLAN", "CANCEL"],
         }
     ]
-    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert update["planner_action"] == "FULL_REPLAN_RETRY"
 
 
 def test_attachment_only_full_replan_response_refines_before_confirmation(monkeypatch):
@@ -288,7 +295,8 @@ def test_attachment_only_full_replan_response_refines_before_confirmation(monkey
     refined = planner_confirm({**state, **staged}, {})
 
     assert refined["planner_action"] == "FULL_REPLAN_REFINED"
-    assert refined["tasks"] == refined_tasks
+    assert "tasks" not in refined
+    assert refined["full_replan_candidate_tasks"] == refined_tasks
     assert "plan_revision" not in refined
 
 
@@ -342,6 +350,98 @@ def test_shared_blocker_guidance_uses_specific_or_generic_text():
     assert blocker_guidance({"type": "needs_user_input", "guidance_text": "上传数据"}) == "上传数据"
     assert blocker_guidance({"type": "needs_user_input"}) == "需要你的输入后才能继续当前任务。"
     assert blocker_guidance({"type": "verify_result"}) is None
+
+
+def test_shared_display_consumer_hides_controls_without_calling_stale_alias():
+    from src.control_messages import is_displayable_assistant_content
+
+    assert not is_displayable_assistant_content(json.dumps({"type": "FULL_REPLAN"}))
+    assert is_displayable_assistant_content(json.dumps({"type": "ANSWER", "text": "visible"}))
+    assert is_displayable_assistant_content("ordinary assistant text")
+
+
+def test_shared_message_projection_consumer_hides_controls_and_keeps_assistant_text():
+    from src.control_messages import is_displayable_assistant_message
+
+    assert not is_displayable_assistant_message("ai", json.dumps({"type": "FULL_REPLAN"}))
+    assert is_displayable_assistant_message("assistant", "visible assistant result")
+    assert not is_displayable_assistant_message("human", "visible assistant result")
+
+
+def test_invalid_full_replan_can_retry_without_mutating_the_old_plan(monkeypatch):
+    state = _full_replan_state()
+    state.update(
+        {
+            "planner_action": "FULL_REPLAN_ERROR",
+            "full_replan_candidate_tasks": [],
+            "guidance": {"natural_language_guidance": "无法安全生成替换计划"},
+        }
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "RETRY_FULL_REPLAN", "text": "改为两章", "docs": []},
+    )
+
+    retry = planner_confirm(state, {})
+
+    assert retry["planner_action"] == "FULL_REPLAN_RETRY"
+    assert retry["full_replan_reason"] == "改为两章"
+    assert "tasks" not in retry and "results" not in retry
+    assert retry["planner_action"] != "FULL_REPLAN_ERROR"
+
+
+def test_invalid_full_replan_can_resume_old_plan_without_a_loop(monkeypatch):
+    state = _full_replan_state()
+    state.update(
+        {
+            "planner_action": "FULL_REPLAN_ERROR",
+            "full_replan_candidate_tasks": [],
+            "guidance": {"natural_language_guidance": "无法安全生成替换计划"},
+        }
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "RESUME_OLD_PLAN", "text": "继续旧计划", "docs": []},
+    )
+
+    resumed = planner_confirm(state, {})
+
+    assert resumed["planner_action"] == "PROCEED"
+    assert resumed["full_replan_candidate_tasks"] == []
+    assert resumed["full_replan_previous_task_ids"] == []
+    assert resumed["planner_action"] != "FULL_REPLAN_ERROR"
+    assert "tasks" not in resumed and "results" not in resumed
+
+
+def test_sequential_full_replans_use_lifetime_ids_and_fresh_reasons(monkeypatch):
+    state = _full_replan_state()
+    state["messages"] = [
+        AIMessage(content=json.dumps({"from": "Verifier", "to": "Planner", "type": "FULL_REPLAN", "reason": "first"}))
+    ]
+    monkeypatch.setattr(planner_module, "_build_tasks_from_replan_feedback", lambda *_: [{"task_id": "T1"}])
+    monkeypatch.setattr(planner_module, "_generate_plan_guidance", lambda *_: {})
+    monkeypatch.setattr(planner_module, "interrupt", lambda _: {"text": "确认", "docs": []})
+
+    first_stage = planner(state, {})
+    first_commit = planner_confirm({**state, **first_stage}, {})
+
+    second_state = {
+        **state,
+        **first_commit,
+        "messages": [
+            AIMessage(content=json.dumps({"from": "Verifier", "to": "Planner", "type": "FULL_REPLAN", "reason": "second"}))
+        ],
+    }
+    second_stage = planner(second_state, {})
+    second_commit = planner_confirm({**second_state, **second_stage}, {})
+
+    assert first_commit["tasks"][0]["task_id"] == "T3"
+    assert second_stage["full_replan_candidate_tasks"][0]["task_id"] == "T4"
+    assert second_commit["task_id_registry"] == ["T1", "T2", "T3", "T4"]
+    assert second_commit["plan_patch_history"][-1]["reason"] == "second"
+    assert second_commit["full_replan_reason"] == ""
 
 
 def test_state_keeps_legacy_replan_literal_for_checkpoint_compatibility():

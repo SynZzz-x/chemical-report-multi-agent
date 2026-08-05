@@ -38,6 +38,8 @@ def route_planner(state: State):
 
 
 def route_planner_confirm(state: State):
+    if state.get("planner_action") == "FULL_REPLAN_RETRY":
+        return "Planner"
     if state.get("planner_action") in {"FULL_REPLAN_REFINED", "FULL_REPLAN_ERROR"}:
         return "Planner_Confirm"
     return "Worker"
@@ -82,7 +84,11 @@ class WorkFlowBase(StateGraph):
         self.add_conditional_edges(
             "Planner_Confirm",
             route_planner_confirm,
-            {"Planner_Confirm": "Planner_Confirm", "Worker": "Worker"},
+            {
+                "Planner": "Planner",
+                "Planner_Confirm": "Planner_Confirm",
+                "Worker": "Worker",
+            },
         )
         
         # Worker子图

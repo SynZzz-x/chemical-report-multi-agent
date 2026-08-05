@@ -106,6 +106,8 @@ class State(TypedDict, total=False):
     tool_execution_history: List[Dict[str, Any]]
     full_replan_previous_task_ids: List[str]
     full_replan_reason: str
+    full_replan_candidate_tasks: List[Dict[str, Any]]
+    task_id_registry: List[str]
 
 
 class ConfigSchema(TypedDict, total=False):

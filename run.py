@@ -14,7 +14,7 @@ from src.config import (
     get_local_user_id,
     missing_key_message,
 )
-from src.control_messages import blocker_guidance, is_internal_control_message
+from src.control_messages import blocker_guidance, is_displayable_assistant_message
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 
@@ -55,10 +55,8 @@ def _project_snapshot(
 
     for index, message in enumerate(values.get("messages") or []):
         role = _message_role(message)
-        if role not in {"ai", "assistant"}:
-            continue
         content = _message_content(message).strip()
-        if not content or _is_internal_control_message(content):
+        if not is_displayable_assistant_message(role, content):
             continue
 
         explicit_id = (

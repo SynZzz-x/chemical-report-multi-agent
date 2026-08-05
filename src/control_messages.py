@@ -34,6 +34,17 @@ def is_internal_control_message(content: str) -> bool:
     return str(payload.get("type") or "") in INTERNAL_CONTROL_TYPES
 
 
+def is_displayable_assistant_content(content: str) -> bool:
+    """Return whether assistant content is safe to render as chat text."""
+    normalized = str(content or "").strip()
+    return bool(normalized) and not is_internal_control_message(normalized)
+
+
+def is_displayable_assistant_message(role: str, content: str) -> bool:
+    """Apply the role and internal-control rules used by every chat projection."""
+    return str(role or "").lower() in {"ai", "assistant"} and is_displayable_assistant_content(content)
+
+
 def blocker_guidance(payload: Any) -> str | None:
     """Return display-safe guidance for a user-input blocker, if present."""
     if not isinstance(payload, dict) or payload.get("type") != "needs_user_input":

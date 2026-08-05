@@ -28,7 +28,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from src.config import get_cache_root, get_local_user_id, missing_key_message
-from src.control_messages import blocker_guidance, is_internal_control_message
+from src.control_messages import blocker_guidance, is_displayable_assistant_message
 from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
@@ -605,11 +605,8 @@ def _handle_node_delta(node: str, delta: dict[str, Any]) -> None:
     for message in messages:
         # 用户消息已经由输入区渲染；节点恢复后返回的 HumanMessage 不应
         # 再以 assistant 身份展示。
-        if _message_role(message) in {"human", "user"}:
-            continue
-
         content = _message_content(message).strip()
-        if not content or _is_internal_control_message(content):
+        if not is_displayable_assistant_message(_message_role(message), content):
             continue
 
         msg_id = _message_id(message, node, content)

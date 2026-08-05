@@ -106,6 +106,37 @@ def _normalize_replacement_tasks(
     return normalized
 
 
+def _job_task_ids(state: State) -> list[str]:
+    """Return all task IDs ever committed or currently active for this job."""
+    task_ids = [str(task_id) for task_id in state.get("task_id_registry") or []]
+    task_ids.extend(_task_ids(state.get("tasks") or []))
+    for event in state.get("plan_patch_history") or []:
+        if not isinstance(event, dict):
+            continue
+        for key in ("old_task_ids", "new_task_ids"):
+            task_ids.extend(str(task_id) for task_id in event.get(key) or [])
+    return list(dict.fromkeys(task_id for task_id in task_ids if task_id))
+
+
+def _clear_full_replan_staging() -> Dict[str, Any]:
+    return {
+        "full_replan_previous_task_ids": [],
+        "full_replan_reason": "",
+        "full_replan_candidate_tasks": [],
+    }
+
+
+def _error_resume_action(value: Any) -> str:
+    if isinstance(value, dict):
+        raw = value.get("action") or value.get("text")
+    else:
+        raw = value
+    normalized = str(raw or "").strip().upper()
+    if normalized in {"RETRY_FULL_REPLAN", "RETRY", "REFINE", "重新生成", "重试"}:
+        return "RETRY_FULL_REPLAN"
+    return "RESUME_OLD_PLAN"
+
+
 def _full_replan_reason(state: State, parsed: Dict[str, Any] | None = None) -> str:
     if state.get("full_replan_reason"):
         return str(state["full_replan_reason"])
@@ -508,7 +539,7 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     # 确定 Action
     if parsed and parsed.get("type") == "INTAKE_SUMMARY":
         planner_action = "INTAKE_SUMMARY"
-    elif _is_user_full_replan(parsed):
+    elif _is_user_full_replan(parsed) or state.get("planner_action") == "FULL_REPLAN_RETRY":
         planner_action = "FULL_REPLAN"
     else:
         planner_action = "PROCEED"
@@ -523,11 +554,10 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     
     elif planner_action == "FULL_REPLAN":
         previous_tasks = list(tasks)
-        previous_task_ids = _task_ids(previous_tasks)
         try:
             tasks = _normalize_replacement_tasks(
                 _build_tasks_from_replan_feedback(state, config, previous_tasks),
-                previous_task_ids,
+                _job_task_ids(state),
             )
         except ValueError as exc:
             planner_action = "FULL_REPLAN_ERROR"
@@ -551,14 +581,21 @@ def planner(state: State, config: RunnableConfig, **kwargs):
 
     # 返回结果
     result = {
-        "tasks": tasks,
         "cursor": cursor,
         "planner_action": planner_action,
         "decision": "NEXT" # 默认重置决策
     }
     if planner_action == "FULL_REPLAN":
+        result["tasks"] = list(state.get("tasks") or [])
+        result["full_replan_candidate_tasks"] = tasks
         result["full_replan_previous_task_ids"] = _task_ids(state.get("tasks") or [])
         result["full_replan_reason"] = _full_replan_reason(state, parsed)
+    else:
+        result["tasks"] = tasks
+    if planner_action == "INTAKE_SUMMARY":
+        result["task_id_registry"] = list(
+            dict.fromkeys([*_job_task_ids(state), *_task_ids(tasks)])
+        )
     
     # 如果是 PROCEED，生成消息
     if planner_action == "PROCEED":
@@ -590,9 +627,14 @@ def planner(state: State, config: RunnableConfig, **kwargs):
 
 def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     """等待用户确认计划，并按反馈或新增附件调整任务。"""
-    tasks = state.get("tasks", []) or []
+    active_tasks = state.get("tasks", []) or []
     planner_action = str(state.get("planner_action") or "")
     is_full_replan = planner_action in {"FULL_REPLAN", "FULL_REPLAN_REFINED"}
+    tasks = (
+        state.get("full_replan_candidate_tasks") or []
+        if is_full_replan
+        else active_tasks
+    )
     guidance_result = state.get("guidance") or {}
 
     if not guidance_result:
@@ -609,14 +651,36 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         )
 
     if planner_action == "FULL_REPLAN_ERROR":
-        interrupt(
+        resume_value = interrupt(
             {
                 "type": "needs_user_input",
                 "guidance_text": guidance_result.get("natural_language_guidance"),
                 "error": guidance_result.get("error"),
+                "accepted_choices": ["RETRY_FULL_REPLAN", "RESUME_OLD_PLAN", "CANCEL"],
             }
         )
-        return {"planner_action": "FULL_REPLAN_ERROR", "decision": "NEXT"}
+        if _error_resume_action(resume_value) == "RETRY_FULL_REPLAN":
+            if isinstance(resume_value, dict):
+                retry_text = str(resume_value.get("text") or "").strip()
+            else:
+                retry_text = str(resume_value or "").strip()
+            return {
+                "planner_action": "FULL_REPLAN_RETRY",
+                "decision": "NEXT",
+                "feedback": {
+                    "status": "BLOCKED",
+                    "issues": [{"description": retry_text, "suggestion": retry_text}],
+                },
+                "full_replan_reason": retry_text,
+                "guidance": {},
+                "full_replan_candidate_tasks": [],
+            }
+        return {
+            "planner_action": "PROCEED",
+            "decision": "NEXT",
+            "guidance": {},
+            **_clear_full_replan_staging(),
+        }
 
     structured_tasks = [
         {
@@ -679,7 +743,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                     intake_data,
                     config,
                 ),
-                list(state.get("full_replan_previous_task_ids") or []),
+                _job_task_ids(state),
             )
         except ValueError as exc:
             return {
@@ -695,9 +759,9 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         ]
         return {
             "messages": [feedback_message],
-            "tasks": refined_tasks,
             "cursor": int(state.get("cursor", 0) or 0),
             "planner_action": "FULL_REPLAN_REFINED",
+            "full_replan_candidate_tasks": refined_tasks,
             "guidance": _generate_plan_guidance(
                 refined_tasks, initial_resource_names, config
             ),
@@ -717,7 +781,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         try:
             tasks = _normalize_replacement_tasks(
                 tasks,
-                list(state.get("full_replan_previous_task_ids") or []),
+                _job_task_ids(state),
             )
         except ValueError as exc:
             return {
@@ -794,6 +858,10 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "guidance": {},
                 "final_result": {},
                 "decision": "NEXT",
+                "task_id_registry": list(
+                    dict.fromkeys([*_job_task_ids(state), *new_task_ids])
+                ),
+                **_clear_full_replan_staging(),
             }
         )
     return update
