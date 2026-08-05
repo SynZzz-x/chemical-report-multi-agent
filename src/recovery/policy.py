@@ -103,13 +103,15 @@ def _current_task_id(state: Dict[str, Any]) -> str:
 def _normalise_counter(counter: Any, state: Dict[str, Any]) -> Dict[str, int]:
     """Convert old cursor-keyed checkpoints into stable task-id keyed counts."""
     normalized: Dict[str, int] = {}
+    if not isinstance(counter, dict):
+        return normalized
     tasks = state.get("tasks") or []
     active_task_ids = {
         str(task.get("task_id"))
         for task in tasks
         if isinstance(task, dict) and task.get("task_id") is not None
     }
-    for key, value in (counter or {}).items():
+    for key, value in counter.items():
         task_id = None
         cursor_key = None
         if isinstance(key, str) and key in active_task_ids:
@@ -124,7 +126,13 @@ def _normalise_counter(counter: Any, state: Dict[str, Any]) -> Dict[str, int]:
                 task_id = str(task["task_id"])
         if task_id is None:
             task_id = str(key)
-        normalized[task_id] = int(value or 0)
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count < 0:
+            continue
+        normalized[task_id] = max(normalized.get(task_id, 0), count)
     return normalized
 
 

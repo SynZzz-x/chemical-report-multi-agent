@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import pytest
 
+from src.limits import MAX_PLAN_TASKS
 from src.recovery.plan_patch import PatchValidationError, apply_plan_patch, validate_plan_patch
 
 
@@ -482,3 +483,73 @@ def test_move_and_update_apply_in_order_and_record_history():
             "expected_resolution": "The prerequisite precedes its dependent task.",
         }
     ]
+
+
+def test_patch_rejects_one_hundred_inserts_atomically():
+    state = patch_state()
+    before = deepcopy(state)
+    inserted_ids = [f"TX{index}" for index in range(100)]
+    patch = insert_before_patch()
+    patch["operations"] = [
+        {
+            "op": "insert_before",
+            "before_task_id": "T3",
+            "task": task(task_id),
+        }
+        for task_id in inserted_ids
+    ]
+    patch["affected_task_ids"] = [*inserted_ids, "T3"]
+    patch["resume_task_id"] = inserted_ids[0]
+
+    with pytest.raises(PatchValidationError, match="maximum|limit"):
+        apply_plan_patch(state, patch)
+
+    assert state == before
+
+
+def test_patch_accepts_exactly_max_tasks_when_otherwise_valid():
+    state = patch_state()
+    state["tasks"] = [task(f"T{index}") for index in range(1, MAX_PLAN_TASKS + 1)]
+    state["task_revisions"] = {
+        item["task_id"]: 1 for item in state["tasks"]
+    }
+    patch = update_patch(task_id=f"T{MAX_PLAN_TASKS}")
+
+    update = apply_plan_patch(state, patch)
+
+    assert len(update["tasks"]) == MAX_PLAN_TASKS
+
+
+def test_patch_rejects_growth_beyond_max_tasks_atomically():
+    state = patch_state()
+    state["tasks"] = [task(f"T{index}") for index in range(1, MAX_PLAN_TASKS + 1)]
+    state["task_revisions"] = {
+        item["task_id"]: 1 for item in state["tasks"]
+    }
+    before = deepcopy(state)
+    patch = insert_before_patch(
+        before_task_id=f"T{MAX_PLAN_TASKS}", inserted_task_id="T65"
+    )
+    patch["affected_task_ids"] = ["T65", f"T{MAX_PLAN_TASKS}"]
+
+    with pytest.raises(PatchValidationError, match="maximum|limit"):
+        apply_plan_patch(state, patch)
+
+    assert state == before
+
+
+@pytest.mark.parametrize(
+    "counter_items",
+    [
+        [("2", 1), ("T3", 0)],
+        [("T3", 0), ("2", 1)],
+    ],
+)
+def test_patch_counter_aliases_merge_by_max_without_reopening_cap(counter_items):
+    state = patch_state(task_patch_count=dict(counter_items))
+    before = deepcopy(state)
+
+    with pytest.raises(PatchValidationError, match="task patch limit"):
+        apply_plan_patch(state, update_patch())
+
+    assert state == before

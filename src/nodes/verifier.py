@@ -170,6 +170,24 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     assessment = assessment if isinstance(assessment, dict) else {}
     tasks = state.get("tasks", []) or []
     cursor = int(state.get("cursor", 0) or 0)
+    collection_fields = ("issues", "requirements_met", "requirements_missing")
+    if any(not isinstance(assessment.get(field), list) for field in collection_fields):
+        return {
+            "status": "FAILED",
+            "current_section": assessment.get("current_section")
+            or _task_name(tasks, cursor),
+            "issues": [
+                {
+                    "code": "ASSESSMENT_CONTRACT_ERROR",
+                    "category": "VERIFIER_FAILURE",
+                    "description": "Verifier returned malformed collection fields.",
+                    "suggestion": "Retry automatic verification with a valid structured assessment.",
+                    "severity": "error",
+                }
+            ],
+            "requirements_met": [],
+            "requirements_missing": [],
+        }
     current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
     description = str(current_task.get("task_description") or "")
     requires_table = bool(current_task.get("generate_table")) or any(
@@ -181,7 +199,7 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
 
     issues: list[dict[str, Any]] = []
     valid_issue_seen = False
-    for raw_issue in assessment.get("issues") or []:
+    for raw_issue in assessment["issues"]:
         if isinstance(raw_issue, str):
             valid_issue_seen = True
             issue = {"code": raw_issue.upper(), "description": raw_issue}
@@ -215,7 +233,7 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             normalized["resource_name"] = resource_name
         issues.append(normalized)
 
-    requirements_missing = list(assessment.get("requirements_missing") or [])
+    requirements_missing = list(assessment["requirements_missing"])
     status = str(assessment.get("status") or "FAILED").strip().upper()
     if status not in {"PASS", "FAILED", "BLOCKED"}:
         status = "FAILED"
@@ -253,7 +271,7 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
         "status": status,
         "current_section": assessment.get("current_section") or _task_name(tasks, cursor),
         "issues": issues,
-        "requirements_met": list(assessment.get("requirements_met") or []),
+        "requirements_met": list(assessment["requirements_met"]),
         "requirements_missing": requirements_missing,
     }
 

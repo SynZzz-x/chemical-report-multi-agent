@@ -1,16 +1,18 @@
 from pathlib import Path
 
+from src.limits import MAX_PLAN_TASKS
 from src.recovery.policy import (
     MAX_CONTENT_RETRIES,
     MAX_EVIDENCE_RECOVERIES,
     MAX_JOB_PATCHES,
+    MAX_VERIFIER_RETRIES,
 )
 
 
-def test_nine_task_recursion_limit_covers_worst_bounded_recovery_with_margin():
+def test_runtime_budget_covers_maximum_plan_bounded_recovery_with_margin():
     from src.runtime_config import recursion_limit_for_tasks
 
-    task_count = 9
+    task_count = MAX_PLAN_TASKS
     estimated_supersteps = (
         8
         + task_count
@@ -18,13 +20,13 @@ def test_nine_task_recursion_limit_covers_worst_bounded_recovery_with_margin():
             3
             + 3 * MAX_CONTENT_RETRIES
             + 4 * MAX_EVIDENCE_RECOVERIES
-            + 2  # one verifier-only retry
+            + 2 * MAX_VERIFIER_RETRIES
         )
         + 4 * MAX_JOB_PATCHES
     )
 
-    assert recursion_limit_for_tasks(task_count) >= estimated_supersteps + 18
-    assert recursion_limit_for_tasks(task_count) < 1000
+    assert recursion_limit_for_tasks(9) == recursion_limit_for_tasks(task_count)
+    assert recursion_limit_for_tasks(task_count) >= estimated_supersteps + 2 * task_count
 
 
 def test_execution_config_scales_with_checkpoint_task_count_without_mutating_input():

@@ -6,6 +6,7 @@ from copy import deepcopy
 from os.path import basename
 from typing import Any, Dict, List, Mapping, Sequence
 
+from src.limits import MAX_PLAN_TASKS
 from src.tool_names import canonical_tool_name
 
 from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
@@ -122,7 +123,9 @@ def _normalise_tool_requirements(requirements: Any) -> List[str]:
 
 def _normalise_counter(counter: Any, tasks: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
     normalized: Dict[str, int] = {}
-    for key, value in (counter or {}).items():
+    if not isinstance(counter, Mapping):
+        return normalized
+    for key, value in counter.items():
         task_id = None
         cursor_key = None
         if isinstance(key, int) and not isinstance(key, bool):
@@ -133,7 +136,14 @@ def _normalise_counter(counter: Any, tasks: Sequence[Mapping[str, Any]]) -> Dict
             candidate = tasks[cursor_key].get("task_id")
             if candidate is not None:
                 task_id = str(candidate)
-        normalized[task_id or str(key)] = int(value or 0)
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count < 0:
+            continue
+        identifier = task_id or str(key)
+        normalized[identifier] = max(normalized.get(identifier, 0), count)
     return normalized
 
 
@@ -453,6 +463,15 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     operations = patch.get("operations")
     if not isinstance(operations, list) or not operations:
         raise PatchValidationError("operations must be a non-empty list")
+    if len(operations) > MAX_PLAN_TASKS:
+        raise PatchValidationError("plan patch operation limit exceeded")
+    insert_count = sum(
+        1
+        for operation in operations
+        if isinstance(operation, Mapping) and operation.get("op") == "insert_before"
+    )
+    if len(tasks) + insert_count > MAX_PLAN_TASKS:
+        raise PatchValidationError("plan task maximum exceeded")
 
     operation_task_ids: List[str] = []
     completed_ids = _completed_task_ids(state, tasks)

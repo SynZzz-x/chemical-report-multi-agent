@@ -1,3 +1,5 @@
+import pytest
+
 from src.recovery.policy import (
     IssueCategory,
     WorkflowAction,
@@ -138,6 +140,45 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
 
     assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
     assert decision["task_retry_count"] == {"0": 2}
+
+
+@pytest.mark.parametrize(
+    "counter_items",
+    [
+        [("0", 2), ("T1", 1)],
+        [("T1", 1), ("0", 2)],
+    ],
+)
+@pytest.mark.parametrize(
+    ("counter_field", "assessment", "expected_action"),
+    [
+        (
+            "task_retry_count",
+            assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+            WorkflowAction.ACCEPT_WITH_WARNING,
+        ),
+        (
+            "evidence_recovery_count",
+            assessment_with("MISSING_EVIDENCE", "EVIDENCE_GAP"),
+            WorkflowAction.NEEDS_USER_INPUT,
+        ),
+        (
+            "verifier_retry_count",
+            assessment_with("ASSESSMENT_CONTRACT_ERROR", "VERIFIER_FAILURE"),
+            WorkflowAction.NEEDS_USER_INPUT,
+        ),
+    ],
+)
+def test_json_counter_aliases_merge_by_max_without_reopening_caps(
+    counter_items, counter_field, assessment, expected_action
+):
+    state = recovery_state(task_id="T1")
+    state[counter_field] = dict(counter_items)
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == expected_action
+    assert decision[counter_field] == {"T1": 2}
 
 
 def test_pass_commits_current_result_once_and_uses_done_at_final_task():

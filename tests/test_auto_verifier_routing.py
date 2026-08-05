@@ -242,3 +242,44 @@ def test_assessment_contract_error_never_consumes_worker_content_retries():
     assert first["task_retry_count"] == state["task_retry_count"]
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
     assert second["task_retry_count"] == state["task_retry_count"]
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("requirements_missing", "citation"),
+        ("issues", {"code": "LLM_ERROR"}),
+        ("requirements_met", {"citation": True}),
+    ],
+)
+def test_malformed_assessment_collections_use_bounded_verifier_retry_only(
+    field, malformed_value
+):
+    state = _state()
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": [],
+        "requirements_missing": [],
+        field: malformed_value,
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+    first = decide_recovery_action(state, sanitized)
+    second = decide_recovery_action({**state, **first}, sanitized)
+
+    assert sanitized["status"] == "FAILED"
+    assert sanitized["issues"] == [
+        {
+            "code": "ASSESSMENT_CONTRACT_ERROR",
+            "category": "VERIFIER_FAILURE",
+            "description": "Verifier returned malformed collection fields.",
+            "suggestion": "Retry automatic verification with a valid structured assessment.",
+            "severity": "error",
+        }
+    ]
+    assert first["workflow_action"] == "RETRY_VERIFIER"
+    assert first["task_retry_count"] == state["task_retry_count"]
+    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["task_retry_count"] == state["task_retry_count"]

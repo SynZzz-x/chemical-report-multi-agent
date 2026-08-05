@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from src.limits import MAX_PLAN_TASKS
 from src.recovery.policy import (
     MAX_CONTENT_RETRIES,
     MAX_EVIDENCE_RECOVERIES,
@@ -12,7 +13,6 @@ from src.recovery.policy import (
 )
 
 
-DEFAULT_PLANNED_TASKS = 9
 _FIXED_SUPERSTEPS = 8
 _BASE_TASK_SUPERSTEPS = 3  # Worker -> Verifier -> DecisionPolicy
 _CONTENT_RETRY_SUPERSTEPS = 3
@@ -22,12 +22,8 @@ _PLAN_PATCH_SUPERSTEPS = 4
 
 
 def recursion_limit_for_tasks(task_count: int | None = None) -> int:
-    """Return a bounded limit covering all configured recovery paths plus margin."""
-    try:
-        requested = max(0, int(task_count or 0))
-    except (TypeError, ValueError):
-        requested = 0
-    tasks = max(DEFAULT_PLANNED_TASKS, requested)
+    """Return the fixed budget covering the largest accepted bounded plan."""
+    tasks = MAX_PLAN_TASKS
     estimated = (
         _FIXED_SUPERSTEPS
         + tasks

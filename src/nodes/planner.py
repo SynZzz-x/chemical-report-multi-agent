@@ -10,6 +10,8 @@ from typing import Dict, Any, List
 
 from ..state import State, merge_docs
 from ..llm import get_llm
+from ..limits import MAX_PLAN_TASKS
+from ..tool_names import canonical_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,8 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
     """Reject malformed replacement tasks before assigning stable IDs."""
     if not isinstance(candidate_tasks, list) or not candidate_tasks:
         raise ValueError("Replacement plan must contain at least one task")
+    if len(candidate_tasks) > MAX_PLAN_TASKS:
+        raise ValueError(f"Replacement plan exceeds {MAX_PLAN_TASKS} tasks")
     for task in candidate_tasks:
         if not isinstance(task, dict):
             raise ValueError("Replacement tasks must be objects")
@@ -171,6 +175,25 @@ def _normalize_replacement_tasks(
     next_number = _next_task_number(list(used_ids))
     for candidate in candidate_tasks:
         task = dict(candidate)
+        if "tool_requirements" in task:
+            canonical_requirements = [
+                canonical_tool_name(requirement)
+                for requirement in task["tool_requirements"]
+            ]
+            if any(requirement is None for requirement in canonical_requirements):
+                raise ValueError("tool_requirements contains an invalid tool requirement")
+            task["tool_requirements"] = canonical_requirements
+            visualization = task.get("visualization")
+            web_allowed = (
+                task.get("use_web") is True
+                or task.get("allow_web_fallback") is True
+                or (
+                    isinstance(visualization, dict)
+                    and visualization.get("allow_web_fallback") is True
+                )
+            )
+            if "spider_tool" in canonical_requirements and not web_allowed:
+                raise ValueError("spider_tool requires explicit web permission")
         task_id = str(task.get("task_id") or "").strip()
         if not task_id or task_id in used_ids:
             while f"T{next_number}" in used_ids:
@@ -416,16 +439,43 @@ def _ensure_use_resources_paths(tasks, resources):
     return tasks
 
 
+def _fallback_initial_tasks(intake_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a deterministic bounded initial plan after invalid model output."""
+    resource_paths = []
+    for resource in intake_obj.get("resources", []) or []:
+        if not isinstance(resource, dict):
+            continue
+        value = resource.get("path") or resource.get("file_path") or resource.get("name")
+        if value:
+            resource_paths.append(value)
+    sections = intake_obj.get("sections")
+    if not isinstance(sections, list):
+        sections = []
+    normalized_sections = [
+        section.strip()
+        for section in sections
+        if isinstance(section, str) and section.strip()
+    ] or ["摘要", "背景与意义"]
+    fallback = [
+        {
+            "task_id": f"T{index}",
+            "task_name": section,
+            "task_description": f"围绕 {section} 生成占位内容。",
+            "generate_figure": False,
+            "generate_table": False,
+            "use_resources": resource_paths,
+        }
+        for index, section in enumerate(
+            normalized_sections[:MAX_PLAN_TASKS], start=1
+        )
+    ]
+    return _normalize_replacement_tasks(fallback, [])
+
+
 def _build_tasks_with_llm(intake_obj, config):
     """初始规划：基于 Intake 摘要与统一 Prompt 生成任务列表。"""
     resource_objs = intake_obj.get("resources", []) or []
     resources = _normalize_resources(resource_objs)
-    resource_paths = []
-    for r in resource_objs:
-        if isinstance(r, dict):
-            p = r.get("path") or r.get("file_path") or r.get("name")
-            if p:
-                resource_paths.append(p)
     sections = intake_obj.get("sections") or []
     task_type = intake_obj.get("task_type") or "analysis"
     title = intake_obj.get("title") or "未知项目"
@@ -454,20 +504,10 @@ def _build_tasks_with_llm(intake_obj, config):
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("bad tasks")
         tasks = _ensure_use_resources_paths(tasks, resource_objs)
-        return tasks
+        return _normalize_replacement_tasks(tasks, [])
     except Exception as e:
         logger.error(f"Error in _build_tasks_with_llm: {e}")
-        fallback = []
-        for i, sec in enumerate(sections or ["摘要", "背景与意义"]):
-            fallback.append({
-                "task_id": f"T{i+1}",
-                "task_name": sec,
-                "task_description": f"围绕 {sec} 生成占位内容。",
-                "generate_figure": False,
-                "generate_table": False,
-                "use_resources": resource_paths,
-            })
-        return fallback
+        return _fallback_initial_tasks(intake_obj)
 
 
 def _get_intake_data(state):
@@ -787,6 +827,15 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     )
     guidance_result = state.get("guidance") or {}
 
+    if is_full_replan:
+        try:
+            tasks = _normalize_replacement_tasks(tasks, _job_task_ids(state))
+        except ValueError as exc:
+            return {
+                "planner_action": "FULL_REPLAN_ERROR",
+                "guidance": _full_replan_error_guidance(exc),
+            }
+
     if not guidance_result:
         intake_data = _get_intake_data(state)
         initial_resource_names = [
@@ -834,8 +883,13 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
 
     structured_tasks = [
         {
+            "task_id": task.get("task_id"),
             "task_name": task.get("task_name"),
             "task_description": task.get("task_description"),
+            "tool_requirements": task.get("tool_requirements") or [],
+            "use_web": task.get("use_web") is True,
+            "allow_web_fallback": task.get("allow_web_fallback") is True,
+            "visualization": task.get("visualization"),
         }
         for task in tasks
     ]

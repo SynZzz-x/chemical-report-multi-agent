@@ -3,6 +3,7 @@ import json
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.limits import MAX_PLAN_TASKS
 from src.nodes import planner as planner_module
 from src.nodes.planner import planner, planner_confirm
 from src.nodes.recovery import automatic_planner
@@ -452,6 +453,49 @@ def test_malformed_refined_full_replan_candidate_is_recoverable_error(monkeypatc
     assert "plan_revision" not in update
 
 
+def test_oversized_full_replan_candidate_is_recoverable_without_mutation(monkeypatch):
+    state = _full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: [
+            _replacement_task(f"T{index}", f"替换任务 {index}")
+            for index in range(1, MAX_PLAN_TASKS + 2)
+        ],
+    )
+
+    update = planner(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert update["tasks"] == state["tasks"]
+    assert "full_replan_candidate_tasks" not in update
+    assert "plan_revision" not in update
+
+
+def test_oversized_refined_full_replan_candidate_is_recoverable(monkeypatch):
+    state = _staged_full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda _: {"action": "REFINE", "text": "扩展计划", "docs": []},
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "_refine_tasks",
+        lambda *_: [
+            _replacement_task(f"T{index}", f"细化任务 {index}")
+            for index in range(1, MAX_PLAN_TASKS + 2)
+        ],
+    )
+
+    update = planner_confirm(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert "tasks" not in update
+    assert "results" not in update
+    assert "plan_revision" not in update
+
+
 def test_full_replan_refinement_model_error_is_recoverable(monkeypatch):
     state = _staged_full_replan_state()
     monkeypatch.setattr(
@@ -548,6 +592,107 @@ class _ReplanModel:
         if self.error is not None:
             raise self.error
         return _ReplanResponse(self.response)
+
+
+def test_initial_plan_rejects_oversized_generation_and_uses_bounded_fallback(
+    monkeypatch,
+):
+    oversized = [
+        _replacement_task(f"T{index}", f"初始任务 {index}")
+        for index in range(1, MAX_PLAN_TASKS + 2)
+    ]
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_: _ReplanModel(json.dumps(oversized, ensure_ascii=False)),
+    )
+
+    tasks = planner_module._build_tasks_with_llm(
+        {"sections": ["摘要", "结论"], "resources": []}, {}
+    )
+
+    assert len(tasks) == 2
+    assert [task["task_name"] for task in tasks] == ["摘要", "结论"]
+
+
+def test_initial_plan_accepts_exactly_max_tasks(monkeypatch):
+    candidates = [
+        _replacement_task(f"T{index}", f"初始任务 {index}")
+        for index in range(1, MAX_PLAN_TASKS + 1)
+    ]
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_: _ReplanModel(json.dumps(candidates, ensure_ascii=False)),
+    )
+
+    tasks = planner_module._build_tasks_with_llm({"resources": []}, {})
+
+    assert len(tasks) == MAX_PLAN_TASKS
+
+
+def test_full_replan_rejects_spider_alias_without_web_authorization(monkeypatch):
+    state = _full_replan_state()
+    monkeypatch.setattr(
+        planner_module,
+        "_build_tasks_from_replan_feedback",
+        lambda *_: [_replacement_task(tool_requirements=["SpiderTool"])],
+    )
+
+    update = planner(state, {})
+
+    assert update["planner_action"] == "FULL_REPLAN_ERROR"
+    assert update["tasks"] == state["tasks"]
+    assert "full_replan_candidate_tasks" not in update
+
+
+@pytest.mark.parametrize(
+    "web_authorization",
+    [
+        {"use_web": True},
+        {"allow_web_fallback": True},
+        {"visualization": {"allow_web_fallback": True}},
+    ],
+)
+def test_full_replan_canonicalizes_authorized_spider_alias(web_authorization):
+    normalized = planner_module._normalize_replacement_tasks(
+        [
+            _replacement_task(
+                tool_requirements=["SpiderTool"],
+                **web_authorization,
+            )
+        ],
+        ["T1", "T2"],
+    )
+
+    assert normalized[0]["tool_requirements"] == ["spider_tool"]
+
+
+def test_full_replan_confirmation_exposes_tool_and_web_requirements(monkeypatch):
+    state = _staged_full_replan_state()
+    state["full_replan_candidate_tasks"] = [
+        _replacement_task(
+            tool_requirements=["SpiderTool"],
+            use_web=True,
+            allow_web_fallback=False,
+            visualization={"allow_web_fallback": False},
+        )
+    ]
+    payloads = []
+    monkeypatch.setattr(
+        planner_module,
+        "interrupt",
+        lambda payload: payloads.append(payload)
+        or {"action": "CANCEL", "text": "取消", "docs": []},
+    )
+
+    planner_confirm(state, {})
+
+    displayed = payloads[0]["structured_msg"]["tasks"][0]
+    assert displayed["tool_requirements"] == ["spider_tool"]
+    assert displayed["use_web"] is True
+    assert displayed["allow_web_fallback"] is False
+    assert displayed["visualization"] == {"allow_web_fallback": False}
 
 
 @pytest.mark.parametrize(
