@@ -163,6 +163,8 @@ def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCatego
         return IssueCategory.CONTENT_DEFECT
 
     category = str(issue.get("category") or "").strip().upper()
+    if category == IssueCategory.LOCAL_PLAN_DEFECT.value:
+        return IssueCategory.EXTERNAL_BLOCKER
     try:
         return IssueCategory(category)
     except ValueError:

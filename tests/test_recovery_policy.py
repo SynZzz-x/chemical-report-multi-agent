@@ -221,3 +221,50 @@ def test_only_explicit_auto_fixable_codes_are_local_plan_defects():
             classify_assessment(assessment_with(code, None), state)
             is IssueCategory.LOCAL_PLAN_DEFECT
         )
+
+
+def test_unknown_code_cannot_use_llm_local_plan_defect_category():
+    state = recovery_state(task_id="T2")
+    assessment = assessment_with("UNRECOGNIZED_CODE", "LOCAL_PLAN_DEFECT")
+
+    assert classify_assessment(assessment, state) is IssueCategory.EXTERNAL_BLOCKER
+    assert (
+        decide_recovery_action(state, assessment)["workflow_action"]
+        == WorkflowAction.NEEDS_USER_INPUT
+    )
+
+
+def test_blank_code_cannot_use_llm_local_plan_defect_category():
+    state = recovery_state(task_id="T2")
+    assessment = assessment_with("", "LOCAL_PLAN_DEFECT")
+
+    assert classify_assessment(assessment, state) is IssueCategory.EXTERNAL_BLOCKER
+    assert (
+        decide_recovery_action(state, assessment)["workflow_action"]
+        == WorkflowAction.NEEDS_USER_INPUT
+    )
+
+
+def test_content_retry_overflow_continues_next_for_a_non_final_task():
+    state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
+    state["tasks"].append({"task_id": "T3", "use_resources": []})
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["continuation_action"] == WorkflowAction.NEXT
+
+
+def test_content_retry_overflow_continues_done_for_a_final_task():
+    state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["continuation_action"] == WorkflowAction.DONE
