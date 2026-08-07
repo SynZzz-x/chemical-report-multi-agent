@@ -63,6 +63,7 @@ Intake
        PASS              -> TaskController
        REVISE            -> Worker
        EVIDENCE_REQUIRED -> EvidenceRecovery -> Worker
+       LOCAL_PLAN_PATCH  -> PlanPatcher -> TaskController
        BLOCKED           -> HumanReview
        REVIEW_RETRY       -> QualityReview
   -> Summarizer
@@ -214,6 +215,8 @@ revision_instruction
 - `EVIDENCE_GAP`；
 - `DATA_DEFECT`；
 - `VISUAL_DEFECT`；
+- `WORKER_FAILURE`；
+- `LOCAL_PLAN_DEFECT`；
 - `SAFETY_BOUNDARY`；
 - `REQUIREMENT_MISSING`；
 - `EXTERNAL_BLOCKER`；
@@ -265,6 +268,8 @@ created_at
 达到上限后进入 `BLOCKED -> HumanReview`，不得强制通过。该规则替代《有界计划恢复与局部修补设计》中内容返工超限后 `ACCEPT_WITH_WARNING` 的行为；警告可以保留，但不能自动把任务标记为通过。
 
 QualityReview 服务故障必须分类为 `REVIEW_FAILURE`，不得把 Worker 产物误判为内容失败。Summarizer 或某种报告格式失败不得重新执行 Planner、Worker 或 QualityReview。
+
+`LOCAL_PLAN_DEFECT` 仅允许调用现有 PlanPatcher 修补当前或未完成任务的资源分配、依赖顺序和局部要求。补丁必须继续遵守既有校验与次数上限，完成后返回 TaskController；它不是完整 replan，不能替换整套计划或重置已经通过的任务。
 
 ## 9. Replan 的唯一语义
 
