@@ -110,6 +110,19 @@ class State(TypedDict, total=False):
     full_replan_candidate_tasks: List[Dict[str, Any]]
     task_id_registry: List[str]
 
+    # Auditable report-pipeline records. Legacy cursor/results remain during
+    # migration, but task_records is the progression source of truth.
+    task_records: Dict[str, Dict[str, Any]]
+    artifacts: Dict[str, Dict[str, Any]]
+    active_artifact_ids: Dict[str, str]
+    review_record: Dict[str, Any]
+    review_records: List[Dict[str, Any]]
+    report_manifest: Dict[str, Any]
+    current_execution_id: str
+    controller_action: str
+    worker_retry_count: Dict[str, int]
+    web_authorized: bool
+
 
 class ConfigSchema(TypedDict, total=False):
     """模型参数定义。"""
