@@ -13,6 +13,7 @@ from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
 from ..task_contract import task_allows_web
 from ..tool_names import canonical_tool_name
+from ..workflow_records import ensure_task_records
 
 logger = logging.getLogger(__name__)
 
@@ -759,11 +760,9 @@ def planner(state: State, config: RunnableConfig, **kwargs):
             overview = "已按用户请求生成替换计划，等待确认后执行。"
     
     elif planner_action == "PROCEED":
-        # 如果是 PROCEED 且有明确的 PROCEED 指令，移动 cursor
-        # 这里的逻辑可能需要根据实际 graph 流转调整，目前假设 PROCEED 时 Verifier 已决定 NEXT
-        if parsed and parsed.get("type") == "PROCEED" and decision == "NEXT":
-             cursor = min(cursor + 1, max(len(tasks) - 1, 0))
-        overview = "继续执行下一任务。"
+        # TaskController is the sole owner of task progression. Planner keeps
+        # the approved plan stable and never advances cursor from messages.
+        overview = "保持既有计划，由任务控制器继续执行。"
         
         # 兜底：如果 tasks 为空
         if not tasks:
@@ -787,6 +786,9 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     if planner_action == "INTAKE_SUMMARY":
         result["task_id_registry"] = list(
             dict.fromkeys([*_job_task_ids(state), *_task_ids(tasks)])
+        )
+        result["task_records"] = ensure_task_records(
+            {"tasks": tasks, "results": []}
         )
     
     # 如果是 PROCEED，生成消息
@@ -1070,6 +1072,15 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         "messages": [feedback_message, message],
         "tasks": tasks,
         "cursor": 0,
+        "task_records": ensure_task_records(
+            {
+                "tasks": tasks,
+                "results": [] if is_full_replan else state.get("results") or [],
+                "task_records": {}
+                if is_full_replan
+                else state.get("task_records") or {},
+            }
+        ),
         # 只提交本轮新增附件，State.merge_docs 会负责合并。
         "docs": resumed_docs,
     }
@@ -1111,6 +1122,17 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "task_revisions": task_revisions,
                 "current_result": {},
                 "results": [],
+                "task_records": ensure_task_records(
+                    {"tasks": tasks, "results": [], "task_records": {}}
+                ),
+                "artifacts": {},
+                "active_artifact_ids": {},
+                "review_record": {},
+                "review_records": [],
+                "report_manifest": {},
+                "current_execution_id": "",
+                "controller_action": "",
+                "worker_retry_count": {},
                 "all_results": [],
                 "current_task": {},
                 "worker_state": {},

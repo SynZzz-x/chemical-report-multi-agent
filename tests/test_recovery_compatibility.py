@@ -302,7 +302,7 @@ def test_automatic_planner_filters_full_replan_controls(monkeypatch):
     update = automatic_planner(state, {})
 
     assert update["planner_action"] == "PROCEED"
-    assert update["cursor"] == 2
+    assert update["cursor"] == 1
 
 
 def test_automatic_planner_clears_restored_full_replan_retry_state(monkeypatch):
@@ -327,7 +327,7 @@ def test_automatic_planner_clears_restored_full_replan_retry_state(monkeypatch):
     update = automatic_planner(state, {})
 
     assert update["planner_action"] == "PROCEED"
-    assert update["cursor"] == 2
+    assert update["cursor"] == 1
     assert update["full_replan_previous_task_ids"] == []
     assert update["full_replan_reason"] == ""
     assert update["full_replan_candidate_tasks"] == []

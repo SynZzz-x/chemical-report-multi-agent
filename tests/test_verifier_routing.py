@@ -4,6 +4,7 @@ import pytest
 
 from src.nodes import verifier_manual as manual_verifier_module
 from src.nodes.planner import planner
+from src.nodes.task_controller import task_controller
 from src.nodes.verifier_manual import decision, verifier_manual
 
 
@@ -67,8 +68,9 @@ def test_manual_approval_bypasses_llm_and_advances_to_next_task(
     control_message = json.loads(verifier_update["messages"][-1].content)
     assert control_message["type"] == "PROCEED"
 
-    planner_update = planner({**state, **verifier_update}, {})
-    assert planner_update["cursor"] == 1
+    controller_update = task_controller({**state, **verifier_update}, {})
+    assert controller_update["cursor"] == 1
+    assert controller_update["current_task"]["task_id"] == "T2"
 
 
 @pytest.mark.parametrize("decision_alias", ["NEXT", "CONTINUE"])

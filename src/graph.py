@@ -18,6 +18,7 @@ from .nodes.recovery import (
 )
 from .nodes.summarizer_v2 import summarizer
 from .nodes.exiting import exiting
+from .nodes.task_controller import route_task_controller, task_controller
 # from .nodes.worker.agent.graph import router_node, execute_task_node, generate_result_node, route_decision
 from .nodes.worker.agent.graph import create_worker_workflow
 
@@ -33,7 +34,7 @@ class WorkflowState(State, total=False):
 def route_planner(state: State):
     action = state.get("planner_action")
     if action == "PROCEED":
-        return "Worker"
+        return "TaskController"
     return "Planner_Confirm"
 
 
@@ -46,14 +47,14 @@ def route_planner_confirm(state: State):
         "FULL_REPLAN_ERROR",
     }:
         return "Planner_Confirm"
-    return "Worker"
+    return "TaskController"
 
 
 _MANUAL_VERIFIER_ROUTES = {
     "RETRY_WORKER": "Worker",
     "FULL_REPLAN": "Planner",
-    "NEXT": "Planner",
-    "DONE": "Summarizer",
+    "NEXT": "TaskController",
+    "DONE": "TaskController",
 }
 
 
@@ -91,7 +92,18 @@ class WorkFlowBase(StateGraph):
             {
                 "Planner": "Planner",
                 "Planner_Confirm": "Planner_Confirm",
+                "TaskController": "TaskController",
+            },
+        )
+
+        self.add_node("TaskController", task_controller)
+        self.add_conditional_edges(
+            "TaskController",
+            route_task_controller,
+            {
                 "Worker": "Worker",
+                "Summarizer": "Summarizer",
+                "NeedsUserInput": "NeedsUserInput",
             },
         )
         
@@ -108,8 +120,8 @@ class WorkFlowBase(StateGraph):
                 "DecisionPolicy",
                 route_policy,
                 {
-                    "NEXT": "Planner",
-                    "DONE": "Summarizer",
+                    "NEXT": "TaskController",
+                    "DONE": "TaskController",
                     "REWORK": "Worker",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
@@ -118,30 +130,6 @@ class WorkFlowBase(StateGraph):
                 },
             )
 
-            self.add_node("EvidenceRecovery", evidence_recovery)
-            self.add_edge("EvidenceRecovery", "Worker")
-
-            self.add_node("PlanPatcher", plan_patcher)
-            self.add_conditional_edges(
-                "PlanPatcher",
-                route_after_blocker,
-                {
-                    "REWORK": "Worker",
-                    "NEEDS_USER_INPUT": "NeedsUserInput",
-                },
-            )
-
-            self.add_node("NeedsUserInput", needs_user_input)
-            self.add_conditional_edges(
-                "NeedsUserInput",
-                route_after_blocker,
-                {
-                    "REWORK": "Worker",
-                    "EVIDENCE_RECOVERY": "EvidenceRecovery",
-                    "NEXT": "Planner",
-                    "DONE": "Summarizer",
-                },
-            )
         else:
             self.add_node("Verifier", verifier_manual, metadata={"type":"manual"})
             self.add_conditional_edges(
@@ -149,6 +137,32 @@ class WorkFlowBase(StateGraph):
                 decision,
                 _MANUAL_VERIFIER_ROUTES,
             )
+
+        # Recovery/HumanReview nodes are shared by automatic and manual modes.
+        self.add_node("EvidenceRecovery", evidence_recovery)
+        self.add_edge("EvidenceRecovery", "Worker")
+
+        self.add_node("PlanPatcher", plan_patcher)
+        self.add_conditional_edges(
+            "PlanPatcher",
+            route_after_blocker,
+            {
+                "REWORK": "Worker",
+                "NEEDS_USER_INPUT": "NeedsUserInput",
+            },
+        )
+
+        self.add_node("NeedsUserInput", needs_user_input)
+        self.add_conditional_edges(
+            "NeedsUserInput",
+            route_after_blocker,
+            {
+                "REWORK": "Worker",
+                "EVIDENCE_RECOVERY": "EvidenceRecovery",
+                "NEXT": "TaskController",
+                "DONE": "TaskController",
+            },
+        )
 
         self.add_node("Summarizer", summarizer)
         self.add_edge("Summarizer", "Exit")

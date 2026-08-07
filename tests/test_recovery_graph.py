@@ -706,7 +706,7 @@ def test_automatic_planner_filters_legacy_replan_without_resetting_cursor(monkey
     update = automatic_planner(state, {})
 
     assert update["planner_action"] == "PROCEED"
-    assert update["cursor"] == 2
+    assert update["cursor"] == 1
     assert update["cursor"] != 0
     assert state["decision"] == "REPLAN"
     assert state["messages"] == [proceed, legacy_replan]
