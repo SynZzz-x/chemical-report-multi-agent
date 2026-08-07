@@ -146,7 +146,11 @@ def test_tool_manager_accepts_only_supported_exact_spider_aliases(requirement):
     manager = _spider_only_manager(initialized)
 
     tools = manager.get_available_tools_for_task(
-        {"use_web": True, "tool_requirements": [requirement]}
+        {
+            "use_web": True,
+            "tool_requirements": [requirement],
+            "_job_web_authorized": True,
+        }
     )
 
     assert [tool.name for tool in tools] == ["spider_tool"]
@@ -188,7 +192,11 @@ def test_tool_manager_accepts_spider_only_with_explicit_web_access(authorization
     manager = _spider_only_manager(initialized)
 
     tools = manager.get_available_tools_for_task(
-        {"tool_requirements": ["spider_tool"], **authorization}
+        {
+            "tool_requirements": ["spider_tool"],
+            "_job_web_authorized": True,
+            **authorization,
+        }
     )
 
     assert [tool.name for tool in tools] == ["spider_tool"]
@@ -327,7 +335,11 @@ def test_concept_graph_uses_web_provider_only_with_explicit_authorization(
         "required_concepts": ["alpha"],
         "web_queries": ["alpha"],
     }
-    task = {"task_name": "Authorized graph", "visualization": visualization}
+    task = {
+        "task_name": "Authorized graph",
+        "visualization": visualization,
+        "_job_web_authorized": True,
+    }
     if authorization.get("visualization_allow_web") is True:
         visualization["allow_web_fallback"] = True
     else:

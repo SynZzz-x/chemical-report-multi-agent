@@ -71,6 +71,7 @@ def graph_state(*, cursor=1, accepted_ids=("T1",), **overrides):
         "pending_user_action": {},
         "plan_patch_history": [],
         "verification_warnings": [],
+        "web_authorized": True,
         "active_artifact_ids": {
             tasks[cursor]["task_id"]: f"A-{tasks[cursor]['task_id']}"
         },
@@ -535,7 +536,9 @@ def test_worker_preserves_task_web_access_when_feedback_has_no_web_override():
         }
     }
 
-    execution_task, _, _ = AutonomousToolNode._prepare_execution_task(task, worker_state)
+    execution_task, _, _ = AutonomousToolNode._prepare_execution_task(
+        task, worker_state, job_authorized=True
+    )
 
     assert execution_task["use_web"] is True
     assert "spider_tool" in execution_task["tool_requirements"]

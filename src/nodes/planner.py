@@ -109,6 +109,36 @@ _REPLACEMENT_TASK_FIELDS = {
 }
 
 
+def _apply_job_web_authorization(
+    tasks: List[Dict[str, Any]], *, job_authorized: bool
+) -> List[Dict[str, Any]]:
+    """Apply the immutable job-level public-web gate to planned tasks."""
+    normalized = []
+    for candidate in tasks or []:
+        task = dict(candidate)
+        visualization = task.get("visualization")
+        if isinstance(visualization, dict):
+            task["visualization"] = dict(visualization)
+        if job_authorized is not True:
+            if "use_web" in task:
+                task["use_web"] = False
+            if "allow_web_fallback" in task:
+                task["allow_web_fallback"] = False
+            if (
+                isinstance(task.get("visualization"), dict)
+                and "allow_web_fallback" in task["visualization"]
+            ):
+                task["visualization"]["allow_web_fallback"] = False
+            if "tool_requirements" in task:
+                task["tool_requirements"] = [
+                    requirement
+                    for requirement in task.get("tool_requirements") or []
+                    if canonical_tool_name(requirement) != "spider_tool"
+                ]
+        normalized.append(task)
+    return normalized
+
+
 def _validate_string_list(value: Any, field: str) -> None:
     if not isinstance(value, list) or any(
         not isinstance(item, str) or not item.strip() for item in value
@@ -185,7 +215,9 @@ def _normalize_replacement_tasks(
             if any(requirement is None for requirement in canonical_requirements):
                 raise ValueError("tool_requirements contains an invalid tool requirement")
             task["tool_requirements"] = canonical_requirements
-            if "spider_tool" in canonical_requirements and not task_allows_web(task):
+            if "spider_tool" in canonical_requirements and not task_allows_web(
+                task, job_authorized=True
+            ):
                 raise ValueError("spider_tool requires explicit web permission")
         task_id = str(task.get("task_id") or "").strip()
         if not task_id or task_id in used_ids:
@@ -770,6 +802,11 @@ def planner(state: State, config: RunnableConfig, **kwargs):
             cursor = 0
             overview = "使用默认任务列表。"
 
+    tasks = _apply_job_web_authorization(
+        tasks,
+        job_authorized=state.get("web_authorized") is True,
+    )
+
     # 返回结果
     result = {
         "cursor": cursor,
@@ -832,6 +869,10 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         state.get("full_replan_candidate_tasks") or []
         if is_full_replan
         else active_tasks
+    )
+    tasks = _apply_job_web_authorization(
+        tasks,
+        job_authorized=state.get("web_authorized") is True,
     )
     guidance_result = state.get("guidance") or {}
 
@@ -980,6 +1021,10 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 ),
                 _job_task_ids(state),
             )
+            refined_tasks = _apply_job_web_authorization(
+                refined_tasks,
+                job_authorized=state.get("web_authorized") is True,
+            )
         except ValueError as exc:
             return {
                 "planner_action": "FULL_REPLAN_ERROR",
@@ -1016,6 +1061,10 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                     True,
                 ),
                 [],
+            )
+            refined_tasks = _apply_job_web_authorization(
+                refined_tasks,
+                job_authorized=state.get("web_authorized") is True,
             )
         except ValueError as exc:
             return {

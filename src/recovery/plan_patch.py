@@ -292,7 +292,9 @@ def _validate_task_fields(
             )
 
 
-def _validate_task_consistency(task: Mapping[str, Any]) -> None:
+def _validate_task_consistency(
+    task: Mapping[str, Any], *, job_authorized: bool
+) -> None:
     raw_requirements = task.get("tool_requirements")
     if raw_requirements is None:
         return
@@ -308,7 +310,7 @@ def _validate_task_consistency(task: Mapping[str, Any]) -> None:
     if spider_requirement is None:
         return
 
-    if not task_allows_web(task):
+    if not task_allows_web(task, job_authorized=job_authorized):
         raise PatchValidationError(
             f"{spider_requirement} requires explicit web permission"
         )
@@ -509,7 +511,10 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     simulated_tasks = deepcopy(tasks)
     _apply_operations(simulated_tasks, operation_copies)
     for task in simulated_tasks:
-        _validate_task_consistency(task)
+        _validate_task_consistency(
+            task,
+            job_authorized=state.get("web_authorized") is True,
+        )
 
     affected_task_ids = _affected_task_ids(patch, known_ids)
     affected_set = set(affected_task_ids)

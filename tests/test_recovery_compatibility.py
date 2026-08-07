@@ -53,6 +53,7 @@ def _full_replan_state():
             )
         ],
         "decision": "FULL_REPLAN",
+        "web_authorized": True,
     }
 
 
@@ -182,6 +183,7 @@ def test_modified_initial_plan_is_staged_and_requires_second_confirmation(monkey
         "planner_action": "INTAKE_SUMMARY",
         "guidance": {"natural_language_guidance": "请确认初始计划"},
         "messages": [],
+        "web_authorized": True,
     }
     revised = [
         _replacement_task(

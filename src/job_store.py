@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from langgraph.store.base import BaseStore
+if TYPE_CHECKING:
+    from langgraph.store.base import BaseStore
+else:
+    BaseStore = Any
 
 
 JobStatus = Literal["created", "running", "waiting", "completed", "failed"]
@@ -40,6 +43,7 @@ class JobStore:
         job_id: str,
         title: str,
         verifier_mode: str,
+        web_authorized: bool = False,
         ui_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         now = utc_now_iso()
@@ -49,6 +53,7 @@ class JobStore:
             "job_id": job_id,
             "title": " ".join(title.split())[:120] or "未命名任务",
             "verifier_mode": verifier_mode,
+            "web_authorized": web_authorized is True,
             "status": "created",
             "created_at": now,
             "updated_at": now,
@@ -92,6 +97,7 @@ class JobStore:
             "conversation_id",
             "job_id",
             "verifier_mode",
+            "web_authorized",
             "created_at",
         }
         immutable_changes = immutable_fields.intersection(changes)

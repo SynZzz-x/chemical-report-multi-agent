@@ -264,7 +264,10 @@ def evidence_recovery(state: State, config: RunnableConfig, **kwargs) -> dict[st
         "issues": issues,
         "instructions": instructions,
         "recovery_query": recovery_query,
-        "allow_web": task_allows_web(_current_task(state)),
+        "allow_web": task_allows_web(
+            _current_task(state),
+            job_authorized=state.get("web_authorized") is True,
+        ),
     }
     return {
         "workflow_action": WorkflowAction.REWORK.value,

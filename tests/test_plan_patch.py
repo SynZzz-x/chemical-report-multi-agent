@@ -32,6 +32,7 @@ def patch_state(
 ):
     tasks = [task(task_id) for task_id in ("T1", "T2", "T3", "T4")]
     return {
+        "web_authorized": True,
         "tasks": tasks,
         "cursor": cursor,
         "docs": list(docs if docs is not None else [{"name": "evidence.csv"}]),

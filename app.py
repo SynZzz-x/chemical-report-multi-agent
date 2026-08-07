@@ -33,7 +33,11 @@ from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
-from src.ui_projection import summarize_step as _summarize_step
+from src.ui_projection import (
+    report_status_view,
+    summarize_step as _summarize_step,
+    task_progress_view,
+)
 from src.utils.path_manager import get_session_cache_dir
 
 
@@ -106,6 +110,9 @@ def _ensure_session_scope() -> None:
     if "last_run_failed" not in st.session_state:
         st.session_state["last_run_failed"] = False
 
+    if "web_authorized" not in st.session_state:
+        st.session_state["web_authorized"] = False
+
 
 _ensure_session_scope()
 
@@ -167,6 +174,7 @@ def _ensure_job_record(title: str, verifier_mode: str) -> dict[str, Any]:
     if record is not None:
         if record.get("verifier_mode") != verifier_mode:
             raise ValueError("当前任务的审核模式与已编译工作流不一致。")
+        st.session_state["web_authorized"] = record.get("web_authorized") is True
         st.session_state["job_record_created"] = True
         return record
 
@@ -175,6 +183,7 @@ def _ensure_job_record(title: str, verifier_mode: str) -> dict[str, Any]:
         **scope,
         title=title,
         verifier_mode=verifier_mode,
+        web_authorized=st.session_state.get("web_authorized") is True,
         ui_messages=st.session_state["ui_messages"],
     )
     st.session_state["job_record_created"] = True
@@ -209,6 +218,7 @@ def _start_new_job() -> None:
     st.session_state["ui_messages"] = []
     st.session_state["job_record_created"] = False
     st.session_state["last_run_failed"] = False
+    st.session_state["web_authorized"] = False
 
 
 def _start_new_conversation() -> None:
@@ -235,6 +245,7 @@ def _restore_job(job_id: str) -> None:
         "last_run_failed",
         "verifier_mode",
         "app",
+        "web_authorized",
     )
     previous_state = {
         key: st.session_state.get(key, missing)
@@ -248,6 +259,7 @@ def _restore_job(job_id: str) -> None:
         st.session_state["ui_messages"] = list(record.get("ui_messages") or [])
         st.session_state["job_record_created"] = True
         st.session_state["last_run_failed"] = False
+        st.session_state["web_authorized"] = record.get("web_authorized") is True
         _compile_workflow(mode)
 
         if PERSISTENCE.checkpointer.get_tuple(_graph_config()) is None:
@@ -608,20 +620,31 @@ def _handle_node_delta(node: str, delta: dict[str, Any]) -> None:
 def _report_paths_from_state() -> list[Path]:
     values = _snapshot_values()
     final_result = values.get("final_result") or {}
+    manifest = values.get("report_manifest") or {}
 
     candidates: list[Path] = []
-    for item in final_result.get("attachments") or []:
-        if item:
-            candidates.append(Path(str(item)))
-    if final_result.get("path"):
-        candidates.append(Path(str(final_result["path"])))
+    outputs = manifest.get("outputs") or {}
+    if outputs:
+        candidates.extend(
+            Path(str(outcome["path"]))
+            for outcome in outputs.values()
+            if isinstance(outcome, dict)
+            and outcome.get("status") == "SUCCEEDED"
+            and outcome.get("path")
+        )
+    else:
+        for item in final_result.get("attachments") or []:
+            if item:
+                candidates.append(Path(str(item)))
+        if final_result.get("path"):
+            candidates.append(Path(str(final_result["path"])))
 
     record = _current_job()
-    if not candidates and record:
+    if not candidates and record and not manifest:
         candidates.extend(Path(path) for path in record.get("report_paths") or [])
 
     # Compatibility fallback for the current Summarizer/path_manager.
-    if not candidates and values:
+    if not candidates and values and not manifest:
         try:
             session_dir = Path(get_session_cache_dir(values, _graph_config()))
             report_dir = session_dir / "report"
@@ -689,6 +712,44 @@ def _render_report_downloads() -> None:
             )
 
 
+def _render_work_area() -> None:
+    values = _snapshot_values()
+    progress = task_progress_view(values)
+    if progress:
+        st.subheader("任务进度")
+        passed = sum(item["status"] == "PASSED" for item in progress)
+        st.progress(passed / len(progress), text=f"已通过 {passed}/{len(progress)} 项")
+        for item in progress:
+            label = (
+                f"{item['task_id']} · {item['task_name']} · {item['status']}"
+                f" · attempt {item['attempt_count']}"
+            )
+            with st.expander(label, expanded=item["status"] == "RUNNING"):
+                st.write(f"Artifact：{item['active_artifact_id'] or '-'}")
+                st.write(f"最近审核：{item['latest_review_status'] or '-'}")
+                for issue in item["latest_review_issues"]:
+                    if isinstance(issue, dict):
+                        st.write(
+                            f"- {issue.get('category', 'UNKNOWN')}: "
+                            f"{issue.get('description', '')}"
+                        )
+
+    manifest = values.get("report_manifest") or {}
+    if manifest:
+        st.subheader("报告生成状态")
+        labels = {
+            "md": "Markdown",
+            "rewritten_md": "重排 Markdown",
+            "docx": "Word",
+            "pdf": "PDF",
+        }
+        for name, outcome in report_status_view(values).items():
+            status = outcome["status"]
+            st.write(f"{labels[name]}：{status}")
+            if outcome.get("error"):
+                st.caption(outcome["error"])
+
+
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
@@ -719,6 +780,13 @@ with st.sidebar:
         format_func=lambda value: "人工审核" if value == "manual" else "自动审核",
         horizontal=True,
     )
+
+    web_authorized = st.checkbox(
+        "允许本报告任务检索可信公开网络资料",
+        value=st.session_state["web_authorized"],
+        disabled=st.session_state.get("job_record_created", False),
+    )
+    st.session_state["web_authorized"] = web_authorized
 
     col_compile, col_clear = st.columns(2)
     with col_compile:
@@ -807,6 +875,7 @@ st.title("化工行业多 Agent 报告系统")
 st.caption("Streamlit 只负责输入与渲染；LangGraph State 负责业务上下文。")
 
 _render_history()
+_render_work_area()
 _render_report_downloads()
 
 if "app" not in st.session_state:
@@ -821,7 +890,7 @@ if st.session_state.get("compiled_mode") != verifier_mode:
 chat_value = st.chat_input(
     "请输入报告需求、确认意见或审核反馈……",
     accept_file="multiple",
-    file_type=["csv"],
+    file_type=["pdf", "docx", "csv", "xlsx", "xls"],
 )
 
 if chat_value:
@@ -844,7 +913,7 @@ if chat_value:
         graph_text = "我已上传附件，请结合附件继续处理当前任务。"
 
     if not graph_text:
-        st.warning("请输入内容或上传 CSV 文件。")
+        st.warning("请输入内容或上传 PDF、Word 或表格文件。")
         st.stop()
 
     display_content = graph_text
@@ -878,6 +947,7 @@ if chat_value:
         **_scope(),
         "current_user_input": graph_text,
         "metadata": _job_metadata(),
+        "web_authorized": st.session_state.get("web_authorized") is True,
     }
 
     pending_interrupt = st.session_state.get("pending_interrupt")

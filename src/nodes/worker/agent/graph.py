@@ -1281,7 +1281,10 @@ class ToolManager:
             if task.get("use_rag"):
                 tool_requirements.append("chemical_knowledge_base_tool")
             description = str(task.get("task_description") or "")
-            needs_public_web = task_allows_web(task)
+            needs_public_web = task_allows_web(
+                task,
+                job_authorized=task.get("_job_web_authorized") is True,
+            )
             if needs_public_web and not task.get("visualization"):
                 tool_requirements.append("spider_tool")
             if task.get("generate_table"):
@@ -1304,7 +1307,10 @@ class ToolManager:
             for requirement in tool_requirements
             if (canonical_name := canonical_tool_name(requirement)) is not None
         }
-        if "spider_tool" in required and not task_allows_web(task):
+        if "spider_tool" in required and not task_allows_web(
+            task,
+            job_authorized=task.get("_job_web_authorized") is True,
+        ):
             required.remove("spider_tool")
         if not required:
             return []
@@ -1369,10 +1375,27 @@ class AutonomousToolNode:
 
     @staticmethod
     def _prepare_execution_task(
-        task: Task, worker_state: Dict[str, Any]
+        task: Task,
+        worker_state: Dict[str, Any],
+        *,
+        job_authorized: bool = False,
     ) -> tuple[Task, str, Dict[str, Any]]:
         """Consume recovery feedback into a task copy used only for this execution."""
         execution_task = deepcopy(task)
+        execution_task["_job_web_authorized"] = job_authorized is True
+        if job_authorized is not True:
+            execution_task["use_web"] = False
+            execution_task["allow_web_fallback"] = False
+            execution_task["tool_requirements"] = [
+                requirement
+                for requirement in execution_task.get("tool_requirements") or []
+                if canonical_tool_name(requirement) != "spider_tool"
+            ]
+            visualization = execution_task.get("visualization")
+            if isinstance(visualization, dict):
+                visualization = deepcopy(visualization)
+                visualization["allow_web_fallback"] = False
+                execution_task["visualization"] = visualization
         cleaned_worker_state = deepcopy(worker_state or {})
         feedback = cleaned_worker_state.pop("execution_feedback", None)
         if not isinstance(feedback, dict):
@@ -1384,7 +1407,9 @@ class AutonomousToolNode:
             execution_task["query"] = recovery_query
 
         if "allow_web" in feedback:
-            allow_web = feedback.get("allow_web") is True
+            allow_web = (
+                feedback.get("allow_web") is True and job_authorized is True
+            )
             execution_task["_recovery_allow_web"] = allow_web
             execution_task["use_web"] = allow_web
             tool_requirements = list(execution_task.get("tool_requirements") or [])
@@ -1410,6 +1435,7 @@ class AutonomousToolNode:
     def _persistable_execution_task(task: Task) -> Task:
         persisted_task = deepcopy(task)
         persisted_task.pop("_recovery_allow_web", None)
+        persisted_task.pop("_job_web_authorized", None)
         return persisted_task
 
     def process(self, state: State) -> Dict[str, Any]:
@@ -1422,7 +1448,9 @@ class AutonomousToolNode:
 
         current_task, feedback_instructions, consumed_worker_state = (
             self._prepare_execution_task(
-                tasks[cursor], state.get("worker_state", {}) or {}
+                tasks[cursor],
+                state.get("worker_state", {}) or {},
+                job_authorized=state.get("web_authorized") is True,
             )
         )
         task_name = current_task.get("task_name", f"任务{cursor + 1}")
@@ -1598,7 +1626,10 @@ class AutonomousToolNode:
                 "title": visualization.get("title") or f"{task.get('task_name', '任务')}关系图",
                 "required_concepts": list(dict.fromkeys(concepts)),
                 "web_queries": list(visualization.get("web_queries") or []),
-                "allow_web_fallback": task_allows_web(task),
+                "allow_web_fallback": task_allows_web(
+                    task,
+                    job_authorized=task.get("_job_web_authorized") is True,
+                ),
             }
         )
         return visualization
@@ -1616,7 +1647,10 @@ class AutonomousToolNode:
         settings = get_app_config().concept_graph_settings
         required_concepts = request["required_concepts"]
         coverage = assess_coverage(evidence, required_concepts)
-        allow_web_fallback = task_allows_web(task)
+        allow_web_fallback = task_allows_web(
+            task,
+            job_authorized=task.get("_job_web_authorized") is True,
+        )
         if (
             coverage.web_fallback_required
             and settings.web_fallback
