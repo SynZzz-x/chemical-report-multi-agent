@@ -19,6 +19,45 @@ from reportlab.pdfbase.ttfonts import TTFont
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    """Split one Markdown row without treating an escaped pipe as a boundary."""
+    cells = []
+    current = []
+    text = line.strip()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and text[index + 1] == "|":
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    cells.append("".join(current).strip())
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return cells
+
+
+def _normalize_table_rows(rows):
+    """Pad ragged Markdown rows to the widest row."""
+    width = max((len(row) for row in rows), default=0)
+    return [list(row) + [""] * (width - len(row)) for row in rows]
+
+
+def _is_table_divider(row: list[str]) -> bool:
+    return bool(row) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))
+        for cell in row
+    )
+
 def register_chinese_font():
     """
     寻找并注册中文字体家族 (Normal, Bold, Italic)。
@@ -424,11 +463,9 @@ def parse_markdown(content, styles, font_name, math_img_dir=None):
                             table_caption = Paragraph(last_para_text, caption_style)
                 in_table = True
             
-            parts = [p.strip() for p in line.split('|')]
-            if len(parts) > 2:
-                row_data = parts[1:-1]
-                if not all(set(c) <= set('-: ') for c in ''.join(row_data)):
-                    table_buffer.append(row_data)
+            row_data = _split_markdown_table_row(line)
+            if row_data and not _is_table_divider(row_data):
+                table_buffer.append(row_data)
             continue
         else:
             if in_table:
@@ -604,7 +641,14 @@ def _format_text(text, math_img_dir=None):
     return text
 
 
-def _flush_table(story, table_buffer, font_name, table_caption=None, caption_style=None):
+def _flush_table(
+    story,
+    table_buffer,
+    font_name,
+    table_caption=None,
+    caption_style=None,
+    available_width=451.0,
+):
     """辅助函数：将缓冲的表格数据添加到 Story"""
     if not table_buffer:
         return
@@ -614,21 +658,32 @@ def _flush_table(story, table_buffer, font_name, table_caption=None, caption_sty
         story.append(table_caption)
         story.append(Spacer(1, 2))
         
+    rows = _normalize_table_rows(table_buffer)
+    column_count = len(rows[0]) if rows else 0
+    if column_count == 0:
+        return
+    font_size = max(6.0, min(10.0, 60.0 / column_count))
+
     # 创建表格
     # 将每个单元格内容包装为 Paragraph 以支持换行和字体
     data = []
     cell_style = ParagraphStyle(
         'CellStyle',
         fontName=font_name,
-        fontSize=10,
-        leading=12
+        fontSize=font_size,
+        leading=max(7.0, font_size + 2.0),
     )
     
-    for row in table_buffer:
+    for row in rows:
         processed_row = [Paragraph(cell, cell_style) for cell in row]
         data.append(processed_row)
         
-    t = Table(data)
+    column_width = available_width / column_count
+    t = Table(
+        data,
+        colWidths=[column_width] * column_count,
+        repeatRows=1,
+    )
     
     # 表格样式
     t.setStyle(TableStyle([
@@ -637,8 +692,8 @@ def _flush_table(story, table_buffer, font_name, table_caption=None, caption_sty
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('FONTNAME', (0, 0), (-1, 0), font_name), # 表头字体
-        ('FONTSIZE', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('FONTSIZE', (0, 0), (-1, -1), font_size),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), max(4, font_size)),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
         ('FONTNAME', (0, 0), (-1, -1), font_name), # 全局字体
