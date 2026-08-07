@@ -5,7 +5,7 @@ from langgraph.graph import START, END, StateGraph
 from .state import State, ConfigSchema
 from .nodes.intake import intake
 from .nodes.planner import planner, planner_confirm
-from .nodes.verifier import verifier as verifier_auto
+from .nodes.quality_review import quality_review
 from .nodes.verifier_manual import verifier_manual, decision
 from .nodes.recovery import (
     automatic_planner,
@@ -113,12 +113,12 @@ class WorkFlowBase(StateGraph):
         self.add_node("Worker", worker)
         self.add_node("ArtifactCommit", artifact_commit)
         self.add_edge("Worker", "ArtifactCommit")
-        self.add_edge("ArtifactCommit", "Verifier")
+        self.add_edge("ArtifactCommit", "QualityReview")
 
         if self.use_auto_verifier:
-            self.add_node("Verifier", verifier_auto, metadata={"type":"auto"})
+            self.add_node("QualityReview", quality_review, metadata={"type":"auto"})
             self.add_node("DecisionPolicy", decision_policy)
-            self.add_edge("Verifier", "DecisionPolicy")
+            self.add_edge("QualityReview", "DecisionPolicy")
             self.add_conditional_edges(
                 "DecisionPolicy",
                 route_policy,
@@ -129,14 +129,14 @@ class WorkFlowBase(StateGraph):
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
-                    "RETRY_VERIFIER": "Verifier",
+                    "RETRY_VERIFIER": "QualityReview",
                 },
             )
 
         else:
-            self.add_node("Verifier", verifier_manual, metadata={"type":"manual"})
+            self.add_node("QualityReview", verifier_manual, metadata={"type":"manual"})
             self.add_conditional_edges(
-                "Verifier",
+                "QualityReview",
                 decision,
                 _MANUAL_VERIFIER_ROUTES,
             )

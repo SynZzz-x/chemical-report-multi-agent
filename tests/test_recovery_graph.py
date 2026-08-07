@@ -652,11 +652,11 @@ def test_auto_graph_has_no_replan_route_to_planner():
     source = ast.get_source_segment(graph_path.read_text(encoding="utf-8"), build_method)
 
     assert '"REPLAN": "Planner"' not in source
-    assert '"Verifier", "DecisionPolicy"' in source
+    assert '"QualityReview", "DecisionPolicy"' in source
     assert '"DecisionPolicy"' in source
     assert '"PlanPatcher"' in source
     assert '"NeedsUserInput"' in source
-    assert '"RETRY_VERIFIER": "Verifier"' in source
+    assert '"RETRY_VERIFIER": "QualityReview"' in source
 
 
 def test_verifier_contract_failure_routes_only_back_to_verifier_once():
