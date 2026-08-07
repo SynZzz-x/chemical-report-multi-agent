@@ -19,6 +19,7 @@ from .nodes.recovery import (
 from .nodes.summarizer_v2 import summarizer
 from .nodes.exiting import exiting
 from .nodes.task_controller import route_task_controller, task_controller
+from .nodes.artifact_commit import artifact_commit
 # from .nodes.worker.agent.graph import router_node, execute_task_node, generate_result_node, route_decision
 from .nodes.worker.agent.graph import create_worker_workflow
 
@@ -110,7 +111,9 @@ class WorkFlowBase(StateGraph):
         # Worker子图
         worker = create_worker_workflow()
         self.add_node("Worker", worker)
-        self.add_edge("Worker", "Verifier")
+        self.add_node("ArtifactCommit", artifact_commit)
+        self.add_edge("Worker", "ArtifactCommit")
+        self.add_edge("ArtifactCommit", "Verifier")
 
         if self.use_auto_verifier:
             self.add_node("Verifier", verifier_auto, metadata={"type":"auto"})

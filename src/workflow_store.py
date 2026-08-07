@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from langgraph.store.base import BaseStore
+if TYPE_CHECKING:
+    from langgraph.store.base import BaseStore
+else:
+    BaseStore = Any
 
 
 class WorkflowRecordStore:
