@@ -2,8 +2,9 @@ import os
 import re
 import json
 import logging
+import hashlib
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import TYPE_CHECKING, List, Dict, Any
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage
@@ -14,6 +15,13 @@ from ..llm import get_llm
 from ..utils import md_to_docx, md_to_pdf, md_rewrite
 from ..utils.path_manager import get_session_cache_dir
 from ..evidence.reporting import append_missing_figures, format_evidence_table
+from ..workflow_records import all_tasks_passed, ensure_task_records
+from ..workflow_store import WorkflowRecordStore
+
+if TYPE_CHECKING:
+    from langgraph.store.base import BaseStore
+else:
+    BaseStore = Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +58,20 @@ def find_title(state: State) -> str:
 def _content_reorganizer(state: State) -> List[Dict[str, Any]]:
     sections = []
     tasks = state.get("tasks", []) or []
-    for res in state.get("results", []) or []:
+    artifacts = state.get("artifacts") or {}
+    active_artifact_ids = state.get("active_artifact_ids") or {}
+    ordered_results = []
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        artifact_id = active_artifact_ids.get(task_id)
+        artifact = artifacts.get(artifact_id) if artifact_id else None
+        if not isinstance(artifact, dict):
+            raise RuntimeError(f"passed task {task_id} has no active Artifact")
+        if str(artifact.get("task_id") or "") != task_id:
+            raise RuntimeError(f"active Artifact {artifact_id} is not bound to task {task_id}")
+        ordered_results.append(artifact)
+
+    for res in ordered_results:
         # 任务名作为章节标题（若找不到则使用 task_id）
         title = None
         for t in tasks:
@@ -121,7 +142,7 @@ def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -
     """
     Use LLM to generate the markdown content for a single section.
     """
-    model = get_llm(config)
+    model = get_llm(config, json_mode=False)
     prompt_template = _read_prompt("../prompts/summarizer_section_writer.md")
     
     if not prompt_template:
@@ -200,7 +221,7 @@ def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str
     Generate a brief evaluation of the report using LLM.
     """
     try:
-        model = get_llm(config)
+        model = get_llm(config, json_mode=False)
         sys_prompt = _read_prompt("../prompts/summarizer_eval.md")
         if not sys_prompt:
              sys_prompt = "你是一位专业的报告评价专家。阅读报告全文，按结构/完整性/专业性/总体评价四个维度，用约200字输出自然语言评价。"
@@ -222,8 +243,47 @@ def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str
         logger.error(f"Failed to generate report evaluation: {e}")
         return "报告生成完成。评价生成失败。"
 
-def summarizer(state: State, config: RunnableConfig, **kwargs):
+def _run_output(name: str, path: str, writer) -> Dict[str, Any]:
+    try:
+        writer()
+        if not os.path.isfile(path):
+            raise RuntimeError(f"{name} writer returned without creating a file")
+        return {"status": "SUCCEEDED", "path": path, "error": None}
+    except Exception as exc:
+        logger.error("%s generation failed: %s", name, exc)
+        return {"status": "FAILED", "path": None, "error": str(exc)}
+
+
+def _report_id(state: State, artifact_ids: List[str]) -> str:
+    stable = json.dumps(
+        {
+            "user_id": state.get("user_id"),
+            "job_id": state.get("job_id"),
+            "artifact_ids": artifact_ids,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return "report_" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def summarizer(
+    state: State,
+    config: RunnableConfig,
+    store: BaseStore | None = None,
+    **kwargs,
+):
     logger.info("Starting summarizer_v2...")
+
+    tasks = list(state.get("tasks") or [])
+    records = ensure_task_records(state)
+    if not all_tasks_passed(tasks, records):
+        incomplete = [
+            task_id
+            for task_id, record in records.items()
+            if record.get("status") != "PASSED"
+        ]
+        raise RuntimeError(f"report tasks not passed: {', '.join(incomplete)}")
     
     # 1. Reorganize content from tasks
     sections = _content_reorganizer(state)
@@ -251,56 +311,89 @@ def summarizer(state: State, config: RunnableConfig, **kwargs):
     pdf_path = os.path.abspath(os.path.join(report_dir, "report.pdf"))
     docx_path = os.path.abspath(os.path.join(report_dir, "report.docx"))
     
-    try:
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(final_markdown)
-        logger.info(f"Markdown report saved to {md_path}")
-    except Exception as e:
-        logger.error(f"Failed to write markdown file: {e}")
-        
-    # 4. Convert to PDF, DOCX and Rewrite Markdown
-    # Note: These utils might need to be imported or adjusted if they are not in the path or expect specific args
-    
-    # Generate Rewritten Markdown
-    try:
+    def write_markdown():
+        with open(md_path, "w", encoding="utf-8") as report_file:
+            report_file.write(final_markdown)
+
+    def write_rewritten_markdown():
         rewritten_content = md_rewrite.rewrite_markdown(final_markdown)
         with open(rewritten_md_path, "w", encoding="utf-8") as f:
             f.write(rewritten_content)
-        logger.info(f"Rewritten Markdown report saved to {rewritten_md_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate rewritten markdown: {e}")
-    
-    # Generate PDF
-    try:
+
+    def write_pdf():
         math_img_dir = os.path.join(session_cache_dir, "math_imgs")
         md_to_pdf.md_to_pdf(final_markdown, pdf_path, math_img_dir=math_img_dir)
-        logger.info(f"PDF report saved to {pdf_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate PDF: {e}")
-        
-    # Generate DOCX
-    try:
-        md_to_docx.md_to_docx(final_markdown, docx_path)
-        logger.info(f"DOCX report saved to {docx_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate DOCX: {e}")
 
-    # 5. Return result
-    # We return the paths to the generated files.
+    def write_docx():
+        md_to_docx.md_to_docx(final_markdown, docx_path)
+
+    outcomes = {
+        "md": _run_output("md", md_path, write_markdown),
+        "rewritten_md": _run_output(
+            "rewritten_md", rewritten_md_path, write_rewritten_markdown
+        ),
+        "pdf": _run_output("pdf", pdf_path, write_pdf),
+        "docx": _run_output("docx", docx_path, write_docx),
+    }
     
     # Generate Evaluation
     eval_text = _generate_report_evaluation(final_markdown, config)
     
+    included_artifact_ids = [
+        str((state.get("active_artifact_ids") or {})[str(task["task_id"])])
+        for task in tasks
+    ]
+    generation_errors = {
+        name: outcome["error"]
+        for name, outcome in outcomes.items()
+        if outcome["status"] == "FAILED"
+    }
+    manifest = {
+        "report_id": _report_id(state, included_artifact_ids),
+        "job_id": str(state.get("job_id") or ""),
+        "included_artifact_ids": included_artifact_ids,
+        "outputs": outcomes,
+        "generation_errors": generation_errors,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    for name, outcome in outcomes.items():
+        manifest[f"{name}_status"] = outcome["status"]
+        manifest[f"{name}_path"] = outcome["path"]
+
+    attachments = [
+        outcome["path"]
+        for outcome in outcomes.values()
+        if outcome["status"] == "SUCCEEDED"
+    ]
+    preferred_path = next(
+        (
+            outcomes[name]["path"]
+            for name in ("docx", "pdf", "rewritten_md", "md")
+            if outcomes[name]["status"] == "SUCCEEDED"
+        ),
+        None,
+    )
     final_result = {
-        "summary": "Report generated in Markdown, PDF, and DOCX formats.",
+        "summary": f"Report generation produced {len(attachments)} successful output(s).",
         "evaluation": eval_text,
-        "attachments": [md_path, rewritten_md_path, pdf_path, docx_path],
-        "path": docx_path, # Default to DOCX for compatibility
+        "attachments": attachments,
+        "path": preferred_path,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
+
+    if store is not None:
+        WorkflowRecordStore(
+            store,
+            str(state.get("user_id") or ""),
+            str(state.get("job_id") or ""),
+        ).put_report_manifest(manifest)
     
     # We can also add a message to the conversation history
     msg_content = f"{eval_text}"
     msg = AIMessage(content=msg_content)
     
-    return {"messages": [msg], "final_result": final_result}
+    return {
+        "messages": [msg],
+        "final_result": final_result,
+        "report_manifest": manifest,
+    }
