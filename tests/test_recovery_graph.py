@@ -53,6 +53,7 @@ def graph_state(*, cursor=1, accepted_ids=("T1",), **overrides):
         "docs": [{"file_id": "F1", "name": "existing.pdf"}],
         "current_result": {
             "task_id": tasks[cursor]["task_id"],
+            "artifact_id": f"A-{tasks[cursor]['task_id']}",
             "text_output": "candidate",
         },
         "results": [
@@ -70,6 +71,28 @@ def graph_state(*, cursor=1, accepted_ids=("T1",), **overrides):
         "pending_user_action": {},
         "plan_patch_history": [],
         "verification_warnings": [],
+        "active_artifact_ids": {
+            tasks[cursor]["task_id"]: f"A-{tasks[cursor]['task_id']}"
+        },
+        "task_records": {
+            task["task_id"]: {
+                "task_id": task["task_id"],
+                "sequence": index,
+                "status": (
+                    "PASSED"
+                    if task["task_id"] in accepted_ids
+                    else "RUNNING"
+                    if index == cursor
+                    else "PENDING"
+                ),
+                "attempt_count": 1 if index == cursor else 0,
+                "active_artifact_id": (
+                    f"A-{task['task_id']}" if index == cursor else None
+                ),
+                "dependencies": [],
+            }
+            for index, task in enumerate(tasks)
+        },
         **overrides,
     }
 
@@ -111,6 +134,7 @@ def test_rework_policy_creates_structured_execution_feedback():
                 "description": "Section is too short",
                 "suggestion": "Add mechanism detail",
                 "severity": "major",
+                "responsible_handler": "worker_agent",
             }
         ],
     }
@@ -121,11 +145,12 @@ def test_rework_policy_creates_structured_execution_feedback():
     feedback = update["worker_state"]["execution_feedback"]
     assert feedback["mode"] == "rework"
     assert feedback["issues"] == assessment["issues"]
+    assert feedback["responsible_handlers"] == ["worker_agent"]
     assert "Add mechanism detail" in feedback["instructions"]
     assert update["worker_state"]["retained"] is True
 
 
-def test_accept_with_warning_routes_through_continuation_action():
+def test_retry_exhaustion_routes_to_human_review_without_auto_accept():
     state = graph_state(
         task_retry_count={"T2": 2},
         assessment={
@@ -136,8 +161,9 @@ def test_accept_with_warning_routes_through_continuation_action():
 
     update = decision_policy(state, {})
 
-    assert update["workflow_action"] == "ACCEPT_WITH_WARNING"
-    assert route_policy({**state, **update}, {}) == "NEXT"
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert update["task_records"]["T2"]["status"] == "BLOCKED"
+    assert route_policy({**state, **update}, {}) == "NEEDS_USER_INPUT"
 
 
 def test_evidence_recovery_builds_query_and_honors_task_web_gate():
@@ -657,6 +683,8 @@ def test_auto_graph_has_no_replan_route_to_planner():
     assert '"PlanPatcher"' in source
     assert '"NeedsUserInput"' in source
     assert '"RETRY_VERIFIER": "QualityReview"' in source
+    assert '"REWORK": "TaskController"' in source
+    assert 'self.add_edge("EvidenceRecovery", "TaskController")' in source
 
 
 def test_verifier_contract_failure_routes_only_back_to_verifier_once():

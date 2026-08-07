@@ -25,8 +25,23 @@ def recovery_state(
         "tasks": [{"task_id": task_id, "use_resources": task_resources or []}],
         "cursor": 0,
         "docs": list(docs or []),
-        "current_result": {"task_id": task_id, "text_output": "current result"},
+        "current_result": {
+            "task_id": task_id,
+            "artifact_id": f"A-{task_id}",
+            "text_output": "current result",
+        },
         "results": list(results or []),
+        "active_artifact_ids": {task_id: f"A-{task_id}"},
+        "task_records": {
+            task_id: {
+                "task_id": task_id,
+                "sequence": 0,
+                "status": "RUNNING",
+                "attempt_count": 1,
+                "active_artifact_id": f"A-{task_id}",
+                "dependencies": [],
+            }
+        },
         "task_retry_count": dict(task_retry_count or {}),
         "evidence_recovery_count": dict(evidence_recovery_count or {}),
         "task_patch_count": dict(task_patch_count or {}),
@@ -78,14 +93,16 @@ def test_available_but_unassigned_resource_is_local_plan_defect():
     assert decision["workflow_action"] == "PLAN_PATCH"
 
 
-def test_content_retry_limit_accepts_with_warning_and_commits_result():
+def test_content_retry_exhaustion_blocks_without_committing_result():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
     decision = decide_recovery_action(
         state,
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
-    assert decision["workflow_action"] == "ACCEPT_WITH_WARNING"
-    assert decision["results"][-1]["task_id"] == "T2"
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_records"]["T2"]["status"] == "BLOCKED"
+    assert decision["pending_user_action"]["artifact_id"] == "A-T2"
+    assert "results" not in decision
 
 
 def test_classification_uses_priority_and_never_treats_evidence_as_plan_defect():
@@ -126,7 +143,7 @@ def test_json_restored_numeric_string_counter_preserves_content_retry_cap():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
     assert decision["task_retry_count"] == {"T2": 2}
 
 
@@ -138,7 +155,7 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
     assert decision["task_retry_count"] == {"0": 2}
 
 
@@ -155,7 +172,7 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
         (
             "task_retry_count",
             assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
-            WorkflowAction.ACCEPT_WITH_WARNING,
+            WorkflowAction.NEEDS_USER_INPUT,
         ),
         (
             "evidence_recovery_count",
@@ -181,13 +198,15 @@ def test_json_counter_aliases_merge_by_max_without_reopening_caps(
     assert decision[counter_field] == {"T1": 2}
 
 
-def test_pass_commits_current_result_once_and_uses_done_at_final_task():
+def test_pass_marks_active_artifact_and_returns_to_controller():
     state = recovery_state(task_id="T2")
 
     first = decide_recovery_action(state, {"status": "PASS", "issues": []})
     second = decide_recovery_action({**state, **first}, {"status": "PASS", "issues": []})
 
-    assert first["workflow_action"] == WorkflowAction.DONE
+    assert first["workflow_action"] == WorkflowAction.NEXT
+    assert first["task_records"]["T2"]["status"] == "PASSED"
+    assert first["task_records"]["T2"]["active_artifact_id"] == "A-T2"
     assert [result["task_id"] for result in first["results"]] == ["T2"]
     assert [result["task_id"] for result in second["results"]] == ["T2"]
     assert [result["task_id"] for result in commit_current_result({**state, **first})] == ["T2"]
@@ -245,23 +264,20 @@ def test_plan_patch_decision_does_not_increment_applied_patch_counts():
     assert decision["job_patch_count"] == 0
 
 
-def test_retry_limit_warning_has_structured_fields_and_is_idempotent():
-    previous_warning = {"code": "EARLIER_WARNING", "task_id": "T1"}
+def test_retry_limit_blocker_has_structured_fields_and_is_idempotent():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
-    state["verification_warnings"] = [previous_warning]
     assessment = assessment_with("TOO_SHORT", "CONTENT_DEFECT")
 
     first = decide_recovery_action(state, assessment)
     second = decide_recovery_action({**state, **first}, assessment)
 
-    warning = first["verification_warning"]
-    assert warning["code"] == "CONTENT_RETRY_LIMIT_REACHED"
-    assert warning["category"] == "CONTENT_DEFECT"
-    assert warning["task_id"] == "T2"
-    assert warning["issues"] == assessment["issues"]
-    assert first["verification_warnings"] == [previous_warning, warning]
-    assert second["verification_warning"] == warning
-    assert second["verification_warnings"] == [previous_warning, warning]
+    blocker = first["pending_user_action"]
+    assert blocker["category"] == "CONTENT_DEFECT"
+    assert blocker["task_id"] == "T2"
+    assert blocker["artifact_id"] == "A-T2"
+    assert blocker["issues"] == assessment["issues"]
+    assert second["pending_user_action"] == blocker
+    assert second["task_records"]["T2"]["status"] == "BLOCKED"
 
 
 def test_only_explicit_auto_fixable_codes_are_local_plan_defects():
@@ -312,7 +328,7 @@ def test_blank_code_cannot_use_llm_local_plan_defect_category():
     )
 
 
-def test_content_retry_overflow_continues_next_for_a_non_final_task():
+def test_content_retry_overflow_blocks_for_a_non_final_task():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
     state["tasks"].append({"task_id": "T3", "use_resources": []})
 
@@ -321,11 +337,11 @@ def test_content_retry_overflow_continues_next_for_a_non_final_task():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
-    assert decision["continuation_action"] == WorkflowAction.NEXT
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_records"]["T2"]["status"] == "BLOCKED"
 
 
-def test_content_retry_overflow_continues_done_for_a_final_task():
+def test_content_retry_overflow_blocks_for_a_final_task():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
 
     decision = decide_recovery_action(
@@ -333,5 +349,28 @@ def test_content_retry_overflow_continues_done_for_a_final_task():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
-    assert decision["continuation_action"] == WorkflowAction.DONE
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_records"]["T2"]["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("category", "expected_action"),
+    [
+        ("DATA_DEFECT", WorkflowAction.REWORK),
+        ("VISUAL_DEFECT", WorkflowAction.REWORK),
+        ("WORKER_FAILURE", WorkflowAction.REWORK),
+        ("SAFETY_BOUNDARY", WorkflowAction.NEEDS_USER_INPUT),
+        ("REVIEW_FAILURE", WorkflowAction.RETRY_VERIFIER),
+    ],
+)
+def test_structured_review_categories_have_deterministic_routes(
+    category, expected_action
+):
+    state = recovery_state(task_id="T2")
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with(category, category),
+    )
+
+    assert decision["workflow_action"] == expected_action

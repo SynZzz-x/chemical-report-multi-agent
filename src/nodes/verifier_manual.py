@@ -1,5 +1,9 @@
 import json
 import os
+import hashlib
+from copy import deepcopy
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -7,6 +11,14 @@ from langgraph.types import interrupt
 
 from src.state import State
 from src.llm import get_llm
+from src.quality.models import QualityDimensions, ReviewIssue, ReviewRecord
+from src.workflow_records import ensure_task_records, set_task_status
+from src.workflow_store import WorkflowRecordStore
+
+if TYPE_CHECKING:
+    from langgraph.store.base import BaseStore
+else:
+    BaseStore = Any
 
 
 _DIRECT_APPROVAL_FEEDBACK = {
@@ -68,13 +80,93 @@ def _append_result_once(previous_results, current_result):
 
     current_task_id = current_result.get("task_id")
     if current_task_id is not None:
-        if any(result.get("task_id") == current_task_id for result in results):
+        existing = next(
+            (
+                index
+                for index, result in enumerate(results)
+                if isinstance(result, dict)
+                and result.get("task_id") == current_task_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if results[existing] != current_result:
+                results[existing] = current_result
             return results
     elif current_result in results:
         return results
 
     results.append(current_result)
     return results
+
+
+def _human_review_record(
+    *,
+    state: State,
+    task_id: str,
+    artifact_id: str,
+    decision_code: str,
+    reason: str,
+    suggestions: str,
+    feedback_text: str,
+    feedback_message_id: str | None,
+) -> dict[str, Any]:
+    issues = []
+    status = "PASS"
+    if decision_code == "REWORK":
+        status = "REVISE"
+        issues = [
+            ReviewIssue(
+                code="HUMAN_REVISION_REQUEST",
+                category="CONTENT_DEFECT",
+                severity="major",
+                description=reason or feedback_text or "Human reviewer requested revision.",
+                responsible_handler="worker_agent",
+                revision_instruction=suggestions or feedback_text or "Revise the current section.",
+            )
+        ]
+    elif decision_code == "FULL_REPLAN":
+        status = "HUMAN_REVIEW"
+        issues = [
+            ReviewIssue(
+                code="HUMAN_FULL_REPLAN_REQUEST",
+                category="LOCAL_PLAN_DEFECT",
+                severity="major",
+                description=reason or feedback_text or "Human reviewer requested full replanning.",
+                responsible_handler="planner",
+                revision_instruction=suggestions or feedback_text or "Replan the remaining report tasks.",
+            )
+        ]
+
+    stable = json.dumps(
+        {
+            "task_id": task_id,
+            "artifact_id": artifact_id,
+            "decision": decision_code,
+            "feedback": feedback_text,
+            "message_id": feedback_message_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    review_id = "review_" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+    score = 5 if status == "PASS" else 0
+    return ReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        reviewer="human",
+        created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        status=status,
+        issues=issues,
+        quality_dimensions=QualityDimensions(
+            completeness=score,
+            evidence=score,
+            logic=score,
+            actionability=score,
+            safety=score,
+        ),
+    ).model_dump(mode="json")
 
 
 def _task_name(tasks, idx):
@@ -134,13 +226,18 @@ def _analyze_feedback(user_feedback: str, task_name: str, current_result_content
         }
 
 
-def verifier_manual(state: State, config: RunnableConfig, **kwargs):
+def verifier_manual(
+    state: State,
+    config: RunnableConfig,
+    store: BaseStore | None = None,
+    **kwargs,
+):
     """
     人工审核节点：
     1. 展示当前结果摘要
     2. Interrupt 等待用户反馈
     3. Resume 后 LLM 分析反馈
-    4. 路由：PASS -> NEXT/DONE; REWORK -> RETRY_WORKER;
+    4. 路由：PASS/REWORK -> TaskController;
        FULL_REPLAN -> Planner（仅用户触发）
     """
     current_result = state.get("current_result", {}) or {}
@@ -207,55 +304,99 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
     suggestions = analysis.get("suggestions", "")
     reason = analysis.get("reason", "")
     
-    output_updates = {}
+    task_id = str(current_result.get("task_id") or tasks[cursor].get("task_id"))
+    artifact_id = str(
+        current_result.get("artifact_id")
+        or (state.get("active_artifact_ids") or {}).get(task_id)
+        or f"legacy-{task_id}"
+    )
+    review_record = _human_review_record(
+        state=state,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        decision_code=decision_code,
+        reason=str(reason),
+        suggestions=str(suggestions),
+        feedback_text=feedback_text,
+        feedback_message_id=feedback_message_id,
+    )
+    review_records = list(state.get("review_records") or [])
+    previous_review = next(
+        (
+            item
+            for item in review_records
+            if isinstance(item, dict)
+            and item.get("review_id") == review_record["review_id"]
+        ),
+        None,
+    )
+    if previous_review is not None:
+        review_record = dict(previous_review)
+    else:
+        review_records.append(review_record)
+    if store is not None:
+        WorkflowRecordStore(
+            store,
+            str(state.get("user_id") or ""),
+            str(state.get("job_id") or ""),
+        ).put_review(review_record)
+
+    output_updates = {
+        "review_record": review_record,
+        "review_records": review_records,
+    }
     content_obj = {}
+    records = ensure_task_records(state)
     
     # 4. 路由逻辑
     if decision_code == "PASS":
-        # 检查是否全部完成
-        done = (cursor + 1) >= len(tasks)
-        
-        if done:
-            final_decision = "DONE"
-            content_obj = {
-                "from": "Verifier",
-                "to": "Summarizer",
-                "type": "SUMMARIZE",
-            }
-        else:
-            final_decision = "NEXT"
-            content_obj = {
-                "from": "Verifier",
-                "to": "Planner",
-                "type": "PROCEED",
-                "current_section": task_name,
-            }
-            
-        # 追加结果
-        results = _append_result_once(previous_results, current_result)
-        output_updates["results"] = results
-        
-    elif decision_code == "REWORK":
-        final_decision = "RETRY_WORKER"
+        final_decision = "NEXT"
         content_obj = {
             "from": "Verifier",
-            "to": "Worker",
+            "to": "TaskController",
+            "type": "PROCEED",
+            "current_section": task_name,
+        }
+        output_updates["results"] = _append_result_once(
+            previous_results, current_result
+        )
+        output_updates["task_records"] = set_task_status(
+            records,
+            task_id,
+            "PASSED",
+            active_artifact_id=artifact_id,
+        )
+        
+    elif decision_code == "REWORK":
+        final_decision = "REWORK"
+        content_obj = {
+            "from": "Verifier",
+            "to": "TaskController",
             "type": "REWORK",
             "reason": reason,
             "suggestions": suggestions
         }
-        # 将用户反馈传递给 Worker
-        # 注意：需要确保 WorkerState 定义了 verifier_feedback 字段
-        worker_updates = {
-            "verifier_feedback": {
-                "feedback": suggestions,
-                "original_user_feedback": feedback_text
+        worker_updates = deepcopy(state.get("worker_state") or {})
+        worker_updates.update(
+            {
+                "verifier_feedback": {
+                    "feedback": suggestions,
+                    "original_user_feedback": feedback_text,
+                },
+                "execution_feedback": {
+                    "mode": "human_rework",
+                    "issues": review_record["issues"],
+                    "instructions": suggestions or feedback_text,
+                    "responsible_handlers": ["worker_agent"],
+                },
             }
-        }
-        # 使用 update 语义，LangGraph 会合并 worker_state
+        )
         output_updates["worker_state"] = worker_updates
-        output_updates["results"] = previous_results # 不追加当前结果
-        
+        output_updates["task_records"] = set_task_status(
+            records, task_id, "REVISE_REQUIRED"
+        )
+        output_updates["results"] = previous_results
+
     elif decision_code == "FULL_REPLAN":
         final_decision = "FULL_REPLAN"
         content_obj = {
@@ -265,25 +406,29 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             "reason": reason,
             "current_section": task_name,
         }
-        # 将反馈传递给 Planner
         output_updates["feedback"] = {
             "status": "BLOCKED",
-            "issues": [{"description": reason, "suggestion": suggestions}]
+            "issues": [{"description": reason, "suggestion": suggestions}],
         }
         output_updates["results"] = previous_results
-        
+
     else:
-        # _normalize_decision 保证只返回上面三个值；保留防御性兜底。
         final_decision = "NEXT"
         content_obj = {
             "from": "Verifier",
-            "to": "Planner",
+            "to": "TaskController",
             "type": "PROCEED",
             "current_section": task_name,
         }
         output_updates["results"] = _append_result_once(
             previous_results,
             current_result,
+        )
+        output_updates["task_records"] = set_task_status(
+            records,
+            task_id,
+            "PASSED",
+            active_artifact_id=artifact_id,
         )
     
     msg = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))

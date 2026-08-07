@@ -52,7 +52,8 @@ def route_planner_confirm(state: State):
 
 
 _MANUAL_VERIFIER_ROUTES = {
-    "RETRY_WORKER": "Worker",
+    "REWORK": "TaskController",
+    "RETRY_WORKER": "TaskController",
     "FULL_REPLAN": "Planner",
     "NEXT": "TaskController",
     "DONE": "TaskController",
@@ -125,7 +126,7 @@ class WorkFlowBase(StateGraph):
                 {
                     "NEXT": "TaskController",
                     "DONE": "TaskController",
-                    "REWORK": "Worker",
+                    "REWORK": "TaskController",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
@@ -143,14 +144,14 @@ class WorkFlowBase(StateGraph):
 
         # Recovery/HumanReview nodes are shared by automatic and manual modes.
         self.add_node("EvidenceRecovery", evidence_recovery)
-        self.add_edge("EvidenceRecovery", "Worker")
+        self.add_edge("EvidenceRecovery", "TaskController")
 
         self.add_node("PlanPatcher", plan_patcher)
         self.add_conditional_edges(
             "PlanPatcher",
             route_after_blocker,
             {
-                "REWORK": "Worker",
+                "REWORK": "TaskController",
                 "NEEDS_USER_INPUT": "NeedsUserInput",
             },
         )
@@ -160,7 +161,7 @@ class WorkFlowBase(StateGraph):
             "NeedsUserInput",
             route_after_blocker,
             {
-                "REWORK": "Worker",
+                "REWORK": "TaskController",
                 "EVIDENCE_RECOVERY": "EvidenceRecovery",
                 "NEXT": "TaskController",
                 "DONE": "TaskController",

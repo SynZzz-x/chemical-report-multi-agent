@@ -11,7 +11,7 @@ from src.nodes.verifier_manual import decision, verifier_manual
 def test_decision_returns_state_decision():
     assert decision({"decision": "NEXT"}, {}) == "NEXT"
     assert decision({"decision": "FULL_REPLAN"}, {}) == "FULL_REPLAN"
-    assert decision({"decision": "RETRY_WORKER"}, {}) == "RETRY_WORKER"
+    assert decision({"decision": "REWORK"}, {}) == "REWORK"
     assert decision({"decision": "DONE"}, {}) == "DONE"
 
 
@@ -26,6 +26,7 @@ def _manual_state(*, cursor=0, results=None):
     ]
     current_result = {
         "task_id": tasks[cursor]["task_id"],
+        "artifact_id": f"A-{tasks[cursor]['task_id']}",
         "text_output": f"{tasks[cursor]['task_name']}的结果",
     }
     return {
@@ -34,6 +35,23 @@ def _manual_state(*, cursor=0, results=None):
         "current_result": current_result,
         "results": list(results or []),
         "messages": [],
+        "active_artifact_ids": {
+            tasks[cursor]["task_id"]: current_result["artifact_id"]
+        },
+        "review_records": [],
+        "task_records": {
+            task["task_id"]: {
+                "task_id": task["task_id"],
+                "sequence": index,
+                "status": "RUNNING" if index == cursor else "PENDING",
+                "attempt_count": 1 if index == cursor else 0,
+                "active_artifact_id": (
+                    current_result["artifact_id"] if index == cursor else None
+                ),
+                "dependencies": [],
+            }
+            for index, task in enumerate(tasks)
+        },
     }
 
 
@@ -65,6 +83,9 @@ def test_manual_approval_bypasses_llm_and_advances_to_next_task(
 
     assert analyzer_called is False
     assert verifier_update["decision"] == "NEXT"
+    assert verifier_update["task_records"]["T1"]["status"] == "PASSED"
+    assert verifier_update["review_record"]["reviewer"] == "human"
+    assert verifier_update["review_record"]["artifact_id"] == "A-T1"
     control_message = json.loads(verifier_update["messages"][-1].content)
     assert control_message["type"] == "PROCEED"
 
@@ -125,8 +146,9 @@ def test_manual_pass_does_not_duplicate_an_accepted_task_result(monkeypatch):
     assert verifier_update["results"] == [accepted_result]
 
 
-def test_manual_pass_on_last_task_routes_to_summarizer(monkeypatch):
+def test_manual_pass_on_last_task_returns_to_controller_for_summary(monkeypatch):
     state = _manual_state(cursor=1)
+    state["task_records"]["T1"]["status"] = "PASSED"
     monkeypatch.setattr(
         manual_verifier_module,
         "interrupt",
@@ -135,10 +157,13 @@ def test_manual_pass_on_last_task_routes_to_summarizer(monkeypatch):
 
     verifier_update = verifier_manual(state, {})
 
-    assert verifier_update["decision"] == "DONE"
+    assert verifier_update["decision"] == "NEXT"
     control_message = json.loads(verifier_update["messages"][-1].content)
-    assert control_message["type"] == "SUMMARIZE"
+    assert control_message["type"] == "PROCEED"
     assert verifier_update["results"] == [state["current_result"]]
+
+    controller_update = task_controller({**state, **verifier_update}, {})
+    assert controller_update["controller_action"] == "SUMMARIZE"
 
 
 def test_manual_rework_keeps_cursor_result_unaccepted(monkeypatch):
@@ -164,10 +189,15 @@ def test_manual_rework_keeps_cursor_result_unaccepted(monkeypatch):
 
     verifier_update = verifier_manual(state, {})
 
-    assert verifier_update["decision"] == "RETRY_WORKER"
+    assert verifier_update["decision"] == "REWORK"
+    assert verifier_update["task_records"]["T1"]["status"] == "REVISE_REQUIRED"
     assert verifier_update["results"] == []
     control_message = json.loads(verifier_update["messages"][-1].content)
     assert control_message["type"] == "REWORK"
+
+    controller_update = task_controller({**state, **verifier_update}, {})
+    assert controller_update["controller_action"] == "DISPATCH"
+    assert controller_update["task_records"]["T1"]["attempt_count"] == 2
 
 
 def test_manual_full_replan_preserves_results_and_routes_to_planner(monkeypatch):

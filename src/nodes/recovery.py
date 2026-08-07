@@ -22,6 +22,7 @@ from src.recovery.policy import (
 )
 from src.state import State
 from src.task_contract import task_allows_web
+from src.workflow_records import ensure_task_records, set_task_status
 
 
 _RESUME_ACTION_ALIASES = {
@@ -181,7 +182,7 @@ def _continuation_message(action: str, state: State) -> AIMessage | None:
             content=json.dumps(
                 {
                     "from": "DecisionPolicy",
-                    "to": "Planner",
+                    "to": "TaskController",
                     "type": "PROCEED",
                     "current_section": _current_task(state).get("task_name"),
                 },
@@ -205,31 +206,32 @@ def decision_policy(state: State, config: RunnableConfig, **kwargs) -> dict[str,
     action = str(update.get("workflow_action") or "")
     if action == WorkflowAction.REWORK.value:
         issues = list(assessment.get("issues") or [])
+        responsible_handlers = list(
+            dict.fromkeys(
+                str(issue.get("responsible_handler") or "worker_agent")
+                for issue in issues
+                if isinstance(issue, dict)
+            )
+        )
         update["worker_state"] = _worker_state_with_feedback(
             state,
             {
                 "mode": "rework",
                 "issues": issues,
                 "instructions": _issue_instructions(issues),
+                "responsible_handlers": responsible_handlers,
             },
         )
 
-    continuation = (
-        str(update.get("continuation_action") or "")
-        if action == WorkflowAction.ACCEPT_WITH_WARNING.value
-        else action
-    )
-    message = _continuation_message(continuation, state)
+    message = _continuation_message(action, state)
     if message is not None:
         update["messages"] = [message]
-        update["decision"] = continuation
+        update["decision"] = action
     return update
 
 
 def route_policy(state: State, config: RunnableConfig | None = None, **kwargs) -> str:
     action = str(state.get("workflow_action") or WorkflowAction.NEEDS_USER_INPUT.value)
-    if action == WorkflowAction.ACCEPT_WITH_WARNING.value:
-        return str(state.get("continuation_action") or WorkflowAction.DONE.value)
     return action
 
 
@@ -394,9 +396,20 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
         "pending_user_action": {},
         "docs": resumed_docs,
     }
+    records = ensure_task_records(state)
     if action in {WorkflowAction.NEXT.value, WorkflowAction.DONE.value}:
         update["results"] = commit_current_result(state)
+        update["task_records"] = set_task_status(
+            records,
+            task_id,
+            "PASSED",
+            active_artifact_id=(state.get("active_artifact_ids") or {}).get(task_id)
+            or (state.get("current_result") or {}).get("artifact_id"),
+        )
     if action == WorkflowAction.REWORK.value:
+        update["task_records"] = set_task_status(
+            records, task_id, "REVISE_REQUIRED"
+        )
         update["worker_state"] = _worker_state_with_feedback(
             state,
             {
@@ -404,6 +417,10 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
                 "issues": issues,
                 "instructions": text or guidance,
             },
+        )
+    if action == WorkflowAction.EVIDENCE_RECOVERY.value:
+        update["task_records"] = set_task_status(
+            records, task_id, "EVIDENCE_REQUIRED"
         )
     message = _continuation_message(action, state)
     if message is not None:
