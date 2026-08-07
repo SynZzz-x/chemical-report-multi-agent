@@ -4,7 +4,7 @@ This project is a LangGraph-based multi-agent system that turns a user's natural
 
 ## Highlights
 
-- Stateful `Intake -> Planner -> Worker -> Verifier -> Summarizer -> Exit` workflow.
+- Stateful `Intake -> Planner -> TaskController -> Worker -> ArtifactCommit -> QualityReview -> DecisionPolicy -> Summarizer -> Exit` workflow.
 - Human-in-the-loop plan confirmation and result verification.
 - Worker tools for CSV analysis, chart generation, web extraction, and domain knowledge retrieval.
 - Streamlit demo interface plus CLI debugger.
@@ -18,7 +18,9 @@ This project is a LangGraph-based multi-agent system that turns a user's natural
 User request / CSV files
         |
         v
-Intake -> Planner -> Worker -> Verifier -> Summarizer -> Exit
+Intake -> Planner -> TaskController -> Worker -> ArtifactCommit
+                                      -> QualityReview -> DecisionPolicy
+                                      -> TaskController / Summarizer -> Exit
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full workflow and state model.
@@ -190,10 +192,48 @@ python run.py --thread-id job_<id>
 ## Testing
 
 ```bash
-pytest
+python -m pytest -q
 ```
 
 The tests avoid LLM and network calls. They cover request extraction, resource mapping, verifier routing, requirements encoding, and hardcoded-secret scanning.
+
+### Server verification for the stabilized report pipeline
+
+Fetch the implementation branch and run the complete regression suite before
+starting Streamlit:
+
+```bash
+git fetch origin
+git switch codex/report-pipeline-stabilization
+git pull --ff-only
+python -m pytest -q
+streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Then perform this smoke test from the browser:
+
+1. Create a new report job and explicitly allow or deny trusted public-web
+   retrieval. This choice is immutable after the job is created.
+2. Confirm a nine-task plan and observe the T1-T9 ledger, attempt count,
+   active Artifact, and latest review status in the work area.
+3. Request one local revision (for example, T3) and confirm that the new
+   attempt creates a new T3 Artifact without rerunning T1 or T2.
+4. Let all tasks reach `PASSED`; Summarizer must reject any incomplete ledger.
+5. Check the per-format report status. Download buttons must be shown only for
+   outputs marked `SUCCEEDED`; a failed PDF must not be advertised.
+6. Stop Streamlit, start it again with the same command, restore the historical
+   job from the sidebar, and confirm that task, Artifact, review, and report
+   status are restored from SQLite without duplicate execution.
+
+The regression cases that reproduce the original server failures can also be
+run separately:
+
+```bash
+python -m pytest \
+  tests/test_pipeline_e2e.py \
+  tests/test_report_generation.py \
+  tests/test_pdf_tables.py -q
+```
 
 ## Repository Structure
 
