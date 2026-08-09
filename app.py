@@ -30,7 +30,7 @@ from langgraph.types import Command
 from src.config import get_cache_root, get_local_user_id, missing_key_message
 from src.control_messages import blocker_guidance, is_displayable_assistant_message
 from src.graph import WorkFlow, WorkFlowAuto
-from src.job_store import JobStore, interrupt_from_snapshot
+from src.job_store import JobStore, interrupt_from_snapshot, resumable_checkpoint
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
 from src.ui_projection import (
@@ -112,6 +112,9 @@ def _ensure_session_scope() -> None:
 
     if "web_authorized" not in st.session_state:
         st.session_state["web_authorized"] = False
+
+    if "resume_checkpoint_pending" not in st.session_state:
+        st.session_state["resume_checkpoint_pending"] = False
 
 
 _ensure_session_scope()
@@ -219,6 +222,7 @@ def _start_new_job() -> None:
     st.session_state["job_record_created"] = False
     st.session_state["last_run_failed"] = False
     st.session_state["web_authorized"] = False
+    st.session_state["resume_checkpoint_pending"] = False
 
 
 def _start_new_conversation() -> None:
@@ -246,6 +250,7 @@ def _restore_job(job_id: str) -> None:
         "verifier_mode",
         "app",
         "web_authorized",
+        "resume_checkpoint_pending",
     )
     previous_state = {
         key: st.session_state.get(key, missing)
@@ -267,17 +272,19 @@ def _restore_job(job_id: str) -> None:
 
         snapshot = st.session_state["app"].get_state(_graph_config())
         pending = interrupt_from_snapshot(snapshot)
+        resume_pending = resumable_checkpoint(snapshot)
         st.session_state["pending_interrupt"] = pending
+        st.session_state["resume_checkpoint_pending"] = resume_pending
         st.session_state["verifier_mode"] = mode
 
         changes: dict[str, Any] = {"pending_interrupt": pending}
         if pending is not None:
             changes["status"] = "waiting"
+        elif resume_pending:
+            changes["status"] = "running"
         elif record.get("status") in {"running", "waiting"}:
-            changes["status"] = (
-                "completed"
-                if not (getattr(snapshot, "next", ()) or ())
-                else "failed"
+            changes["status"] = _graph_completion_status(
+                dict(getattr(snapshot, "values", {}) or {})
             )
         JOBS.update_job(user_id, job_id, **changes)
     except Exception:
@@ -750,6 +757,16 @@ def _render_work_area() -> None:
                 st.caption(outcome["error"])
 
 
+def _graph_completion_status(values: dict[str, Any]) -> str:
+    outputs = (values.get("report_manifest") or {}).get("outputs") or {}
+    if outputs and not any(
+        isinstance(outcome, dict) and outcome.get("status") == "SUCCEEDED"
+        for outcome in outputs.values()
+    ):
+        return "failed"
+    return "completed"
+
+
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
@@ -885,6 +902,41 @@ if "app" not in st.session_state:
 if st.session_state.get("compiled_mode") != verifier_mode:
     st.warning("审核模式与已编译工作流不一致，请重新编译或恢复原模式。")
     st.stop()
+
+
+if st.session_state.get("resume_checkpoint_pending"):
+    st.session_state["resume_checkpoint_pending"] = False
+    st.session_state["last_run_failed"] = False
+    _update_job(status="running", pending_interrupt=None)
+    with st.status("正在从 SQLite checkpoint 继续执行……", expanded=True) as status:
+        for update in _safe_stream_updates(
+            st.session_state["app"],
+            None,
+            _graph_config(_snapshot_values()),
+        ):
+            if _handle_interrupt(update):
+                status.update(
+                    label="工作流等待输入", state="complete", expanded=True
+                )
+                continue
+            for node, delta in update.items():
+                if not isinstance(delta, dict):
+                    continue
+                summary = _summarize_step(node, delta)
+                st.write(f"**{node}**{f' · {summary}' if summary else ''}")
+                _handle_node_delta(node, delta)
+
+        if st.session_state.get("last_run_failed"):
+            status.update(label="checkpoint 恢复失败", state="error", expanded=True)
+        elif st.session_state.get("pending_interrupt") is None:
+            values = _snapshot_values()
+            _update_job(
+                status=_graph_completion_status(values),
+                pending_interrupt=None,
+                report_paths=[str(path) for path in _report_paths_from_state()],
+            )
+            status.update(label="checkpoint 恢复完成", state="complete", expanded=False)
+    st.rerun()
 
 
 chat_value = st.chat_input(
@@ -1033,8 +1085,9 @@ if chat_value:
         and not st.session_state.get("last_run_failed")
     ):
         report_paths = [str(path) for path in _report_paths_from_state()]
+        final_values = _snapshot_values()
         _update_job(
-            status="completed",
+            status=_graph_completion_status(final_values),
             pending_interrupt=None,
             report_paths=report_paths,
         )

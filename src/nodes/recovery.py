@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from copy import deepcopy
+from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -22,7 +24,9 @@ from src.recovery.policy import (
 )
 from src.state import State
 from src.task_contract import task_allows_web
+from src.quality.models import QualityDimensions, ReviewRecord
 from src.workflow_records import ensure_task_records, set_task_status
+from src.workflow_store import WorkflowRecordStore
 
 
 _RESUME_ACTION_ALIASES = {
@@ -160,6 +164,50 @@ def _worker_state_with_feedback(
     worker_state = deepcopy(state.get("worker_state") or {})
     worker_state["execution_feedback"] = feedback
     return worker_state
+
+
+def _human_override_review(
+    state: State,
+    task_id: str,
+    action: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    artifact_id = str(
+        (state.get("active_artifact_ids") or {}).get(task_id)
+        or (state.get("current_result") or {}).get("artifact_id")
+        or f"legacy-{task_id}"
+    )
+    stable = f"{task_id}|{artifact_id}|human_override|{action}"
+    review_id = "review_" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+    record = ReviewRecord(
+        review_id=review_id,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        reviewer="human_override",
+        created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        status="PASS",
+        issues=[],
+        quality_dimensions=QualityDimensions(
+            completeness=5,
+            evidence=5,
+            logic=5,
+            actionability=5,
+            safety=5,
+        ),
+    ).model_dump(mode="json")
+    records = list(state.get("review_records") or [])
+    prior = next(
+        (
+            review
+            for review in records
+            if isinstance(review, dict) and review.get("review_id") == review_id
+        ),
+        None,
+    )
+    if prior is not None:
+        record = dict(prior)
+    else:
+        records.append(record)
+    return record, records
 
 
 def _issue_instructions(issues: list[dict[str, Any]]) -> str:
@@ -344,7 +392,12 @@ def plan_patcher(state: State, config: RunnableConfig, **kwargs) -> dict[str, An
     return update
 
 
-def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+def needs_user_input(
+    state: State,
+    config: RunnableConfig,
+    store: Any = None,
+    **kwargs,
+) -> dict[str, Any]:
     """Interrupt with a concrete blocker and route the incremental resume safely."""
     pending = deepcopy(state.get("pending_user_action") or {})
     category = str(pending.get("category") or "EXTERNAL_BLOCKER")
@@ -402,6 +455,17 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
     records = ensure_task_records(state)
     if action in {WorkflowAction.NEXT.value, WorkflowAction.DONE.value}:
         update["results"] = commit_current_result(state)
+        review_record, review_records = _human_override_review(
+            state, task_id, action
+        )
+        update["review_record"] = review_record
+        update["review_records"] = review_records
+        if store is not None:
+            WorkflowRecordStore(
+                store,
+                str(state.get("user_id") or ""),
+                str(state.get("job_id") or ""),
+            ).put_review(review_record)
         update["task_records"] = set_task_status(
             records,
             task_id,

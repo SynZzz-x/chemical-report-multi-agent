@@ -69,8 +69,8 @@ def _is_direct_approval(value: str) -> bool:
 
 
 def _normalize_decision(value: object) -> str:
-    normalized = str(value or "PASS").strip().upper()
-    return _DECISION_ALIASES.get(normalized, "PASS")
+    normalized = str(value or "").strip().upper()
+    return _DECISION_ALIASES.get(normalized, "REWORK")
 
 
 def _append_result_once(previous_results, current_result):
@@ -218,11 +218,11 @@ def _analyze_feedback(user_feedback: str, task_name: str, current_result_content
         content_str = _clean_json_fences(str(res.content).strip())
         return json.loads(content_str)
     except Exception as e:
-        # 兜底逻辑：默认视为通过
+        # Fail closed: ambiguous feedback must never approve an Artifact.
         return {
-            "decision": "PASS",
-            "reason": f"反馈分析失败，默认通过: {str(e)}",
-            "suggestions": ""
+            "decision": "REWORK",
+            "reason": f"反馈分析失败，保留用户返工意见: {str(e)}",
+            "suggestions": user_feedback,
         }
 
 

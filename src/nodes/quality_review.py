@@ -104,9 +104,15 @@ def _semantic_assessment(state, task, artifact, config) -> ReviewAssessment:
             + json.dumps(payload, ensure_ascii=False, indent=2)
         )
         response = model.invoke([message], config=config)
-        return ReviewAssessment.model_validate_json(
+        assessment = ReviewAssessment.model_validate_json(
             _clean_json_fences(str(response.content))
         )
+        if assessment.status != "PASS" and not assessment.issues:
+            return _review_failure(
+                "ASSESSMENT_CONTRACT_ERROR",
+                "Non-PASS quality assessment must include at least one issue.",
+            )
+        return assessment
     except Exception as exc:
         return _review_failure("REVIEW_SERVICE_ERROR", str(exc))
 
@@ -114,6 +120,11 @@ def _semantic_assessment(state, task, artifact, config) -> ReviewAssessment:
 def _merge_issues(
     deterministic: list[ReviewIssue], semantic: ReviewAssessment
 ) -> ReviewAssessment:
+    if semantic.status != "PASS" and not semantic.issues:
+        semantic = _review_failure(
+            "ASSESSMENT_CONTRACT_ERROR",
+            "Non-PASS quality assessment must include at least one issue.",
+        )
     issues: list[ReviewIssue] = []
     seen: set[tuple[str, str]] = set()
     for issue in [*deterministic, *semantic.issues]:
@@ -123,9 +134,14 @@ def _merge_issues(
             issues.append(issue)
     if not issues:
         status = "PASS"
-    elif any(issue.category == "SAFETY_BOUNDARY" for issue in issues):
+    elif semantic.status == "HUMAN_REVIEW" or any(
+        issue.category == "SAFETY_BOUNDARY" for issue in issues
+    ):
         status = "HUMAN_REVIEW"
-    elif any(issue.category in {"EXTERNAL_BLOCKER", "REVIEW_FAILURE"} for issue in issues):
+    elif semantic.status == "BLOCKED" or any(
+        issue.category in {"EXTERNAL_BLOCKER", "REVIEW_FAILURE"}
+        for issue in issues
+    ):
         status = "BLOCKED"
     else:
         status = "REVISE"
@@ -136,12 +152,12 @@ def _merge_issues(
     )
 
 
-def _review_id(task_id: str, artifact_id: str, assessment: ReviewAssessment) -> str:
+def _review_id(task_id: str, artifact_id: str, review_attempt: int) -> str:
     stable = json.dumps(
         {
             "task_id": task_id,
             "artifact_id": artifact_id,
-            **assessment.model_dump(mode="json"),
+            "review_attempt": review_attempt,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -195,9 +211,12 @@ def quality_review(
     )
     semantic = _semantic_assessment(state, task, artifact, config)
     assessment = _merge_issues(deterministic, semantic)
+    review_attempt = int(
+        (state.get("verifier_retry_count") or {}).get(task_id, 0) or 0
+    ) + 1
     record = ReviewRecord(
         **assessment.model_dump(mode="json"),
-        review_id=_review_id(task_id, artifact_id, assessment),
+        review_id=_review_id(task_id, artifact_id, review_attempt),
         task_id=task_id,
         artifact_id=artifact_id,
         reviewer="quality_review_agent",

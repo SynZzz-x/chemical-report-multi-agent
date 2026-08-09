@@ -407,6 +407,10 @@ def test_explicit_next_resume_commits_current_result_before_advancing(monkeypatc
 
     assert update["workflow_action"] == "NEXT"
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+    assert update["review_record"]["status"] == "PASS"
+    assert update["review_record"]["reviewer"] == "human_override"
+    assert update["review_record"]["artifact_id"] == "A-T2"
+    assert update["review_records"][-1] == update["review_record"]
 
 
 def test_resume_dict_text_alias_honors_only_an_accepted_action(monkeypatch):
@@ -688,6 +692,8 @@ def test_auto_graph_has_no_replan_route_to_planner():
     assert '"RETRY_VERIFIER": "QualityReview"' in source
     assert '"REWORK": "TaskController"' in source
     assert 'self.add_edge("EvidenceRecovery", "TaskController")' in source
+    assert '"Verifier",' in source
+    assert '"legacy_auto_checkpoint"' in source
 
 
 def test_verifier_contract_failure_routes_only_back_to_verifier_once():

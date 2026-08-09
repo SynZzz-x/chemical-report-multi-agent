@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from src.quality.validators import validate_artifact
+from src.quality.models import QualityDimensions, ReviewAssessment
 from src.nodes import quality_review as review_module
 
 
@@ -137,3 +138,56 @@ def test_replayed_quality_review_does_not_duplicate_review_record(monkeypatch):
 
     assert replay["review_record"]["review_id"] == first["review_record"]["review_id"]
     assert len(replay["review_records"]) == 1
+
+
+def test_non_pass_semantic_status_without_issue_becomes_review_failure(monkeypatch):
+    state = _state()
+    monkeypatch.setattr(
+        review_module,
+        "_semantic_assessment",
+        lambda *args, **kwargs: ReviewAssessment(
+            status="REVISE",
+            issues=[],
+            quality_dimensions=QualityDimensions(
+                completeness=2,
+                evidence=2,
+                logic=2,
+                actionability=2,
+                safety=5,
+            ),
+        ),
+    )
+
+    update = review_module.quality_review(
+        state, {"configurable": {"use_llm": True}}
+    )
+
+    assert update["review_record"]["status"] == "BLOCKED"
+    assert update["review_record"]["issues"][0]["category"] == "REVIEW_FAILURE"
+
+
+def test_review_id_is_stable_for_same_artifact_and_review_attempt(monkeypatch):
+    state = _state()
+    changed_payload = _passing_payload()
+    changed_payload["quality_dimensions"]["logic"] = 3
+    assessments = iter(
+        (
+            ReviewAssessment.model_validate(_passing_payload()),
+            ReviewAssessment.model_validate(changed_payload),
+        )
+    )
+    monkeypatch.setattr(
+        review_module,
+        "_semantic_assessment",
+        lambda *args, **kwargs: next(assessments),
+    )
+
+    first = review_module.quality_review(
+        state, {"configurable": {"use_llm": True}}
+    )
+    replay_state = {**state, "review_records": []}
+    second = review_module.quality_review(
+        replay_state, {"configurable": {"use_llm": True}}
+    )
+
+    assert first["review_record"]["review_id"] == second["review_record"]["review_id"]

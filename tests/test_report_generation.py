@@ -31,6 +31,16 @@ def _passed_report_state():
         },
         "active_artifact_ids": {"T1": "A1"},
         "artifacts": {"A1": artifact},
+        "review_records": [
+            {
+                "review_id": "R1",
+                "task_id": "T1",
+                "artifact_id": "A1",
+                "reviewer": "quality_review_agent",
+                "status": "PASS",
+                "issues": [],
+            }
+        ],
         "results": [
             {
                 "task_id": "T1",
@@ -85,6 +95,14 @@ def test_summarizer_rejects_incomplete_task_ledger():
     }
 
     with pytest.raises(RuntimeError, match="not passed"):
+        module.summarizer(state, {})
+
+
+def test_summarizer_rejects_passed_artifact_without_pass_review():
+    state = _passed_report_state()
+    state["review_records"] = []
+
+    with pytest.raises(RuntimeError, match="PASS review"):
         module.summarizer(state, {})
 
 
@@ -170,3 +188,41 @@ def test_report_manifest_is_persisted_with_successful_outputs_only(
         manifest["pdf_path"],
         manifest["docx_path"],
     }
+
+
+def test_legacy_passed_results_are_migrated_to_artifacts_and_reviews(
+    monkeypatch, tmp_path
+):
+    state = {
+        "user_id": "u1",
+        "job_id": "legacy-j1",
+        "tasks": [{"task_id": "T1", "task_name": "旧章节"}],
+        "results": [{"task_id": "T1", "text_output": "旧版已接受正文"}],
+        "messages": [],
+    }
+    monkeypatch.setattr(module, "get_session_cache_dir", lambda *args: str(tmp_path))
+    monkeypatch.setattr(
+        module,
+        "_generate_section_content",
+        lambda section, config: f"## {section['title']}\n\n{section['text']}",
+    )
+    monkeypatch.setattr(module, "_generate_report_evaluation", lambda *args: "评价")
+    monkeypatch.setattr(module.md_rewrite, "rewrite_markdown", lambda text: text)
+    monkeypatch.setattr(
+        module.md_to_pdf,
+        "md_to_pdf",
+        lambda content, path, **kwargs: Path(path).write_bytes(b"pdf"),
+    )
+    monkeypatch.setattr(
+        module.md_to_docx,
+        "md_to_docx",
+        lambda content, path: Path(path).write_bytes(b"docx"),
+    )
+
+    result = module.summarizer(state, {})
+
+    assert result["report_manifest"]["included_artifact_ids"][0].startswith(
+        "artifact_legacy_"
+    )
+    assert result["active_artifact_ids"]["T1"] in result["artifacts"]
+    assert result["review_records"][0]["status"] == "PASS"

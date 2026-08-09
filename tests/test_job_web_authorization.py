@@ -1,6 +1,6 @@
 import pytest
 
-from src.job_store import JobStore
+from src.job_store import JobStore, resumable_checkpoint
 from src.nodes.planner import _apply_job_web_authorization
 from src.task_contract import task_allows_web
 
@@ -58,3 +58,9 @@ def test_job_web_authorization_is_persisted_and_immutable():
     assert record["web_authorized"] is True
     with pytest.raises(ValueError, match="web_authorized"):
         jobs.update_job("u1", "j1", web_authorized=False)
+
+
+def test_non_interrupt_checkpoint_with_next_node_is_resumable():
+    snapshot = type("Snapshot", (), {"next": ("QualityReview",), "tasks": ()})()
+
+    assert resumable_checkpoint(snapshot) is True

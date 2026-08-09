@@ -15,7 +15,11 @@ from ..llm import get_llm
 from ..utils import md_to_docx, md_to_pdf, md_rewrite
 from ..utils.path_manager import get_session_cache_dir
 from ..evidence.reporting import append_missing_figures, format_evidence_table
-from ..workflow_records import all_tasks_passed, ensure_task_records
+from ..workflow_records import (
+    all_tasks_passed,
+    ensure_task_records,
+    migrate_legacy_workflow_state,
+)
 from ..workflow_store import WorkflowRecordStore
 
 if TYPE_CHECKING:
@@ -275,6 +279,8 @@ def summarizer(
 ):
     logger.info("Starting summarizer_v2...")
 
+    migration = migrate_legacy_workflow_state(state)
+    state = {**state, **migration}
     tasks = list(state.get("tasks") or [])
     records = ensure_task_records(state)
     if not all_tasks_passed(tasks, records):
@@ -284,6 +290,20 @@ def summarizer(
             if record.get("status") != "PASSED"
         ]
         raise RuntimeError(f"report tasks not passed: {', '.join(incomplete)}")
+    reviews = list(state.get("review_records") or [])
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        artifact_id = (state.get("active_artifact_ids") or {}).get(task_id)
+        if not any(
+            isinstance(review, dict)
+            and review.get("task_id") == task_id
+            and review.get("artifact_id") == artifact_id
+            and review.get("status") == "PASS"
+            for review in reviews
+        ):
+            raise RuntimeError(
+                f"passed task {task_id} active Artifact has no PASS review"
+            )
     
     # 1. Reorganize content from tasks
     sections = _content_reorganizer(state)
@@ -382,17 +402,25 @@ def summarizer(
     }
 
     if store is not None:
-        WorkflowRecordStore(
+        record_store = WorkflowRecordStore(
             store,
             str(state.get("user_id") or ""),
             str(state.get("job_id") or ""),
-        ).put_report_manifest(manifest)
+        )
+        for artifact in migration["artifacts"].values():
+            if artifact.get("producer") == "legacy_checkpoint_migration":
+                record_store.put_artifact(artifact)
+        for review in migration["review_records"]:
+            if review.get("reviewer") == "legacy_checkpoint_migration":
+                record_store.put_review(review)
+        record_store.put_report_manifest(manifest)
     
     # We can also add a message to the conversation history
     msg_content = f"{eval_text}"
     msg = AIMessage(content=msg_content)
     
     return {
+        **migration,
         "messages": [msg],
         "final_result": final_result,
         "report_manifest": manifest,

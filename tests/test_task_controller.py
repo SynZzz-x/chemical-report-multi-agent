@@ -1,6 +1,14 @@
 from src.nodes.task_controller import route_task_controller, task_controller
 
 
+class RecordingStore:
+    def __init__(self):
+        self.puts = []
+
+    def put(self, namespace, key, value, **kwargs):
+        self.puts.append((namespace, key, value, kwargs))
+
+
 def _state(count=9):
     return {
         "job_id": "job-1",
@@ -75,3 +83,28 @@ def test_replaying_controller_input_reuses_execution_identity():
     replay = task_controller(state)
 
     assert first["current_execution_id"] == replay["current_execution_id"]
+
+
+def test_controller_mirrors_legacy_migration_records_to_store():
+    state = _state(1)
+    state.update(
+        {
+            "user_id": "user-1",
+            "results": [
+                {
+                    "task_id": "T1",
+                    "text_output": "accepted legacy output",
+                    "citations": [],
+                }
+            ],
+        }
+    )
+    store = RecordingStore()
+
+    update = task_controller(state, store=store)
+
+    assert update["controller_action"] == "SUMMARIZE"
+    assert {namespace[-1] for namespace, *_ in store.puts} == {
+        "artifacts",
+        "reviews",
+    }

@@ -54,11 +54,15 @@ def task_progress_view(state: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         task_id = str(task.get("task_id") or f"T{index + 1}")
         record = records.get(task_id) or {}
+        active_artifact_id = record.get("active_artifact_id") or (
+            state.get("active_artifact_ids") or {}
+        ).get(task_id)
         latest_review = next(
             (
                 review
                 for review in reversed(reviews)
                 if str(review.get("task_id") or "") == task_id
+                and review.get("artifact_id") == active_artifact_id
             ),
             {},
         )
@@ -68,8 +72,7 @@ def task_progress_view(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "task_name": task.get("task_name") or task_id,
                 "status": record.get("status") or "PENDING",
                 "attempt_count": int(record.get("attempt_count", 0) or 0),
-                "active_artifact_id": record.get("active_artifact_id")
-                or (state.get("active_artifact_ids") or {}).get(task_id),
+                "active_artifact_id": active_artifact_id,
                 "latest_review_id": latest_review.get("review_id"),
                 "latest_review_status": latest_review.get("status"),
                 "latest_review_issues": list(latest_review.get("issues") or []),

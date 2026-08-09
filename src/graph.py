@@ -20,6 +20,7 @@ from .nodes.summarizer_v2 import summarizer
 from .nodes.exiting import exiting
 from .nodes.task_controller import route_task_controller, task_controller
 from .nodes.artifact_commit import artifact_commit
+from .nodes.legacy_verifier import legacy_auto_verifier, legacy_manual_verifier
 # from .nodes.worker.agent.graph import router_node, execute_task_node, generate_result_node, route_decision
 from .nodes.worker.agent.graph import create_worker_workflow
 
@@ -118,8 +119,14 @@ class WorkFlowBase(StateGraph):
 
         if self.use_auto_verifier:
             self.add_node("QualityReview", quality_review, metadata={"type":"auto"})
+            self.add_node(
+                "Verifier",
+                legacy_auto_verifier,
+                metadata={"type": "legacy_auto_checkpoint"},
+            )
             self.add_node("DecisionPolicy", decision_policy)
             self.add_edge("QualityReview", "DecisionPolicy")
+            self.add_edge("Verifier", "DecisionPolicy")
             self.add_conditional_edges(
                 "DecisionPolicy",
                 route_policy,
@@ -136,8 +143,18 @@ class WorkFlowBase(StateGraph):
 
         else:
             self.add_node("QualityReview", verifier_manual, metadata={"type":"manual"})
+            self.add_node(
+                "Verifier",
+                legacy_manual_verifier,
+                metadata={"type": "legacy_manual_checkpoint"},
+            )
             self.add_conditional_edges(
                 "QualityReview",
+                decision,
+                _MANUAL_VERIFIER_ROUTES,
+            )
+            self.add_conditional_edges(
+                "Verifier",
                 decision,
                 _MANUAL_VERIFIER_ROUTES,
             )

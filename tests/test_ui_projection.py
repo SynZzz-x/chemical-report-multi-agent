@@ -91,6 +91,34 @@ def test_report_status_view_exposes_not_attempted_and_failures():
     assert view["docx"]["status"] == "NOT_ATTEMPTED"
 
 
+def test_progress_ignores_review_for_superseded_artifact():
+    from src.ui_projection import task_progress_view
+
+    view = task_progress_view(
+        {
+            "tasks": [{"task_id": "T1", "task_name": "章节"}],
+            "task_records": {
+                "T1": {
+                    "status": "RUNNING",
+                    "attempt_count": 2,
+                    "active_artifact_id": "A2",
+                }
+            },
+            "review_records": [
+                {
+                    "review_id": "R1",
+                    "task_id": "T1",
+                    "artifact_id": "A1",
+                    "status": "PASS",
+                    "issues": [],
+                }
+            ],
+        }
+    )
+
+    assert view[0]["latest_review_status"] is None
+
+
 def test_streamlit_renders_auditable_views_and_supported_uploads():
     source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
 
@@ -98,3 +126,7 @@ def test_streamlit_renders_auditable_views_and_supported_uploads():
     assert "report_status_view" in source
     assert "允许本报告任务检索可信公开网络资料" in source
     assert 'file_type=["pdf", "docx", "csv", "xlsx", "xls"]' in source
+    assert "resume_checkpoint_pending" in source
+    assert "正在从 SQLite checkpoint 继续执行" in source
+    assert "_graph_completion_status" in source
+    assert 'changes["status"] = _graph_completion_status(' in source

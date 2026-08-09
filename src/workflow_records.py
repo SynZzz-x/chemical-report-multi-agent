@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -137,4 +138,94 @@ def build_artifact(
         or datetime.now().astimezone().isoformat(timespec="seconds"),
         "supersedes": (state.get("active_artifact_ids") or {}).get(task_id),
         "execution_id": execution_id,
+    }
+
+
+def migrate_legacy_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Materialize stable Artifact/Review records for pre-ledger checkpoints."""
+    records = ensure_task_records(state)
+    artifacts = {
+        str(key): dict(value)
+        for key, value in (state.get("artifacts") or {}).items()
+        if isinstance(value, dict)
+    }
+    active = dict(state.get("active_artifact_ids") or {})
+    reviews = [
+        dict(review)
+        for review in state.get("review_records") or []
+        if isinstance(review, dict)
+    ]
+
+    for result in state.get("results") or []:
+        if not isinstance(result, dict) or result.get("task_id") is None:
+            continue
+        task_id = str(result["task_id"])
+        if records.get(task_id, {}).get("status") != "PASSED":
+            continue
+        existing_artifact_id = active.get(task_id) or result.get("artifact_id")
+        is_legacy = not result.get("artifact_id") or existing_artifact_id not in artifacts
+        if not is_legacy:
+            continue
+
+        stable_result = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(
+            f"{task_id}|{stable_result}".encode("utf-8")
+        ).hexdigest()[:24]
+        artifact_id = f"artifact_legacy_{digest}"
+        artifact = {
+            **result,
+            "artifact_id": artifact_id,
+            "task_id": task_id,
+            "attempt_no": int(records[task_id].get("attempt_count", 0) or 0),
+            "artifact_type": "report_section",
+            "producer": "legacy_checkpoint_migration",
+            "content": result.get("content") or result.get("text_output") or "",
+            "evidence_refs": list(result.get("citations") or []),
+            "source_scope": list(result.get("sources_used") or []),
+            "created_at": result.get("generated_at")
+            or result.get("timestamp")
+            or "legacy-checkpoint",
+            "supersedes": None,
+            "execution_id": f"execution_legacy_{digest}",
+        }
+        artifacts[artifact_id] = artifact
+        active[task_id] = artifact_id
+        records = set_task_status(
+            records,
+            task_id,
+            "PASSED",
+            active_artifact_id=artifact_id,
+        )
+
+        review_id = f"review_legacy_{digest}"
+        if not any(review.get("review_id") == review_id for review in reviews):
+            reviews.append(
+                {
+                    "review_id": review_id,
+                    "task_id": task_id,
+                    "artifact_id": artifact_id,
+                    "reviewer": "legacy_checkpoint_migration",
+                    "created_at": artifact["created_at"],
+                    "status": "PASS",
+                    "issues": [],
+                    "quality_dimensions": {
+                        "completeness": 0,
+                        "evidence": 0,
+                        "logic": 0,
+                        "actionability": 0,
+                        "safety": 0,
+                    },
+                }
+            )
+
+    return {
+        "task_records": records,
+        "artifacts": artifacts,
+        "active_artifact_ids": active,
+        "review_records": reviews,
     }

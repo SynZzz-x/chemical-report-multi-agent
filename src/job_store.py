@@ -31,6 +31,13 @@ def interrupt_from_snapshot(snapshot: Any) -> Any | None:
     return None
 
 
+def resumable_checkpoint(snapshot: Any) -> bool:
+    """Return true when execution can continue without an interrupt payload."""
+    return interrupt_from_snapshot(snapshot) is None and bool(
+        getattr(snapshot, "next", ()) or ()
+    )
+
+
 class JobStore:
     def __init__(self, store: BaseStore):
         self.store = store

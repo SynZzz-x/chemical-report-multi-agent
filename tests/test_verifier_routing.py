@@ -200,6 +200,34 @@ def test_manual_rework_keeps_cursor_result_unaccepted(monkeypatch):
     assert controller_update["task_records"]["T1"]["attempt_count"] == 2
 
 
+def test_manual_feedback_analysis_failure_never_defaults_to_pass(monkeypatch):
+    state = _manual_state()
+    monkeypatch.setattr(
+        manual_verifier_module,
+        "interrupt",
+        lambda payload: {
+            "text": "内容错误，请返工",
+            "message_id": "feedback-failure",
+            "docs": [],
+        },
+    )
+    monkeypatch.setattr(
+        manual_verifier_module,
+        "get_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    update = verifier_manual(state, {})
+
+    assert update["decision"] == "REWORK"
+    assert update["task_records"]["T1"]["status"] == "REVISE_REQUIRED"
+    assert update["results"] == []
+
+
+def test_unknown_manual_decision_is_fail_closed():
+    assert manual_verifier_module._normalize_decision("MAYBE") == "REWORK"
+
+
 def test_manual_full_replan_preserves_results_and_routes_to_planner(monkeypatch):
     accepted_result = {"task_id": "T0", "text_output": "已完成结果"}
     state = _manual_state(results=[accepted_result])
