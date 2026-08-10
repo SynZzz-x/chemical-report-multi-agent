@@ -226,7 +226,7 @@ def decision_policy(state: State, config: RunnableConfig, **kwargs) -> dict[str,
     return update
 
 
-def route_policy(state: State, config: RunnableConfig | None = None, **kwargs) -> str:
+def route_policy(state: State, **kwargs) -> str:
     action = str(state.get("workflow_action") or WorkflowAction.NEEDS_USER_INPUT.value)
     if action == WorkflowAction.ACCEPT_WITH_WARNING.value:
         return str(state.get("continuation_action") or WorkflowAction.DONE.value)
@@ -412,7 +412,5 @@ def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str
     return update
 
 
-def route_after_blocker(
-    state: State, config: RunnableConfig | None = None, **kwargs
-) -> str:
+def route_after_blocker(state: State, **kwargs) -> str:
     return str(state.get("workflow_action") or WorkflowAction.NEEDS_USER_INPUT.value)

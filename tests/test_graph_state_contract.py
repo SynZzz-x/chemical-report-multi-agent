@@ -94,3 +94,31 @@ def test_compiled_auto_graph_pass_advances_to_next_task():
         "workflow_action": "DONE",
         "result_ids": ["T1", "T2"],
     }
+
+
+def test_compiled_auto_graph_has_no_invalid_runnable_config_warning():
+    script = textwrap.dedent(
+        r'''
+        import warnings
+
+        warnings.filterwarnings(
+            "error",
+            message="The 'config' parameter should be typed.*",
+        )
+
+        from src.graph import WorkFlowAuto
+
+        WorkFlowAuto().compile()
+        '''
+    )
+    env = dict(os.environ)
+    env["MPLCONFIGDIR"] = "/tmp/matplotlib-agent"
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )

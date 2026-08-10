@@ -98,7 +98,7 @@ def test_t2_evidence_gap_never_routes_to_planner_or_resets_cursor():
     assert update["workflow_action"] == "EVIDENCE_RECOVERY"
     assert update.get("cursor", state["cursor"]) == 1
     assert [item["task_id"] for item in state["results"]] == ["T1"]
-    assert route_policy({**state, **update}, {}) == "EVIDENCE_RECOVERY"
+    assert route_policy({**state, **update}) == "EVIDENCE_RECOVERY"
 
 
 def test_rework_policy_creates_structured_execution_feedback():
@@ -137,7 +137,7 @@ def test_accept_with_warning_routes_through_continuation_action():
     update = decision_policy(state, {})
 
     assert update["workflow_action"] == "ACCEPT_WITH_WARNING"
-    assert route_policy({**state, **update}, {}) == "NEXT"
+    assert route_policy({**state, **update}) == "NEXT"
 
 
 def test_evidence_recovery_builds_query_and_honors_task_web_gate():
@@ -309,7 +309,7 @@ def test_needs_user_input_interrupt_payload_and_incremental_resume(monkeypatch):
     assert update["workflow_action"] == "REWORK"
     assert update["docs"] == [resumed_doc]
     assert "cursor" not in update
-    assert route_after_blocker({**state, **update}, {}) == "REWORK"
+    assert route_after_blocker({**state, **update}) == "REWORK"
     assert update["worker_state"]["execution_feedback"]["instructions"] == "Use the uploaded source"
 
 
@@ -675,7 +675,7 @@ def test_verifier_contract_failure_routes_only_back_to_verifier_once():
     update = decision_policy(state, {})
 
     assert update["workflow_action"] == "RETRY_VERIFIER"
-    assert route_policy({**state, **update}, {}) == "RETRY_VERIFIER"
+    assert route_policy({**state, **update}) == "RETRY_VERIFIER"
     assert "worker_state" not in update
     assert update["task_retry_count"] == {}
 
