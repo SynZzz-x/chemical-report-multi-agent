@@ -102,6 +102,9 @@ class State(TypedDict, total=False):
     pending_user_action: Dict[str, Any]
     plan_patch_history: List[Dict[str, Any]]
     verification_warnings: List[Dict[str, Any]]
+    assessment: Dict[str, Any]
+    continuation_action: str
+    verification_warning: Dict[str, Any]
     current_task: Dict[str, Any]
     all_results: List[Dict[str, Any]]
     tool_execution_history: List[Dict[str, Any]]

@@ -721,9 +721,12 @@ def test_auto_graph_uses_guarded_planner_but_manual_keeps_legacy_planner():
 
 def test_graph_schema_persists_recovery_handoff_fields():
     graph_path = Path(__file__).parents[1] / "src" / "graph.py"
-    source = graph_path.read_text(encoding="utf-8")
+    graph_source = graph_path.read_text(encoding="utf-8")
+    state_path = Path(__file__).parents[1] / "src" / "state.py"
+    state_source = state_path.read_text(encoding="utf-8")
 
-    assert "class WorkflowState(State, total=False):" in source
-    assert "assessment:" in source
-    assert "continuation_action:" in source
-    assert "state_schema=WorkflowState" in source
+    assert "state_schema=State" in graph_source
+    assert "WorkflowState" not in graph_source
+    assert "assessment:" in state_source
+    assert "continuation_action:" in state_source
+    assert "verification_warning:" in state_source
