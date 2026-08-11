@@ -1407,6 +1407,35 @@ class AutonomousToolNode:
         return execution_task, instructions, cleaned_worker_state
 
     @staticmethod
+    def _enforce_job_web_policy(
+        task: Task,
+        web_authorized: bool | None,
+    ) -> Task:
+        """Make an explicit job-level revocation authoritative at execution."""
+        execution_task = deepcopy(task)
+        if web_authorized is not False:
+            return execution_task
+
+        execution_task["_recovery_allow_web"] = False
+        execution_task["use_web"] = False
+        execution_task["allow_web_fallback"] = False
+        requirements = [
+            requirement
+            for requirement in execution_task.get("tool_requirements") or []
+            if canonical_tool_name(requirement) != "spider_tool"
+        ]
+        if execution_task.get("tool_requirements") is not None or requirements:
+            execution_task["tool_requirements"] = requirements
+
+        visualization = execution_task.get("visualization")
+        if isinstance(visualization, dict):
+            visualization = deepcopy(visualization)
+            visualization["allow_web_fallback"] = False
+            visualization["web_queries"] = []
+            execution_task["visualization"] = visualization
+        return execution_task
+
+    @staticmethod
     def _persistable_execution_task(task: Task) -> Task:
         persisted_task = deepcopy(task)
         persisted_task.pop("_recovery_allow_web", None)
@@ -1424,6 +1453,12 @@ class AutonomousToolNode:
             self._prepare_execution_task(
                 tasks[cursor], state.get("worker_state", {}) or {}
             )
+        )
+        current_task = self._enforce_job_web_policy(
+            current_task,
+            state.get("web_authorized")
+            if isinstance(state.get("web_authorized"), bool)
+            else None,
         )
         task_name = current_task.get("task_name", f"任务{cursor + 1}")
 

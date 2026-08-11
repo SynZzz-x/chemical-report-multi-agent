@@ -85,6 +85,7 @@ class State(TypedDict, total=False):
     feedback: Dict[str, Any]
     final_result: Dict[str, Any]
     planner_action: str
+    web_authorized: bool
 
     # 兼容现有节点，后续再逐步拆除或重构。
     metadata: Dict[str, Any]

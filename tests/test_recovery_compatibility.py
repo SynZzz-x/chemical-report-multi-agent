@@ -68,6 +68,7 @@ def _replacement_task(task_id="T3", task_name="新任务", **overrides):
         "task_type": "analysis",
         "query": "",
         "use_resources": [],
+        "visualization": None,
         **overrides,
     }
 
@@ -699,9 +700,7 @@ class _ReplanModel:
         return _ReplanResponse(self.response)
 
 
-def test_initial_plan_rejects_oversized_generation_and_uses_bounded_fallback(
-    monkeypatch,
-):
+def test_initial_plan_rejects_oversized_generation_without_fallback(monkeypatch):
     oversized = [
         _replacement_task(f"T{index}", f"初始任务 {index}")
         for index in range(1, MAX_PLAN_TASKS + 2)
@@ -709,15 +708,15 @@ def test_initial_plan_rejects_oversized_generation_and_uses_bounded_fallback(
     monkeypatch.setattr(
         planner_module,
         "get_llm",
-        lambda *_: _ReplanModel(json.dumps(oversized, ensure_ascii=False)),
+        lambda *_, **__: _ReplanModel(
+            json.dumps({"tasks": oversized}, ensure_ascii=False)
+        ),
     )
 
-    tasks = planner_module._build_tasks_with_llm(
-        {"sections": ["摘要", "结论"], "resources": []}, {}
-    )
-
-    assert len(tasks) == 2
-    assert [task["task_name"] for task in tasks] == ["摘要", "结论"]
+    with pytest.raises(ValueError, match="initial plan generation failed"):
+        planner_module._build_tasks_with_llm(
+            {"sections": ["摘要", "结论"], "resources": []}, {}
+        )
 
 
 def test_initial_plan_accepts_exactly_max_tasks(monkeypatch):
@@ -728,7 +727,9 @@ def test_initial_plan_accepts_exactly_max_tasks(monkeypatch):
     monkeypatch.setattr(
         planner_module,
         "get_llm",
-        lambda *_: _ReplanModel(json.dumps(candidates, ensure_ascii=False)),
+        lambda *_, **__: _ReplanModel(
+            json.dumps({"tasks": candidates}, ensure_ascii=False)
+        ),
     )
 
     tasks = planner_module._build_tasks_with_llm({"resources": []}, {})

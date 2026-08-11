@@ -7,6 +7,7 @@ from langgraph.types import interrupt
 
 from src.state import State
 from src.llm import get_llm
+from src.nodes.intake import web_authorization_directive
 
 
 _DIRECT_APPROVAL_FEEDBACK = {
@@ -209,6 +210,9 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
     
     output_updates = {}
     content_obj = {}
+    web_directive = web_authorization_directive(feedback_text)
+    if web_directive is not None:
+        output_updates["web_authorized"] = web_directive
     
     # 4. 路由逻辑
     if decision_code == "PASS":

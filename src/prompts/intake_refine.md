@@ -41,6 +41,7 @@
     ],
     "style": "<String, 选填, 默认为 formal>",
     "output_format": "<String, 选填, 如 PDF, Markdown, Word>",
+    "web_authorized": "<Boolean, 仅当用户明确要求使用公开网络资料时为 true，否则为 false>",
     "sections": [
         "<String, 数组, 用户指定的章节结构，如：摘要、背景、结论>"
     ],

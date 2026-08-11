@@ -13,8 +13,46 @@ from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
 from ..task_contract import task_allows_web
 from ..tool_names import canonical_tool_name
+from .intake import web_authorization_directive
 
 logger = logging.getLogger(__name__)
+
+
+class PlannerGenerationError(ValueError):
+    """Planner model output could not satisfy the executable task contract."""
+
+
+_GENERATED_TASK_REQUIRED_FIELDS = {
+    "task_id",
+    "task_name",
+    "task_description",
+    "task_type",
+    "use_rag",
+    "use_web",
+    "query",
+    "use_resources",
+    "generate_figure",
+    "generate_table",
+    "visualization",
+}
+_KNOWLEDGE_REQUIREMENT_MARKERS = (
+    "知识库",
+    "可追溯引用",
+    "注明来源",
+    "注明出处",
+    "文件来源",
+)
+_DATA_ANALYSIS_MARKERS = (
+    "pearson",
+    "相关系数",
+    "回归模型",
+    "r²",
+    "r2",
+    "时间序列",
+    "热力图",
+)
+_DATA_RESOURCE_SUFFIXES = (".csv", ".xlsx", ".xls", ".parquet", ".jsonl")
+_DATA_RESOURCE_TYPES = {"csv", "xlsx", "xls", "excel", "parquet", "jsonl"}
 
 """
 Planner 节点：
@@ -282,6 +320,23 @@ def _error_resume_action(value: Any) -> str:
     return "RESUME_OLD_PLAN"
 
 
+def _initial_plan_error_action(value: Any) -> str:
+    if isinstance(value, dict):
+        raw = value.get("action") or value.get("text")
+    else:
+        raw = value
+    normalized = str(raw or "").strip().upper()
+    if normalized in {
+        "RETRY_INITIAL_PLAN",
+        "RETRY",
+        "重新生成",
+        "重新规划",
+        "重试",
+    }:
+        return "RETRY_INITIAL_PLAN"
+    return "CANCEL"
+
+
 def _full_replan_confirmation_action(value: Any, resumed_docs: List[Any]) -> str:
     """Return CONFIRM, REFINE, CANCEL, or RESUME_OLD_PLAN deterministically."""
     if isinstance(value, dict):
@@ -340,7 +395,7 @@ def _full_replan_error_guidance(error: Exception | str) -> Dict[str, Any]:
 def _initial_plan_error_guidance(error: Exception | str) -> Dict[str, Any]:
     return {
         "natural_language_guidance": (
-            "无法安全应用计划修改，已保留上一版候选计划。请重新修改或确认上一版计划。"
+            "任务规划生成失败，尚未创建任何可执行任务。请重试或取消本次任务。"
         ),
         "resource_mapping": {},
         "error": str(error),
@@ -354,8 +409,8 @@ def _read_prompt(rel_path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
-    except Exception:
-        return "你是 Planner 节点。严格输出 JSON 数组任务列表。"
+    except OSError as exc:
+        raise PlannerGenerationError(f"Planner prompt is unavailable: {path}") from exc
 
 
 def _clean_json_fences(s: str) -> str:
@@ -363,6 +418,211 @@ def _clean_json_fences(s: str) -> str:
     s2 = re.sub(r"^```(json)?\s*", "", s.strip(), flags=re.IGNORECASE)
     s2 = re.sub(r"\s*```$", "", s2)
     return s2
+
+
+def _resource_aliases(resource: Dict[str, Any]) -> set[str]:
+    aliases = {
+        str(resource.get("name") or "").strip(),
+        str(resource.get("path") or resource.get("file_path") or "").strip(),
+        str(resource.get("file_id") or "").strip(),
+        str(resource.get("resource_id") or "").strip(),
+    }
+    path = str(resource.get("path") or resource.get("file_path") or "").strip()
+    if path:
+        aliases.add(os.path.basename(path))
+    return {alias for alias in aliases if alias}
+
+
+def _resolve_assigned_resources(
+    task: Dict[str, Any], resources: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    resource_index: Dict[str, List[Dict[str, Any]]] = {}
+    for resource in resources or []:
+        if not isinstance(resource, dict):
+            continue
+        for alias in _resource_aliases(resource):
+            matches = resource_index.setdefault(alias, [])
+            if resource not in matches:
+                matches.append(resource)
+
+    resolved: List[Dict[str, Any]] = []
+    for raw_value in task.get("use_resources") or []:
+        value = str(raw_value).strip()
+        matches = resource_index.get(value) or []
+        if not matches:
+            raise ValueError(
+                f"task {task.get('task_id')} references unknown resource: {value}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"task {task.get('task_id')} references ambiguous resource: {value}"
+            )
+        resolved.append(matches[0])
+    return resolved
+
+
+def _task_has_data_resource(assigned_resources: List[Dict[str, Any]]) -> bool:
+    for resource in assigned_resources:
+        aliases = _resource_aliases(resource)
+        if any(value.lower().endswith(_DATA_RESOURCE_SUFFIXES) for value in aliases):
+            return True
+        resource_type = str(resource.get("type") or "").strip().casefold()
+        if resource_type in _DATA_RESOURCE_TYPES:
+            return True
+    return False
+
+
+def _validate_generated_task_semantics(
+    tasks: List[Dict[str, Any]],
+    resources: List[Dict[str, Any]],
+    policy_context: Dict[str, Any],
+) -> None:
+    global_requirements = " ".join(
+        [
+            str(policy_context.get("user_intent") or ""),
+            *[
+                str(value)
+                for value in policy_context.get("constraints") or []
+                if value is not None
+            ],
+        ]
+    ).casefold()
+    global_requires_knowledge = any(
+        marker.casefold() in global_requirements
+        for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
+    )
+    web_authorized = policy_context.get("web_authorized") is True
+
+    for task in tasks:
+        task_text = " ".join(
+            str(task.get(field) or "")
+            for field in ("task_name", "task_description", "query")
+        )
+        normalized = task_text.casefold()
+        requires_knowledge = global_requires_knowledge or any(
+            marker.casefold() in normalized
+            for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
+        )
+        if requires_knowledge and task.get("use_rag") is not True:
+            raise ValueError(
+                f"task {task.get('task_id')} explicitly requires knowledge-base "
+                "evidence and must set use_rag=true"
+            )
+        if task.get("use_rag") is True and not str(task.get("query") or "").strip():
+            raise ValueError(
+                f"task {task.get('task_id')} sets use_rag=true but has an empty query"
+            )
+
+        assigned_resources = _resolve_assigned_resources(task, resources)
+        requires_data = any(marker in normalized for marker in _DATA_ANALYSIS_MARKERS)
+        if requires_data and not _task_has_data_resource(assigned_resources):
+            raise ValueError(
+                f"task {task.get('task_id')} requires a real assigned data resource"
+            )
+
+        visualization = task.get("visualization")
+        has_web_queries = bool(
+            isinstance(visualization, dict) and visualization.get("web_queries")
+        )
+        if (task_allows_web(task) or has_web_queries) and not web_authorized:
+            raise ValueError(
+                f"task {task.get('task_id')} requires explicit web authorization"
+            )
+
+
+def _parse_generated_plan_payload(
+    content: str,
+    resources: List[Dict[str, Any]],
+    policy_context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    payload = json.loads(_clean_json_fences(str(content).strip()))
+    if not isinstance(payload, dict) or set(payload) != {"tasks"}:
+        raise ValueError("Planner output must be a JSON object containing only tasks")
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError("Planner tasks must be a non-empty list")
+
+    normalized_tasks: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_task in tasks:
+        if not isinstance(raw_task, dict):
+            raise ValueError("Planner tasks must be objects")
+        missing = _GENERATED_TASK_REQUIRED_FIELDS - set(raw_task)
+        if missing:
+            raise ValueError(
+                f"Planner task is missing required field: {sorted(missing)[0]}"
+            )
+        task_id = str(raw_task.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("Planner task_id must be a non-empty string")
+        if task_id in seen_ids:
+            raise ValueError(f"Planner task_id must be unique: {task_id}")
+        seen_ids.add(task_id)
+        normalized_tasks.append(dict(raw_task))
+
+    _validate_replacement_task_schema(normalized_tasks)
+    _validate_generated_task_semantics(
+        normalized_tasks,
+        resources,
+        policy_context,
+    )
+    return normalized_tasks
+
+
+def _invoke_plan_generation(
+    *,
+    config: RunnableConfig,
+    system_prompt: str,
+    human_prompt: str,
+    prompt_values: Dict[str, Any],
+    resources: List[Dict[str, Any]],
+    policy_context: Dict[str, Any],
+    failure_label: str,
+) -> List[Dict[str, Any]]:
+    try:
+        model = get_llm(config, json_mode=True)
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", system_prompt), ("human", human_prompt)]
+        )
+        base_messages = prompt.format_messages(**prompt_values)
+    except Exception as exc:
+        raise PlannerGenerationError(f"{failure_label}: {exc}") from exc
+
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        messages = list(base_messages)
+        if last_error is not None:
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "上一次输出未通过 Plan JSON 校验。请仅重新生成符合约束的 "
+                        '{"tasks": [...]} JSON 对象。校验错误：'
+                        f"{last_error}"
+                    )
+                )
+            )
+        response_text = ""
+        try:
+            response = model.invoke(messages, config=config)
+            response_text = str(response.content).strip()
+            tasks = _parse_generated_plan_payload(
+                response_text,
+                resources,
+                policy_context,
+            )
+            return _ensure_use_resources_paths(tasks, resources)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Planner generation validation failed: path=%s attempt=%s "
+                "error=%s response=%r",
+                failure_label,
+                attempt,
+                type(exc).__name__,
+                response_text[:500],
+            )
+
+    raise PlannerGenerationError(f"{failure_label}: {last_error}") from last_error
 
 
 def _is_confirmation_feedback(user_feedback: str) -> bool:
@@ -394,6 +654,8 @@ def _normalize_resources(resources):
             "name": name,
             "path": r.get("path"),
             "type": r.get("type", "unknown"),
+            "file_id": r.get("file_id"),
+            "resource_id": r.get("resource_id"),
         })
     return result
 
@@ -404,13 +666,9 @@ def _build_resource_index(resources):
         if not isinstance(r, dict):
             continue
         path = r.get("path") or r.get("file_path")
-        name = r.get("name")
         if path:
-            if name:
-                index[name] = path
-            basename = os.path.basename(path)
-            index[basename] = path
-            index[path] = path
+            for alias in _resource_aliases(r):
+                index[alias] = path
     return index
 
 
@@ -441,39 +699,6 @@ def _ensure_use_resources_paths(tasks, resources):
     return tasks
 
 
-def _fallback_initial_tasks(intake_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build a deterministic bounded initial plan after invalid model output."""
-    resource_paths = []
-    for resource in intake_obj.get("resources", []) or []:
-        if not isinstance(resource, dict):
-            continue
-        value = resource.get("path") or resource.get("file_path") or resource.get("name")
-        if value:
-            resource_paths.append(value)
-    sections = intake_obj.get("sections")
-    if not isinstance(sections, list):
-        sections = []
-    normalized_sections = [
-        section.strip()
-        for section in sections
-        if isinstance(section, str) and section.strip()
-    ] or ["摘要", "背景与意义"]
-    fallback = [
-        {
-            "task_id": f"T{index}",
-            "task_name": section,
-            "task_description": f"围绕 {section} 生成占位内容。",
-            "generate_figure": False,
-            "generate_table": False,
-            "use_resources": resource_paths,
-        }
-        for index, section in enumerate(
-            normalized_sections[:MAX_PLAN_TASKS], start=1
-        )
-    ]
-    return _normalize_replacement_tasks(fallback, [])
-
-
 def _build_tasks_with_llm(intake_obj, config):
     """初始规划：基于 Intake 摘要与统一 Prompt 生成任务列表。"""
     resource_objs = intake_obj.get("resources", []) or []
@@ -485,49 +710,85 @@ def _build_tasks_with_llm(intake_obj, config):
     doc_length = intake_obj.get("doc_length") or 3000
     constraints = intake_obj.get("constraints") or []
     sys_prompt = _read_prompt("../prompts/planner_to_worker.md")
-    try:
-        model = get_llm(config)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", sys_prompt),
-            ("human", "请基于以上输入生成严格的 JSON 任务数组")
-        ])
-        messages = prompt.format_messages(
-            title=title,
-            user_intent=intent,
-            task_type=task_type,
-            constraints=constraints,
-            doc_length=doc_length,
-            sections=sections,
-            resources=resources,
-        )
-        resp = model.invoke(messages, config=config)
-        content_str = _clean_json_fences(str(resp.content).strip())
-        tasks = json.loads(content_str)
-        if not isinstance(tasks, list) or not tasks:
-            raise ValueError("bad tasks")
-        tasks = _ensure_use_resources_paths(tasks, resource_objs)
-        return _normalize_replacement_tasks(tasks, [])
-    except Exception as e:
-        logger.error(f"Error in _build_tasks_with_llm: {e}")
-        return _fallback_initial_tasks(intake_obj)
+    return _invoke_plan_generation(
+        config=config,
+        system_prompt=sys_prompt,
+        human_prompt="请基于以上输入生成严格的 Plan JSON 对象",
+        prompt_values={
+            "title": title,
+            "user_intent": intent,
+            "task_type": task_type,
+            "constraints": constraints,
+            "doc_length": doc_length,
+            "sections": sections,
+            "resources": resources,
+            "core_content": intake_obj.get("core_content") or [],
+            "style": intake_obj.get("style"),
+            "output_format": intake_obj.get("output_format"),
+            "web_authorized": intake_obj.get("web_authorized") is True,
+        },
+        resources=resource_objs,
+        policy_context=intake_obj,
+        failure_label="initial plan generation failed",
+    )
 
 
 def _get_intake_data(state):
     """从 messages 中寻找最新的 `type=INTAKE_SUMMARY` 作为背景数据。"""
     for msg in reversed(state.get("messages", []) or []):
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or msg.get("type") or "").casefold()
+        else:
+            role = str(
+                getattr(msg, "type", None) or getattr(msg, "role", None) or ""
+            ).casefold()
+        if role not in {"ai", "assistant"}:
+            continue
         try:
             c = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
             data = json.loads(c) if isinstance(c, str) else c
-            if isinstance(data, dict) and data.get("type") == "INTAKE_SUMMARY":
+            if (
+                isinstance(data, dict)
+                and data.get("type") == "INTAKE_SUMMARY"
+                and data.get("from") == "Intake"
+                and data.get("to") == "Planner"
+            ):
                 return data
         except Exception:
             continue
-    return {"title": "未知项目", "user_intent": "无", "resources": []}
+    return {}
+
+
+def _require_intake_data(state: State) -> Dict[str, Any]:
+    intake_data = _get_intake_data(state)
+    if intake_data.get("type") != "INTAKE_SUMMARY":
+        raise PlannerGenerationError(
+            "original INTAKE_SUMMARY is unavailable; planning cannot continue"
+        )
+    return intake_data
+
+
+def _effective_web_authorization(
+    state: State,
+    intake_data: Dict[str, Any],
+    user_feedback: str | None = None,
+) -> bool:
+    directive = web_authorization_directive(user_feedback or "")
+    if directive is not None:
+        return directive
+    if isinstance(state.get("web_authorized"), bool):
+        return state["web_authorized"]
+    return intake_data.get("web_authorized") is True
 
 
 def _build_tasks_from_replan_feedback(state, config, current_tasks):
     """重做规划：依据 Verifier 反馈与统一 Prompt 生成任务列表。"""
-    intake_data = _get_intake_data(state)
+    intake_data = _require_intake_data(state)
+    policy_context = dict(intake_data)
+    policy_context["web_authorized"] = _effective_web_authorization(
+        state,
+        intake_data,
+    )
     resource_objs = intake_data.get("resources", []) or []
     feedback_obj = state.get("feedback", {}) or {}
     if isinstance(feedback_obj, str):
@@ -540,39 +801,38 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
     suggestion = (issues[0].get("suggestion") if issues else "请检查并重新规划")
     sys_prompt = _read_prompt("../prompts/planner_replan.md")
     try:
-        model = get_llm(config)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", sys_prompt),
-            ("human", "请根据反馈重新生成任务列表")
-        ])
-        messages = prompt.format_messages(
-            title=intake_data.get("title"),
-            user_intent=intake_data.get("user_intent"),
-            task_type=intake_data.get("task_type", "通用"),
-            constraints=intake_data.get("constraints"),
-            doc_length=intake_data.get("doc_length"),
-            blocked_reason=reason,
-            suggestion=suggestion,
-            prev_tasks=[t.get("task_name") for t in current_tasks or []],
-            resources=_normalize_resources(resource_objs),
+        return _invoke_plan_generation(
+            config=config,
+            system_prompt=sys_prompt,
+            human_prompt="请根据反馈重新生成严格的 Plan JSON 对象",
+            prompt_values={
+                "title": intake_data.get("title"),
+                "user_intent": intake_data.get("user_intent"),
+                "task_type": intake_data.get("task_type", "通用"),
+                "constraints": intake_data.get("constraints") or [],
+                "doc_length": intake_data.get("doc_length"),
+                "blocked_reason": reason,
+                "suggestion": suggestion,
+                "prev_tasks": [t.get("task_name") for t in current_tasks or []],
+                "resources": _normalize_resources(resource_objs),
+                "core_content": intake_data.get("core_content") or [],
+                "style": intake_data.get("style"),
+                "output_format": intake_data.get("output_format"),
+                "web_authorized": policy_context["web_authorized"],
+            },
+            resources=resource_objs,
+            policy_context=policy_context,
+            failure_label="replacement plan generation failed",
         )
-        resp = model.invoke(messages, config=config)
-        tasks = json.loads(_clean_json_fences(str(resp.content).strip()))
-        if not isinstance(tasks, list) or not tasks:
-            raise ValueError("replacement plan must be a non-empty task list")
-        for i, task in enumerate(tasks):
-            if not isinstance(task, dict):
-                raise ValueError("replacement tasks must be objects")
-            task.setdefault("task_id", f"T{i+1}")
-            task.setdefault("generate_figure", False)
-            task.setdefault("generate_table", False)
-            task.setdefault("use_resources", [])
-        return _ensure_use_resources_paths(tasks, resource_objs)
     except Exception as exc:
         # A full replan must never silently clone the active plan.  Planner
         # converts this explicit failure into FULL_REPLAN_ERROR, which gives
         # the user a retry/cancel path without mutating the old plan.
-        raise ValueError(f"replacement plan generation failed: {exc}") from exc
+        if isinstance(exc, PlannerGenerationError):
+            raise
+        raise PlannerGenerationError(
+            f"replacement plan generation failed: {exc}"
+        ) from exc
 
 
 def _resource_identity(resource: Dict[str, Any]) -> str:
@@ -591,9 +851,18 @@ def _refine_tasks(
     state_docs,
     intake_data,
     config,
-    fail_closed=False,
 ):
     """依据计划确认反馈和本轮新增附件优化任务列表。"""
+    if intake_data.get("type") != "INTAKE_SUMMARY":
+        raise PlannerGenerationError(
+            "original INTAKE_SUMMARY is unavailable; refinement cannot continue"
+        )
+    policy_context = dict(intake_data)
+    policy_context["web_authorized"] = _effective_web_authorization(
+        state,
+        intake_data,
+        str(user_feedback or ""),
+    )
     current_docs = merge_docs([], state_docs or [])
     initial_resources = merge_docs([], intake_data.get("resources", []) or [])
     initial_resource_ids = {
@@ -631,67 +900,42 @@ def _refine_tasks(
     system_prompt = _read_prompt("../prompts/planner_intake_replan.md")
 
     try:
-        model = get_llm(config)
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                ("human", "请根据用户反馈和新增资源重新生成任务列表"),
-            ]
+        return _invoke_plan_generation(
+            config=config,
+            system_prompt=system_prompt,
+            human_prompt="请根据用户反馈和新增资源生成严格的 Plan JSON 对象",
+            prompt_values={
+                "title": intake_data.get("title"),
+                "user_intent": intake_data.get("user_intent"),
+                "task_type": intake_data.get("task_type", "通用"),
+                "resources": _normalize_resources(initial_resources),
+                "new_resources": _normalize_resources(new_resources),
+                "prev_tasks": previous_tasks,
+                "doc_length": intake_data.get("doc_length"),
+                "constraints": intake_data.get("constraints") or [],
+                "user_feedback": user_feedback,
+                "core_content": intake_data.get("core_content") or [],
+                "style": intake_data.get("style"),
+                "output_format": intake_data.get("output_format"),
+                "web_authorized": policy_context["web_authorized"],
+            },
+            resources=all_resources,
+            policy_context=policy_context,
+            failure_label="replacement plan refinement failed",
         )
-        messages = prompt.format_messages(
-            title=intake_data.get("title"),
-            user_intent=intake_data.get("user_intent"),
-            task_type=intake_data.get("task_type", "通用"),
-            resources=_normalize_resources(initial_resources),
-            new_resources=_normalize_resources(new_resources),
-            prev_tasks=previous_tasks,
-            doc_length=intake_data.get("doc_length"),
-            constraints=intake_data.get("constraints"),
-            user_feedback=user_feedback,
-        )
-        response = model.invoke(messages, config=config)
-        tasks = json.loads(_clean_json_fences(str(response.content).strip()))
-        if not isinstance(tasks, list):
-            raise ValueError("Planner refined tasks must be a list")
-
-        for index, task in enumerate(tasks):
-            task.setdefault("task_id", f"T{index + 1}")
-            task.setdefault("generate_figure", False)
-            task.setdefault("generate_table", False)
-            task.setdefault("use_resources", [])
-
-        return _ensure_use_resources_paths(tasks, all_resources)
     except Exception as exc:
         logger.exception("Failed to refine tasks: %s", exc)
-        if fail_closed:
-            raise ValueError(f"replacement plan refinement failed: {exc}") from exc
-        if current_tasks:
-            return current_tasks
-
-        resource_paths = []
-        for resource in all_resources:
-            if not isinstance(resource, dict):
-                continue
-            value = resource.get("path") or resource.get("file_path") or resource.get("name")
-            if value:
-                resource_paths.append(value)
-
-        return [
-            {
-                "task_id": "T1",
-                "task_name": "重做任务",
-                "task_description": f"依据用户反馈重做：{user_feedback}",
-                "generate_figure": False,
-                "generate_table": False,
-                "use_resources": resource_paths,
-            }
-        ]
+        if isinstance(exc, PlannerGenerationError):
+            raise
+        raise PlannerGenerationError(
+            f"replacement plan refinement failed: {exc}"
+        ) from exc
 
 
 def _generate_plan_guidance(tasks: List[Dict[str, Any]], initial_resources: List[str], config: RunnableConfig) -> Dict[str, Any]:
     """生成计划确认引导信息和资源映射关系"""
     try:
-        model = get_llm(config)
+        model = get_llm(config, json_mode=True)
         sys_prompt = _read_prompt("../prompts/planner_resource_guide.md")
         prompt = ChatPromptTemplate.from_messages([
             ("system", sys_prompt),
@@ -727,9 +971,21 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     tasks = state.get("tasks", []) or []
     cursor = state.get("cursor", 0)
     decision = state.get("decision", "NEXT")
+    retrying_initial_plan = state.get("planner_action") == "INITIAL_PLAN_RETRY"
+    initial_retry_error: Exception | None = None
+    if retrying_initial_plan:
+        try:
+            parsed = _require_intake_data(state)
+        except PlannerGenerationError as exc:
+            parsed = None
+            initial_retry_error = exc
     
     # 确定 Action
-    if parsed and parsed.get("type") == "INTAKE_SUMMARY":
+    if initial_retry_error is not None:
+        planner_action = "INITIAL_PLAN_ERROR"
+    elif retrying_initial_plan or (
+        parsed and parsed.get("type") == "INTAKE_SUMMARY"
+    ):
         planner_action = "INTAKE_SUMMARY"
     elif _is_user_full_replan(parsed) or state.get("planner_action") == "FULL_REPLAN_RETRY":
         planner_action = "FULL_REPLAN"
@@ -738,11 +994,26 @@ def planner(state: State, config: RunnableConfig, **kwargs):
 
     # 执行逻辑
     overview = "保持既有任务列表。"
+    full_replan_error: Exception | None = None
     
-    if planner_action == "INTAKE_SUMMARY":
-        tasks = _build_tasks_with_llm(parsed, config)
+    if planner_action == "INITIAL_PLAN_ERROR":
+        tasks = []
         cursor = 0
-        overview = "初始规划已生成。"
+        overview = "缺少原始需求上下文，等待用户取消。"
+        initial_plan_error = initial_retry_error
+
+    elif planner_action == "INTAKE_SUMMARY":
+        try:
+            tasks = _build_tasks_with_llm(parsed, config)
+        except ValueError as exc:
+            planner_action = "INITIAL_PLAN_ERROR"
+            tasks = []
+            cursor = 0
+            overview = "初始规划无效，等待用户重试或取消。"
+            initial_plan_error = exc
+        else:
+            cursor = 0
+            overview = "初始规划已生成。"
     
     elif planner_action == "FULL_REPLAN":
         previous_tasks = list(tasks)
@@ -755,6 +1026,7 @@ def planner(state: State, config: RunnableConfig, **kwargs):
             planner_action = "FULL_REPLAN_ERROR"
             tasks = previous_tasks
             overview = "替换计划无效，等待用户输入。"
+            full_replan_error = exc
         else:
             overview = "已按用户请求生成替换计划，等待确认后执行。"
     
@@ -765,11 +1037,14 @@ def planner(state: State, config: RunnableConfig, **kwargs):
              cursor = min(cursor + 1, max(len(tasks) - 1, 0))
         overview = "继续执行下一任务。"
         
-        # 兜底：如果 tasks 为空
+        # 无有效计划时必须停止，不能生成默认占位计划并进入 Worker。
         if not tasks:
-            tasks = _build_tasks_with_llm({"sections": ["摘要", "背景与意义"], "resources": []}, config)
+            planner_action = "INITIAL_PLAN_ERROR"
+            initial_plan_error = PlannerGenerationError(
+                "cannot proceed without a validated initial plan"
+            )
             cursor = 0
-            overview = "使用默认任务列表。"
+            overview = "缺少有效初始计划，等待用户重试或取消。"
 
     # 返回结果
     result = {
@@ -777,6 +1052,10 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         "planner_action": planner_action,
         "decision": "NEXT" # 默认重置决策
     }
+    if planner_action in {"INTAKE_SUMMARY", "INITIAL_PLAN_ERROR"} and isinstance(
+        parsed, dict
+    ):
+        result["web_authorized"] = parsed.get("web_authorized") is True
     if planner_action == "FULL_REPLAN":
         result["tasks"] = list(state.get("tasks") or [])
         result["full_replan_candidate_tasks"] = tasks
@@ -807,11 +1086,16 @@ def planner(state: State, config: RunnableConfig, **kwargs):
         intake_data = _get_intake_data(state)
         initial_resources_names = [r.get("name") for r in intake_data.get("resources", []) if isinstance(r, dict)]
         
-        guidance_result = (
-            _full_replan_error_guidance("empty or invalid replacement plan")
-            if planner_action == "FULL_REPLAN_ERROR"
-            else _generate_plan_guidance(tasks, initial_resources_names, config)
-        )
+        if planner_action == "FULL_REPLAN_ERROR":
+            guidance_result = _full_replan_error_guidance(
+                full_replan_error or "empty or invalid replacement plan"
+            )
+        elif planner_action == "INITIAL_PLAN_ERROR":
+            guidance_result = _initial_plan_error_guidance(initial_plan_error)
+        else:
+            guidance_result = _generate_plan_guidance(
+                tasks, initial_resources_names, config
+            )
         result["guidance"] = guidance_result
     
     return result
@@ -832,6 +1116,36 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
         else active_tasks
     )
     guidance_result = state.get("guidance") or {}
+
+    if planner_action == "INITIAL_PLAN_ERROR":
+        resume_value = interrupt(
+            {
+                "type": "needs_user_input",
+                "guidance_text": guidance_result.get("natural_language_guidance")
+                or "任务规划生成失败，请重试或取消。",
+                "error": guidance_result.get("error"),
+                "accepted_choices": ["RETRY_INITIAL_PLAN", "CANCEL"],
+            }
+        )
+        if _initial_plan_error_action(resume_value) == "RETRY_INITIAL_PLAN":
+            return {
+                "planner_action": "INITIAL_PLAN_RETRY",
+                "decision": "NEXT",
+                "tasks": [],
+                "guidance": {},
+            }
+        return {
+            "planner_action": "INITIAL_PLAN_CANCELLED",
+            "decision": "END",
+            "tasks": [],
+            "guidance": {},
+            "final_result": {
+                "success": False,
+                "status": "cancelled",
+                "error": guidance_result.get("error")
+                or "Initial plan generation was cancelled.",
+            },
+        }
 
     if is_full_replan:
         try:
@@ -947,6 +1261,11 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
     # 当前节点内需要完整资源视图；写回 State 时仍只返回 resumed_docs 增量。
     combined_docs = merge_docs(state.get("docs") or [], resumed_docs)
     intake_data = _get_intake_data(state)
+    effective_web_authorized = _effective_web_authorization(
+        state,
+        intake_data,
+        feedback_text,
+    )
     if is_full_replan and full_replan_confirmation_action in {
         "CANCEL",
         "RESUME_OLD_PLAN",
@@ -974,7 +1293,6 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                     combined_docs,
                     intake_data,
                     config,
-                    True,
                 ),
                 _job_task_ids(state),
             )
@@ -984,6 +1302,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "guidance": _full_replan_error_guidance(exc),
                 "messages": [feedback_message],
                 "docs": resumed_docs,
+                "web_authorized": effective_web_authorized,
             }
         initial_resource_names = [
             resource.get("name")
@@ -999,6 +1318,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 refined_tasks, initial_resource_names, config
             ),
             "docs": resumed_docs,
+            "web_authorized": effective_web_authorized,
         }
 
     if is_initial_plan and not is_confirmation:
@@ -1011,7 +1331,6 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                     combined_docs,
                     intake_data,
                     config,
-                    True,
                 ),
                 [],
             )
@@ -1021,6 +1340,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "guidance": _initial_plan_error_guidance(exc),
                 "messages": [feedback_message],
                 "docs": resumed_docs,
+                "web_authorized": effective_web_authorized,
             }
         initial_resource_names = [
             resource.get("name")
@@ -1036,6 +1356,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 refined_tasks, initial_resource_names, config
             ),
             "docs": resumed_docs,
+            "web_authorized": effective_web_authorized,
             "task_id_registry": list(
                 dict.fromkeys([*_job_task_ids(state), *_task_ids(refined_tasks)])
             ),

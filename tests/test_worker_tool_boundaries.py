@@ -208,6 +208,33 @@ def test_worker_web_feedback_preserves_custom_spidertool_identifier():
     assert execution_task["tool_requirements"] == ["spidertool"]
 
 
+def test_worker_job_web_revocation_overrides_task_and_recovery_authorization():
+    execution_task, _, _ = AutonomousToolNode._prepare_execution_task(
+        {
+            "task_id": "T1",
+            "use_web": True,
+            "allow_web_fallback": True,
+            "tool_requirements": ["chemical_knowledge_base_tool", "spider_tool"],
+            "visualization": {
+                "allow_web_fallback": True,
+                "web_queries": ["latest public source"],
+            },
+        },
+        {"execution_feedback": {"allow_web": True}},
+    )
+
+    enforced = AutonomousToolNode._enforce_job_web_policy(
+        execution_task,
+        web_authorized=False,
+    )
+
+    assert enforced["use_web"] is False
+    assert enforced["allow_web_fallback"] is False
+    assert enforced["tool_requirements"] == ["chemical_knowledge_base_tool"]
+    assert enforced["visualization"]["allow_web_fallback"] is False
+    assert enforced["visualization"]["web_queries"] == []
+
+
 def _concept_graph_node(monkeypatch, provider_events):
     settings = SimpleNamespace(
         web_fallback=True,

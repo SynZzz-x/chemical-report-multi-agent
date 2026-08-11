@@ -25,6 +25,66 @@ DECISION_ERROR = "ERROR"
 DECISION_REPLAN = "REPLAN"
 DECISION_RETRY_VERIFIER = "RETRY_VERIFIER"
 
+_WEB_DENIAL_MARKERS = (
+    "不要联网",
+    "不要使用网络",
+    "不使用网络",
+    "不使用公开网络",
+    "禁止联网",
+    "禁止使用网络",
+    "不得使用网络",
+    "仅使用知识库",
+    "只使用知识库",
+    "仅基于知识库",
+    "只基于知识库",
+)
+_WEB_AUTHORIZATION_MARKERS = (
+    "允许联网",
+    "可以联网",
+    "使用公开网络",
+    "参考网络",
+    "公开网络",
+    "网络公开",
+    "网络上的公开",
+    "网络资料",
+    "互联网资料",
+    "联网检索",
+    "网页检索",
+    "网上资料",
+    "web search",
+)
+_WEB_TERMS = ("联网", "网络", "互联网", "网页", "web")
+_WEB_NEGATIONS = (
+    "不要",
+    "不用",
+    "不需要",
+    "无需",
+    "禁止",
+    "不得",
+    "不允许",
+    "拒绝",
+)
+
+
+def web_authorization_directive(raw_request: str) -> bool | None:
+    """Return an explicit web-policy change, or None when none was requested."""
+    normalized = str(raw_request or "").strip().casefold()
+    if any(marker.casefold() in normalized for marker in _WEB_DENIAL_MARKERS):
+        return False
+    for clause in re.split(r"[，。；;,.!?！？\n]", normalized):
+        if any(term in clause for term in _WEB_TERMS) and any(
+            negation in clause for negation in _WEB_NEGATIONS
+        ):
+            return False
+    if any(marker.casefold() in normalized for marker in _WEB_AUTHORIZATION_MARKERS):
+        return True
+    return None
+
+
+def explicit_web_authorization(raw_request: str) -> bool:
+    """Derive initial web permission only from an explicit current-turn request."""
+    return web_authorization_directive(raw_request) is True
+
 
 def extract_initial_request(
     messages: List[Dict[str, Any]],
@@ -198,9 +258,12 @@ def build_task_spec(
         "doc_length": parsed_request.get("doc_length"),
         "constraints": parsed_request.get("constraints", []),
         "style": parsed_request.get("style"),
-        "output_format": parsed_request.get("format"),
+        "output_format": (
+            parsed_request.get("output_format") or parsed_request.get("format")
+        ),
         "sections": parsed_request.get("sections", []),
         "core_content": parsed_request.get("core_content"),
+        "web_authorized": parsed_request.get("web_authorized") is True,
         "resources": resources,
     }
     return {
@@ -230,6 +293,7 @@ def intake(state: State, config: RunnableConfig, **kwargs: Any) -> Dict[str, Any
         }
 
     parsed = llm_parse_user_need(raw_request, config)
+    parsed["web_authorized"] = explicit_web_authorization(raw_request)
 
     # 注意：当前 graph.py 仍是 Intake -> Planner 固定边。真正的闲聊分流应在
     # 下一阶段通过 IntentRouter/条件边解决；这里先保留兼容输出。

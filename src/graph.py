@@ -29,8 +29,13 @@ def route_planner(state: State):
 
 
 def route_planner_confirm(state: State):
-    if state.get("planner_action") == "FULL_REPLAN_RETRY":
+    if state.get("planner_action") in {
+        "FULL_REPLAN_RETRY",
+        "INITIAL_PLAN_RETRY",
+    }:
         return "Planner"
+    if state.get("planner_action") == "INITIAL_PLAN_CANCELLED":
+        return "Exit"
     if state.get("planner_action") in {
         "INTAKE_SUMMARY_REFINED",
         "FULL_REPLAN_REFINED",
@@ -83,6 +88,7 @@ class WorkFlowBase(StateGraph):
                 "Planner": "Planner",
                 "Planner_Confirm": "Planner_Confirm",
                 "Worker": "Worker",
+                "Exit": "Exit",
             },
         )
         
