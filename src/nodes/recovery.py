@@ -6,7 +6,7 @@ import json
 import os
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -84,7 +84,7 @@ def _is_replan_control_message(message: Any) -> bool:
 
 
 def automatic_planner(
-    state: State, config: RunnableConfig, **kwargs
+    state: State, config: Optional[RunnableConfig] = None, **kwargs
 ) -> dict[str, Any]:
     """Run Planner on an auto-safe copy that cannot invoke full replanning."""
     sanitized_state = dict(state)
@@ -198,7 +198,9 @@ def _continuation_message(action: str, state: State) -> AIMessage | None:
     return None
 
 
-def decision_policy(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+def decision_policy(
+    state: State, config: Optional[RunnableConfig] = None, **kwargs
+) -> dict[str, Any]:
     """Apply the pure policy and attach execution-only feedback for rework."""
     assessment = state.get("assessment") or {}
     update = decide_recovery_action(state, assessment)
@@ -233,7 +235,9 @@ def route_policy(state: State, **kwargs) -> str:
     return action
 
 
-def evidence_recovery(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+def evidence_recovery(
+    state: State, config: Optional[RunnableConfig] = None, **kwargs
+) -> dict[str, Any]:
     """Prepare one evidence-focused Worker retry without changing the plan."""
     assessment = state.get("assessment") or {}
     issues = list(assessment.get("issues") or [])
@@ -316,7 +320,9 @@ def _patch_error_update(state: State, error: Exception) -> dict[str, Any]:
     }
 
 
-def plan_patcher(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+def plan_patcher(
+    state: State, config: Optional[RunnableConfig] = None, **kwargs
+) -> dict[str, Any]:
     """Generate, validate, and atomically apply one local plan patch."""
     try:
         model = get_llm(config, json_mode=True)
@@ -339,7 +345,9 @@ def plan_patcher(state: State, config: RunnableConfig, **kwargs) -> dict[str, An
     return update
 
 
-def needs_user_input(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+def needs_user_input(
+    state: State, config: Optional[RunnableConfig] = None, **kwargs
+) -> dict[str, Any]:
     """Interrupt with a concrete blocker and route the incremental resume safely."""
     pending = deepcopy(state.get("pending_user_action") or {})
     category = str(pending.get("category") or "EXTERNAL_BLOCKER")

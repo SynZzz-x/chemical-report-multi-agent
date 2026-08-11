@@ -6,6 +6,26 @@ import sys
 import textwrap
 
 
+def test_recovery_nodes_use_optional_runnable_config_compatibility_signature():
+    import inspect
+
+    from src.nodes import recovery
+
+    for name in (
+        "automatic_planner",
+        "decision_policy",
+        "evidence_recovery",
+        "plan_patcher",
+        "needs_user_input",
+    ):
+        parameter = inspect.signature(getattr(recovery, name)).parameters["config"]
+        assert parameter.annotation == "Optional[RunnableConfig]"
+        assert parameter.default is None
+
+    assert "config" not in inspect.signature(recovery.route_policy).parameters
+    assert "config" not in inspect.signature(recovery.route_after_blocker).parameters
+
+
 def test_compiled_auto_graph_pass_advances_to_next_task():
     script = textwrap.dedent(
         r'''
