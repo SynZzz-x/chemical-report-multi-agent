@@ -35,9 +35,26 @@ _GENERATED_TASK_REQUIRED_FIELDS = {
     "generate_table",
     "visualization",
 }
+_GENERATED_TASK_BOOLEAN_FIELDS = {
+    "use_rag",
+    "use_web",
+    "generate_figure",
+    "generate_table",
+}
+_VISUALIZATION_REQUIRED_FIELDS = {
+    "kind",
+    "title",
+    "required_concepts",
+    "web_queries",
+    "allow_web_fallback",
+}
+_SUPPORTED_VISUALIZATION_KINDS = {"causal"}
 _KNOWLEDGE_REQUIREMENT_MARKERS = (
     "知识库",
     "可追溯引用",
+    "可追溯依据",
+    "引用",
+    "出处",
     "注明来源",
     "注明出处",
     "文件来源",
@@ -50,9 +67,9 @@ _DATA_ANALYSIS_MARKERS = (
     "r2",
     "时间序列",
     "热力图",
+    "定量操作窗口",
 )
-_DATA_RESOURCE_SUFFIXES = (".csv", ".xlsx", ".xls", ".parquet", ".jsonl")
-_DATA_RESOURCE_TYPES = {"csv", "xlsx", "xls", "excel", "parquet", "jsonl"}
+_DATA_RESOURCE_SUFFIXES = (".csv",)
 
 """
 Planner 节点：
@@ -151,6 +168,74 @@ def _validate_string_list(value: Any, field: str) -> None:
         not isinstance(item, str) or not item.strip() for item in value
     ):
         raise ValueError(f"{field} must be a list of non-empty strings")
+
+
+def _validate_generated_task_schema(candidate_tasks: Any) -> None:
+    """Validate the exact model-facing task contract without legacy fields."""
+    if not isinstance(candidate_tasks, list) or not candidate_tasks:
+        raise ValueError("Planner tasks must be a non-empty list")
+    if len(candidate_tasks) > MAX_PLAN_TASKS:
+        raise ValueError(f"Planner plan exceeds {MAX_PLAN_TASKS} tasks")
+
+    for task in candidate_tasks:
+        if not isinstance(task, dict):
+            raise ValueError("Planner tasks must be objects")
+        if set(task) != _GENERATED_TASK_REQUIRED_FIELDS:
+            missing = sorted(_GENERATED_TASK_REQUIRED_FIELDS - set(task))
+            extra = sorted(set(task) - _GENERATED_TASK_REQUIRED_FIELDS)
+            raise ValueError(
+                "Planner task fields must exactly match the generated contract; "
+                f"missing={missing}, extra={extra}"
+            )
+        for field in ("task_id", "task_name", "task_description"):
+            if not isinstance(task[field], str) or not task[field].strip():
+                raise ValueError(f"{field} must be a non-empty string")
+        if (
+            not isinstance(task["task_type"], str)
+            or task["task_type"] not in _REPLACEMENT_TASK_TYPES
+        ):
+            raise ValueError("task_type must be analysis, summary, or inference")
+        for field in _GENERATED_TASK_BOOLEAN_FIELDS:
+            if not isinstance(task[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+        if not isinstance(task["query"], str):
+            raise ValueError("query must be a string")
+        _validate_string_list(task["use_resources"], "use_resources")
+
+        visualization = task["visualization"]
+        if visualization is None:
+            continue
+        if not isinstance(visualization, dict):
+            raise ValueError("visualization must be an object or null")
+        if set(visualization) != _VISUALIZATION_REQUIRED_FIELDS:
+            missing = sorted(_VISUALIZATION_REQUIRED_FIELDS - set(visualization))
+            extra = sorted(set(visualization) - _VISUALIZATION_REQUIRED_FIELDS)
+            raise ValueError(
+                "visualization fields must exactly match the concept-graph contract; "
+                f"missing={missing}, extra={extra}"
+            )
+        if (
+            not isinstance(visualization["kind"], str)
+            or visualization["kind"] not in _SUPPORTED_VISUALIZATION_KINDS
+        ):
+            raise ValueError("visualization.kind must be causal")
+        if (
+            not isinstance(visualization["title"], str)
+            or not visualization["title"].strip()
+        ):
+            raise ValueError("visualization.title must be a non-empty string")
+        _validate_string_list(
+            visualization["required_concepts"],
+            "visualization.required_concepts",
+        )
+        if not visualization["required_concepts"]:
+            raise ValueError("visualization.required_concepts must not be empty")
+        _validate_string_list(
+            visualization["web_queries"],
+            "visualization.web_queries",
+        )
+        if not isinstance(visualization["allow_web_fallback"], bool):
+            raise ValueError("visualization.allow_web_fallback must be a boolean")
 
 
 def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
@@ -463,13 +548,41 @@ def _resolve_assigned_resources(
 
 def _task_has_data_resource(assigned_resources: List[Dict[str, Any]]) -> bool:
     for resource in assigned_resources:
-        aliases = _resource_aliases(resource)
-        if any(value.lower().endswith(_DATA_RESOURCE_SUFFIXES) for value in aliases):
-            return True
-        resource_type = str(resource.get("type") or "").strip().casefold()
-        if resource_type in _DATA_RESOURCE_TYPES:
+        path = str(resource.get("path") or resource.get("file_path") or "").strip()
+        if path.lower().endswith(_DATA_RESOURCE_SUFFIXES):
             return True
     return False
+
+
+def _requires_knowledge_evidence(text: Any) -> bool:
+    """Detect active evidence requirements while ignoring explicit opt-outs."""
+    normalized = str(text or "").casefold()
+    non_requirement_patterns = (
+        r"(?:不使用|不得使用|不可使用|不要使用|禁止使用|无需使用|不需要使用)"
+        r"\s*知识库",
+        r"(?:不新增|无需|不需要|不要求|不要|禁止)"
+        r"(?:任何|额外|新的)?\s*(?:引用|出处|来源|可追溯依据)",
+        r"引用\s*(?:格式|规范|样式|标准)",
+        r"(?:参考文献|文献)\s*(?:格式|规范|样式|标准)",
+    )
+    for pattern in non_requirement_patterns:
+        normalized = re.sub(pattern, "", normalized)
+    return any(
+        marker.casefold() in normalized
+        for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
+    )
+
+
+def _requires_data_resource(text: Any) -> bool:
+    normalized = str(text or "").casefold()
+    if any(marker in normalized for marker in _DATA_ANALYSIS_MARKERS):
+        return True
+    quantitative_action = r"(?:计算|统计|测算|量化|定量评估)"
+    metric = r"(?:转化率|能耗)"
+    return bool(
+        re.search(rf"{quantitative_action}.{{0,20}}{metric}", normalized)
+        or re.search(rf"{metric}.{{0,12}}{quantitative_action}", normalized)
+    )
 
 
 def _validate_generated_task_semantics(
@@ -487,10 +600,7 @@ def _validate_generated_task_semantics(
             ],
         ]
     ).casefold()
-    global_requires_knowledge = any(
-        marker.casefold() in global_requirements
-        for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
-    )
+    global_requires_knowledge = _requires_knowledge_evidence(global_requirements)
     web_authorized = policy_context.get("web_authorized") is True
 
     for task in tasks:
@@ -499,10 +609,7 @@ def _validate_generated_task_semantics(
             for field in ("task_name", "task_description", "query")
         )
         normalized = task_text.casefold()
-        requires_knowledge = global_requires_knowledge or any(
-            marker.casefold() in normalized
-            for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
-        )
+        requires_knowledge = _requires_knowledge_evidence(normalized)
         if requires_knowledge and task.get("use_rag") is not True:
             raise ValueError(
                 f"task {task.get('task_id')} explicitly requires knowledge-base "
@@ -512,15 +619,42 @@ def _validate_generated_task_semantics(
             raise ValueError(
                 f"task {task.get('task_id')} sets use_rag=true but has an empty query"
             )
+        if task.get("use_rag") is False and task.get("query") != "":
+            raise ValueError(
+                f"task {task.get('task_id')} sets use_rag=false but query is not empty"
+            )
 
         assigned_resources = _resolve_assigned_resources(task, resources)
-        requires_data = any(marker in normalized for marker in _DATA_ANALYSIS_MARKERS)
+        requires_data = _requires_data_resource(normalized)
         if requires_data and not _task_has_data_resource(assigned_resources):
             raise ValueError(
                 f"task {task.get('task_id')} requires a real assigned data resource"
             )
 
         visualization = task.get("visualization")
+        if visualization is not None and task.get("generate_figure") is not True:
+            raise ValueError(
+                f"task {task.get('task_id')} has visualization but "
+                "generate_figure is false"
+            )
+        if (
+            visualization is not None
+            and task.get("use_rag") is not True
+            and not task_allows_web(task)
+        ):
+            raise ValueError(
+                f"task {task.get('task_id')} concept visualization requires an "
+                "active RAG or authorized Web evidence channel"
+            )
+        if (
+            task.get("generate_figure") is True
+            and visualization is None
+            and not _task_has_data_resource(assigned_resources)
+        ):
+            raise ValueError(
+                f"task {task.get('task_id')} ordinary figure requires a real "
+                "assigned CSV data resource with a usable path"
+            )
         has_web_queries = bool(
             isinstance(visualization, dict) and visualization.get("web_queries")
         )
@@ -529,11 +663,46 @@ def _validate_generated_task_semantics(
                 f"task {task.get('task_id')} requires explicit web authorization"
             )
 
+    if global_requires_knowledge and not any(
+        task.get("use_rag") is True for task in tasks
+    ):
+        raise ValueError(
+            "global knowledge-base grounding requires at least one use_rag=true task"
+        )
+
+
+def _is_abstract_section(section: Any) -> bool:
+    value = str(section or "").strip()
+    normalized = re.sub(r"[\s:：_-]+", "", value).casefold()
+    return normalized.startswith(("摘要", "abstract")) or normalized.endswith(
+        ("摘要", "abstract")
+    )
+
+
+def _validate_initial_section_coverage(
+    tasks: List[Dict[str, Any]],
+    sections: List[Any] | None,
+) -> None:
+    expected = [
+        str(section).strip()
+        for section in sections or []
+        if str(section or "").strip() and not _is_abstract_section(section)
+    ]
+    if not expected:
+        return
+    actual = [str(task.get("task_name") or "").strip() for task in tasks]
+    if actual != expected:
+        raise ValueError(
+            "initial plan tasks must match Intake sections one-to-one and in order: "
+            f"expected={expected}, actual={actual}"
+        )
+
 
 def _parse_generated_plan_payload(
     content: str,
     resources: List[Dict[str, Any]],
     policy_context: Dict[str, Any],
+    expected_sections: List[Any] | None = None,
 ) -> List[Dict[str, Any]]:
     payload = json.loads(_clean_json_fences(str(content).strip()))
     if not isinstance(payload, dict) or set(payload) != {"tasks"}:
@@ -543,29 +712,25 @@ def _parse_generated_plan_payload(
         raise ValueError("Planner tasks must be a non-empty list")
 
     normalized_tasks: List[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
     for raw_task in tasks:
         if not isinstance(raw_task, dict):
             raise ValueError("Planner tasks must be objects")
-        missing = _GENERATED_TASK_REQUIRED_FIELDS - set(raw_task)
-        if missing:
-            raise ValueError(
-                f"Planner task is missing required field: {sorted(missing)[0]}"
-            )
-        task_id = str(raw_task.get("task_id") or "").strip()
-        if not task_id:
-            raise ValueError("Planner task_id must be a non-empty string")
-        if task_id in seen_ids:
-            raise ValueError(f"Planner task_id must be unique: {task_id}")
-        seen_ids.add(task_id)
         normalized_tasks.append(dict(raw_task))
 
-    _validate_replacement_task_schema(normalized_tasks)
+    _validate_generated_task_schema(normalized_tasks)
+    expected_ids = [f"T{index}" for index in range(1, len(normalized_tasks) + 1)]
+    actual_ids = [task["task_id"] for task in normalized_tasks]
+    if actual_ids != expected_ids:
+        raise ValueError(
+            "Planner task IDs must be sequential "
+            f"{expected_ids}; actual={actual_ids}"
+        )
     _validate_generated_task_semantics(
         normalized_tasks,
         resources,
         policy_context,
     )
+    _validate_initial_section_coverage(normalized_tasks, expected_sections)
     return normalized_tasks
 
 
@@ -578,6 +743,7 @@ def _invoke_plan_generation(
     resources: List[Dict[str, Any]],
     policy_context: Dict[str, Any],
     failure_label: str,
+    expected_sections: List[Any] | None = None,
 ) -> List[Dict[str, Any]]:
     try:
         model = get_llm(config, json_mode=True)
@@ -609,17 +775,19 @@ def _invoke_plan_generation(
                 response_text,
                 resources,
                 policy_context,
+                expected_sections,
             )
             return _ensure_use_resources_paths(tasks, resources)
         except Exception as exc:
             last_error = exc
             logger.warning(
                 "Planner generation validation failed: path=%s attempt=%s "
-                "error=%s response=%r",
+                "error_type=%s error=%s response=%r",
                 failure_label,
                 attempt,
                 type(exc).__name__,
-                response_text[:500],
+                str(exc),
+                response_text[:2000],
             )
 
     raise PlannerGenerationError(f"{failure_label}: {last_error}") from last_error
@@ -688,14 +856,12 @@ def _ensure_use_resources_paths(tasks, resources):
                     normalized.append(index[name])
                     continue
             elif isinstance(item, str):
-                if item in index:
-                    normalized.append(index[item])
+                value = item.strip()
+                if value in index:
+                    normalized.append(index[value])
                 else:
-                    normalized.append(item)
+                    normalized.append(value)
         t["use_resources"] = normalized
-        t.setdefault("use_rag", False)
-        t.setdefault("task_type", "analysis")
-        t.setdefault("query", "")
     return tasks
 
 
@@ -730,6 +896,7 @@ def _build_tasks_with_llm(intake_obj, config):
         resources=resource_objs,
         policy_context=intake_obj,
         failure_label="initial plan generation failed",
+        expected_sections=sections,
     )
 
 

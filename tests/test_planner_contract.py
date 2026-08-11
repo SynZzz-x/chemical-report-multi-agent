@@ -102,6 +102,23 @@ def test_initial_planner_repairs_one_invalid_response(monkeypatch):
     assert "validation" in repair_text.lower() or "校验" in repair_text
 
 
+def test_planner_validation_log_includes_error_detail_and_long_response_snippet(
+    monkeypatch,
+    caplog,
+):
+    invalid = "x" * 700 + "TAIL_MARKER"
+    _patch_model(monkeypatch, [invalid, invalid])
+
+    with caplog.at_level("WARNING", logger="src.nodes.planner"):
+        with pytest.raises(ValueError):
+            planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+    log_text = caplog.text
+    assert "JSONDecodeError" in log_text
+    assert "Expecting value" in log_text
+    assert "TAIL_MARKER" in log_text
+
+
 def test_initial_planner_two_invalid_responses_fail_without_placeholder_tasks(monkeypatch):
     _patch_model(monkeypatch, ["not-json", json.dumps({"tasks": []})])
 
@@ -129,6 +146,56 @@ def test_initial_planner_rejects_invalid_plan_contract(monkeypatch, payload):
         planner_module._build_tasks_with_llm(_intake_summary(), {})
 
 
+def test_initial_planner_rejects_generated_task_with_extra_field(monkeypatch):
+    task = _task(tool_requirements=[])
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="exactly"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+def test_initial_planner_requires_sequential_task_ids(monkeypatch):
+    tasks = [
+        _task(task_id="T1", task_name="工艺概述"),
+        _task(task_id="T3", task_name="质量异常"),
+    ]
+    encoded = json.dumps({"tasks": tasks}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="T1.*T2"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(sections=["工艺概述", "质量异常"]),
+            {},
+        )
+
+
+def test_initial_planner_rejects_task_id_with_surrounding_whitespace(monkeypatch):
+    task = _task(task_id=" T1 ")
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="sequential"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+@pytest.mark.parametrize("query", ["不应执行的检索词", "   "])
+def test_initial_planner_rejects_query_when_rag_is_disabled(monkeypatch, query):
+    task = _task(
+        task_description="梳理聚乙烯生产工艺。",
+        use_rag=False,
+        query=query,
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="use_rag=false"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(constraints=[]),
+            {},
+        )
+
+
 def test_initial_planner_rejects_explicit_knowledge_base_task_without_rag(monkeypatch):
     task = _task(use_rag=False, query="")
     encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
@@ -136,6 +203,46 @@ def test_initial_planner_rejects_explicit_knowledge_base_task_without_rag(monkey
 
     with pytest.raises(ValueError, match="use_rag"):
         planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+def test_initial_planner_rejects_local_citation_requirement_without_rag(monkeypatch):
+    task = _task(
+        task_description="分析工艺参数并提供出处和引用依据。",
+        use_rag=False,
+        query="",
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="use_rag"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(constraints=[]),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "task_description",
+    ["汇总已有结论，不新增引用。", "引用格式采用 GB/T 7714。"],
+)
+def test_initial_planner_does_not_treat_non_retrieval_citation_text_as_rag(
+    monkeypatch,
+    task_description,
+):
+    task = _task(
+        task_description=task_description,
+        use_rag=False,
+        query="",
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(constraints=[]),
+        {},
+    ) == [task]
 
 
 def test_initial_planner_rejects_statistical_work_without_data(monkeypatch):
@@ -150,6 +257,53 @@ def test_initial_planner_rejects_statistical_work_without_data(monkeypatch):
 
     with pytest.raises(ValueError, match="data resource"):
         planner_module._build_tasks_with_llm(_intake_summary(constraints=[]), {})
+
+
+@pytest.mark.parametrize(
+    "task_description",
+    [
+        "计算关键参数的定量操作窗口。",
+        "计算装置转化率。",
+        "定量评估装置能耗。",
+    ],
+)
+def test_initial_planner_rejects_quantitative_work_without_csv(
+    monkeypatch,
+    task_description,
+):
+    task = _task(
+        task_description=task_description,
+        use_rag=False,
+        query="",
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="data resource"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(constraints=[]),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "task_description",
+    [
+        "基于知识库分析反应温度对转化率的影响机理。",
+        "基于知识库分析不同工艺路线的能耗影响因素。",
+    ],
+)
+def test_initial_planner_accepts_qualitative_metric_analysis_without_csv(
+    monkeypatch,
+    task_description,
+):
+    task = _task(task_description=task_description)
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(_intake_summary(), {}) == [task]
 
 
 def test_initial_planner_rejects_unknown_resource_even_when_name_looks_like_csv(
@@ -181,7 +335,7 @@ def test_initial_planner_accepts_assigned_data_resource_by_declared_type(monkeyp
             resources=[
                 {
                     "name": "生产数据",
-                    "path": "/uploads/resource-123",
+                    "path": "/uploads/resource-123.csv",
                     "type": "csv",
                 }
             ],
@@ -189,7 +343,105 @@ def test_initial_planner_accepts_assigned_data_resource_by_declared_type(monkeyp
         {},
     )
 
-    assert tasks[0]["use_resources"] == ["/uploads/resource-123"]
+    assert tasks[0]["use_resources"] == ["/uploads/resource-123.csv"]
+
+
+def test_initial_planner_rejects_declared_data_resource_without_usable_path(
+    monkeypatch,
+):
+    task = _task(
+        task_description="根据生产数据生成趋势图。",
+        use_rag=False,
+        query="",
+        use_resources=["生产数据"],
+        generate_figure=True,
+        visualization=None,
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="data resource"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(
+                constraints=[],
+                resources=[{"name": "生产数据", "path": None, "type": "csv"}],
+            ),
+            {},
+        )
+
+
+def test_initial_planner_rejects_non_csv_resource_for_ordinary_figure(monkeypatch):
+    task = _task(
+        task_description="根据生产数据生成趋势图。",
+        use_rag=False,
+        query="",
+        use_resources=["生产数据"],
+        generate_figure=True,
+        visualization=None,
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="CSV"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(
+                constraints=[],
+                resources=[
+                    {
+                        "name": "生产数据",
+                        "path": "/uploads/data.parquet",
+                        "type": "parquet",
+                    }
+                ],
+            ),
+            {},
+        )
+
+
+def test_initial_planner_accepts_ordinary_data_figure_without_visualization(monkeypatch):
+    task = _task(
+        task_description="根据生产数据生成趋势图。",
+        use_rag=False,
+        query="",
+        use_resources=["生产数据"],
+        generate_figure=True,
+        visualization=None,
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    tasks = planner_module._build_tasks_with_llm(
+        _intake_summary(
+            constraints=[],
+            resources=[
+                {"name": "生产数据", "path": "/uploads/data.csv", "type": "csv"}
+            ],
+        ),
+        {},
+    )
+
+    assert tasks[0]["generate_figure"] is True
+    assert tasks[0]["visualization"] is None
+
+
+def test_initial_planner_rejects_ordinary_figure_without_data(monkeypatch):
+    task = _task(
+        task_description="生成产品指标趋势图。",
+        use_rag=False,
+        query="",
+        generate_figure=True,
+        visualization=None,
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="data resource"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(constraints=[]),
+            {},
+        )
 
 
 def test_initial_planner_rejects_ambiguous_resource_alias(monkeypatch):
@@ -246,6 +498,7 @@ def test_initial_planner_rejects_visualization_web_queries_without_authorization
     monkeypatch,
 ):
     task = _task(
+        generate_figure=True,
         visualization={
             "kind": "causal",
             "title": "关系图",
@@ -262,6 +515,122 @@ def test_initial_planner_rejects_visualization_web_queries_without_authorization
             _intake_summary(web_authorized=False),
             {},
         )
+
+
+@pytest.mark.parametrize(
+    "visualization",
+    [
+        {},
+        {
+            "kind": "pie",
+            "title": "关系图",
+            "required_concepts": ["温度"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+        {
+            "kind": "causal",
+            "title": "关系图",
+            "required_concepts": ["温度"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+            "extra": True,
+        },
+    ],
+)
+def test_initial_planner_rejects_invalid_concept_visualization(
+    monkeypatch,
+    visualization,
+):
+    task = _task(generate_figure=True, visualization=visualization)
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="visualization"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+def test_initial_planner_rejects_visualization_when_figure_is_disabled(monkeypatch):
+    task = _task(
+        generate_figure=False,
+        visualization={
+            "kind": "causal",
+            "title": "关系图",
+            "required_concepts": ["温度"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="generate_figure"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+def test_initial_planner_accepts_supported_concept_visualization(monkeypatch):
+    task = _task(
+        generate_figure=True,
+        visualization={
+            "kind": "causal",
+            "title": "概念关系图",
+            "required_concepts": ["温度", "产品质量"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(_intake_summary(), {}) == [task]
+
+
+def test_initial_planner_rejects_concept_graph_without_evidence_channel(monkeypatch):
+    task = _task(
+        task_description="绘制温度与产品质量关系图。",
+        use_rag=False,
+        query="",
+        generate_figure=True,
+        visualization={
+            "kind": "causal",
+            "title": "概念关系图",
+            "required_concepts": ["温度", "产品质量"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="evidence"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(constraints=[]),
+            {},
+        )
+
+
+@pytest.mark.parametrize("kind", ["flowchart", "fault_tree"])
+def test_initial_planner_rejects_unimplemented_concept_visualizations(
+    monkeypatch,
+    kind,
+):
+    task = _task(
+        generate_figure=True,
+        visualization={
+            "kind": kind,
+            "title": "概念关系图",
+            "required_concepts": ["温度", "产品质量"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="visualization.kind"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
 
 
 def test_initial_planner_accepts_explicitly_authorized_web_task(monkeypatch):
@@ -282,7 +651,34 @@ def test_initial_planner_accepts_explicitly_authorized_web_task(monkeypatch):
     assert tasks == [task]
 
 
-def test_global_knowledge_base_constraint_applies_to_every_task(monkeypatch):
+def test_global_knowledge_constraint_requires_some_rag_not_every_task(monkeypatch):
+    tasks = [
+        _task(task_id="T1", task_name="工艺概述"),
+        _task(
+            task_id="T2",
+            task_name="结论",
+            task_description="归纳前述任务已形成的结论。",
+            use_rag=False,
+            query="",
+        ),
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    planned = planner_module._build_tasks_with_llm(
+        _intake_summary(
+            constraints=["所有内容严格基于知识库"],
+            sections=["工艺概述", "结论"],
+        ),
+        {},
+    )
+
+    assert planned == tasks
+
+
+def test_global_knowledge_constraint_rejects_plan_without_any_rag(monkeypatch):
     task = _task(
         task_description="梳理聚乙烯生产工艺。",
         use_rag=False,
@@ -291,11 +687,92 @@ def test_global_knowledge_base_constraint_applies_to_every_task(monkeypatch):
     encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
     _patch_model(monkeypatch, [encoded, encoded])
 
-    with pytest.raises(ValueError, match="use_rag"):
+    with pytest.raises(ValueError, match="at least one"):
         planner_module._build_tasks_with_llm(
             _intake_summary(constraints=["所有内容严格基于知识库"]),
             {},
         )
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "不使用知识库，只分析上传的 CSV",
+        "不得使用知识库，只分析上传的 CSV",
+        "不可使用知识库，只分析上传的 CSV",
+    ],
+)
+def test_negative_global_knowledge_constraint_does_not_require_rag(
+    monkeypatch,
+    constraint,
+):
+    task = _task(
+        task_description="只分析上传的生产数据。",
+        use_rag=False,
+        query="",
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(
+            constraints=[constraint],
+        ),
+        {},
+    ) == [task]
+
+
+def test_initial_planner_follows_intake_sections_one_to_one(monkeypatch):
+    tasks = [
+        _task(task_id="T1", task_name="引言"),
+        _task(task_id="T2", task_name="结论"),
+    ]
+    encoded = json.dumps({"tasks": tasks}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="sections"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(sections=["引言", "工艺参数", "结论"]),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "abstract_section",
+    [
+        "摘要",
+        "Abstract",
+        "一、摘要",
+        "第一章 摘要",
+        "第1章 摘要",
+        "## 摘要",
+        "（一）摘要",
+        "(一) 摘要",
+        "第一部分 摘要",
+        "第一篇 摘要",
+    ],
+)
+def test_initial_planner_ignores_abstract_when_matching_sections(
+    monkeypatch,
+    abstract_section,
+):
+    tasks = [
+        _task(task_id="T1", task_name="引言"),
+        _task(task_id="T2", task_name="结论"),
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    planned = planner_module._build_tasks_with_llm(
+        _intake_summary(sections=[abstract_section, "引言", "结论"]),
+        {},
+    )
+
+    assert planned == tasks
 
 
 def test_initial_planner_passes_complete_intake_context_to_prompt(monkeypatch):
@@ -321,7 +798,7 @@ def test_replan_and_refine_accept_the_same_json_object_contract(monkeypatch):
         monkeypatch,
         [
             json.dumps({"tasks": [_task()]}, ensure_ascii=False),
-            json.dumps({"tasks": [_task(task_id="T2")]}, ensure_ascii=False),
+            json.dumps({"tasks": [_task()]}, ensure_ascii=False),
         ],
     )
     intake = AIMessage(content=json.dumps(_intake_summary(), ensure_ascii=False))
@@ -344,7 +821,7 @@ def test_replan_and_refine_accept_the_same_json_object_contract(monkeypatch):
     )
 
     assert replanned == [_task()]
-    assert refined == [_task(task_id="T2")]
+    assert refined == [_task()]
 
 
 def test_replan_and_refine_pass_complete_original_context(monkeypatch):
@@ -702,6 +1179,21 @@ def test_planner_prompts_use_one_valid_json_object_contract():
         assert "{core_content}" in prompt
         assert "{style}" in prompt
         assert "{output_format}" in prompt
+
+
+def test_initial_planner_prompt_matches_deterministic_contract():
+    root = Path(__file__).parents[1]
+    prompt = (root / "src" / "prompts" / "planner_to_worker.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "6 至 10" not in prompt
+    assert "一一对应" in prompt
+    assert "use_rag=false" in prompt
+    assert "query" in prompt
+    assert "causal" in prompt
+    assert "flowchart" not in prompt
+    assert "fault_tree" not in prompt
 
 
 def test_plan_guidance_explicitly_uses_json_mode(monkeypatch):
