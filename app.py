@@ -28,7 +28,12 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from src.config import get_cache_root, get_local_user_id, missing_key_message
-from src.control_messages import blocker_guidance, is_displayable_assistant_message
+from src.control_messages import (
+    blocker_choices,
+    blocker_guidance,
+    build_resume_payload,
+    is_displayable_assistant_message,
+)
 from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
@@ -437,7 +442,8 @@ def _save_uploaded_files(uploaded_files: Iterable[Any]) -> list[dict[str, Any]]:
                 # Existing Planner/Worker code expects name/path/type.
                 "name": original_name,
                 "path": str(file_path),
-                "type": getattr(uploaded_file, "type", None) or "text/csv",
+                "type": getattr(uploaded_file, "type", None)
+                or "application/octet-stream",
                 # New scoped metadata.
                 "file_id": file_id,
                 # 兼容现有 Planner/Worker；后续统一只保留 file_id。
@@ -578,6 +584,31 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
     with st.chat_message("assistant"):
         st.write(guidance)
     return True
+
+
+_BLOCKER_ACTION_LABELS = {
+    "UPLOAD_RESOURCES": "上传补充资料",
+    "AUTHORIZE_WEB": "授权公开网络检索",
+    "ADJUST_REQUIREMENT": "调整任务要求",
+    "ACCEPT_EVIDENCE_GAP": "接受现有证据及缺口报告",
+}
+
+
+def _render_pending_resume_action() -> str:
+    payload = st.session_state.get("pending_interrupt")
+    choices = blocker_choices(payload)
+    if not choices:
+        return ""
+    return str(
+        st.selectbox(
+            "选择当前阻塞的处理方式",
+            options=[""] + choices,
+            format_func=lambda value: (
+                "请选择……" if not value else _BLOCKER_ACTION_LABELS.get(value, value)
+            ),
+        )
+        or ""
+    )
 
 
 def _handle_node_delta(node: str, delta: dict[str, Any]) -> None:
@@ -808,6 +839,7 @@ st.caption("Streamlit 只负责输入与渲染；LangGraph State 负责业务上
 
 _render_history()
 _render_report_downloads()
+pending_resume_action = _render_pending_resume_action()
 
 if "app" not in st.session_state:
     st.warning("请先在左侧编译工作流。")
@@ -821,7 +853,7 @@ if st.session_state.get("compiled_mode") != verifier_mode:
 chat_value = st.chat_input(
     "请输入报告需求、确认意见或审核反馈……",
     accept_file="multiple",
-    file_type=["csv"],
+    file_type=["csv", "pdf", "docx", "txt", "md"],
 )
 
 if chat_value:
@@ -844,7 +876,7 @@ if chat_value:
         graph_text = "我已上传附件，请结合附件继续处理当前任务。"
 
     if not graph_text:
-        st.warning("请输入内容或上传 CSV 文件。")
+        st.warning("请输入内容或上传资料文件。")
         st.stop()
 
     display_content = graph_text
@@ -881,16 +913,16 @@ if chat_value:
     }
 
     pending_interrupt = st.session_state.get("pending_interrupt")
-
     if pending_interrupt is not None:
         # Interrupt 的用户反馈由被恢复的节点写入 messages。app.py 只负责
         # 传递本轮 resume 数据，避免同一条 HumanMessage 被写入两次。
         stream_input: Any = Command(
-            resume={
-                "text": graph_text,
-                "message_id": human_message_id,
-                "docs": new_docs,
-            },
+            resume=build_resume_payload(
+                text=graph_text,
+                message_id=human_message_id,
+                docs=new_docs,
+                action=pending_resume_action,
+            ),
             update=base_update,
         )
     else:

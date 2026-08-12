@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -979,11 +980,41 @@ def test_shared_control_message_helper_hides_only_internal_messages(control):
 
 
 def test_shared_blocker_guidance_uses_specific_or_generic_text():
-    from src.control_messages import blocker_guidance
+    from src.control_messages import (
+        blocker_choices,
+        blocker_guidance,
+        build_resume_payload,
+    )
 
     assert blocker_guidance({"type": "needs_user_input", "guidance_text": "上传数据"}) == "上传数据"
     assert blocker_guidance({"type": "needs_user_input"}) == "需要你的输入后才能继续当前任务。"
     assert blocker_guidance({"type": "verify_result"}) is None
+    payload = {
+        "type": "needs_user_input",
+        "accepted_choices": ["UPLOAD_RESOURCES", "AUTHORIZE_WEB"],
+    }
+    assert blocker_choices(payload) == ["UPLOAD_RESOURCES", "AUTHORIZE_WEB"]
+    assert build_resume_payload(
+        text="允许联网",
+        docs=[],
+        action="AUTHORIZE_WEB",
+        message_id="msg-1",
+    ) == {
+        "text": "允许联网",
+        "message_id": "msg-1",
+        "docs": [],
+        "action": "AUTHORIZE_WEB",
+    }
+
+
+def test_streamlit_forwards_selected_blocker_action_and_accepts_evidence_files():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pending_resume_action = _render_pending_resume_action()" in source
+    assert "action=pending_resume_action" in source
+    assert 'file_type=["csv", "pdf", "docx", "txt", "md"]' in source
 
 
 def test_shared_display_consumer_hides_controls_without_calling_stale_alias():

@@ -84,6 +84,7 @@ def evidence_gap_assessment():
                 "description": "Missing authoritative evidence for catalyst life",
                 "suggestion": "Search broader terminology",
                 "severity": "major",
+                "retrieval_query": "catalyst life deactivation mechanism",
             }
         ],
         "requirements_met": [],
@@ -153,7 +154,7 @@ def test_evidence_recovery_builds_query_and_honors_task_web_gate():
     assert plan["plan_revision"] == 1
     assert plan["task_revision"] == 1
     assert plan["recovery_sequence"] == 1
-    assert any("catalyst life" in query for query in plan["evidence_queries"])
+    assert plan["evidence_queries"] == ["catalyst life deactivation mechanism"]
     assert feedback["allow_web"] is False
     assert state["tasks"] == original_tasks
 
@@ -174,6 +175,7 @@ def test_evidence_recovery_filters_non_evidence_issues_and_orders_dependent_asse
                     "description": "缺少反应压力对熔融指数影响的直接证据",
                     "suggestion": "检索反应压力与熔融指数的因果关系",
                     "severity": "major",
+                    "retrieval_query": "聚乙烯 反应压力 熔融指数 影响机理",
                 },
                 {
                     "code": "MISSING_FIGURE",
@@ -205,7 +207,7 @@ def test_evidence_recovery_filters_non_evidence_issues_and_orders_dependent_asse
     update = evidence_recovery(state, {})
 
     plan = update["worker_state"]["execution_feedback"]["recovery_plan"]
-    assert plan["evidence_queries"] == ["缺少反应压力对熔融指数影响的直接证据"]
+    assert plan["evidence_queries"] == ["聚乙烯 反应压力 熔融指数 影响机理"]
     assert not any("table" in query or "figure" in query for query in plan["evidence_queries"])
     assert {
         "asset": "causal_figure",
@@ -216,6 +218,67 @@ def test_evidence_recovery_filters_non_evidence_issues_and_orders_dependent_asse
         "asset": "table",
         "action": "materialize",
     } in plan["asset_actions"]
+
+
+def test_recovery_plan_never_falls_back_to_issue_description_for_query():
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "EVIDENCE_GAP",
+                    "category": "EVIDENCE_GAP",
+                    "description": "任务要求鱼眼检测方法，但正文没有完成。",
+                    "suggestion": "补充知识库依据。",
+                    "severity": "major",
+                }
+            ],
+        }
+    )
+
+    plan = evidence_recovery(state, {})["worker_state"]["execution_feedback"][
+        "recovery_plan"
+    ]
+
+    assert plan["evidence_queries"] == []
+
+
+def test_recovery_plan_normalizes_deduplicates_and_merges_contained_queries():
+    issues = []
+    for query in (
+        "  聚乙烯   鱼眼 定义 检测方法  ",
+        "聚乙烯 鱼眼 检测方法",
+        "聚乙烯 鱼眼 定义 检测方法",
+    ):
+        issues.append(
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "缺少证据",
+                "suggestion": "补充证据",
+                "severity": "major",
+                "retrieval_query": query,
+            }
+        )
+    state = graph_state(assessment={"status": "FAILED", "issues": issues})
+
+    plan = evidence_recovery(state, {})["worker_state"]["execution_feedback"][
+        "recovery_plan"
+    ]
+
+    assert plan["evidence_queries"] == ["聚乙烯 鱼眼 定义 检测方法"]
+
+
+def test_recovery_query_merge_is_transitive_and_order_independent():
+    queries = recovery_module._merge_retrieval_queries(
+        ["A B", "C D", "A B C D"]
+    )
+    reordered = recovery_module._merge_retrieval_queries(
+        ["A B C D", "C D", "A B"]
+    )
+
+    assert queries == ["A B C D"]
+    assert reordered == ["A B C D"]
 
 
 def test_recovery_plan_sequence_uses_the_updated_bounded_counter():
@@ -430,6 +493,266 @@ def test_evidence_blocker_resume_returns_to_evidence_recovery_without_cursor_res
     assert update["workflow_action"] == "EVIDENCE_RECOVERY"
     assert "cursor" not in update
     assert "docs" in update and update["docs"] == []
+
+
+def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "ACCEPT_EVIDENCE_GAP", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert captured["accepted_choices"] == [
+        "UPLOAD_RESOURCES",
+        "AUTHORIZE_WEB",
+        "ADJUST_REQUIREMENT",
+        "ACCEPT_EVIDENCE_GAP",
+    ]
+    assert "catalyst life" in captured["guidance_text"]
+    assert update["workflow_action"] == "NEXT"
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+
+
+def test_authorize_web_is_execution_only_and_explicit(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "AUTHORIZE_WEB", "text": "", "docs": []},
+    )
+    state = graph_state(
+        web_authorized=False,
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "REWORK"
+    assert update["web_authorized"] is True
+    assert update["tasks"][1]["use_web"] is True
+    assert state["tasks"][1]["use_web"] is False
+    feedback = update["worker_state"]["execution_feedback"]
+    assert feedback["allow_web"] is True
+    assert feedback["recovery_plan"]["evidence_queries"] == [
+        "catalyst life deactivation mechanism"
+    ]
+
+
+def test_special_resume_choice_cannot_bypass_pending_accepted_choices(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "AUTHORIZE_WEB", "text": "", "docs": []},
+    )
+    state = graph_state(
+        web_authorized=False,
+        pending_user_action={
+            "category": "EXTERNAL_BLOCKER",
+            "task_id": "T2",
+            "issues": [{"code": "RESOURCE_UNAVAILABLE"}],
+            "accepted_choices": ["REWORK"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "REWORK"
+    assert "web_authorized" not in update
+    assert "tasks" not in update
+
+
+def test_upload_resources_uses_category_appropriate_resume_route(monkeypatch):
+    ingested = []
+    monkeypatch.setattr(
+        recovery_module,
+        "_ingest_uploaded_evidence",
+        lambda docs: ingested.extend(docs),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "action": "UPLOAD_RESOURCES",
+            "text": "",
+            "docs": [{"file_id": "F2", "name": "new.pdf"}],
+        },
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EXTERNAL_BLOCKER",
+            "task_id": "T2",
+            "issues": [{"code": "RESOURCE_UNAVAILABLE"}],
+            "accepted_choices": ["UPLOAD_RESOURCES", "REWORK"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "REWORK"
+    assert [doc["file_id"] for doc in update["docs"]] == ["F1", "F2"]
+    assert ingested == []
+
+
+def test_evidence_upload_is_ingested_and_assigned_before_recovery(monkeypatch):
+    uploaded = {
+        "file_id": "F2",
+        "name": "standard.pdf",
+        "path": "/tmp/standard.pdf",
+    }
+    ingested = []
+    monkeypatch.setattr(
+        recovery_module,
+        "_ingest_uploaded_evidence",
+        lambda docs: ingested.extend(docs),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "text": "我已上传附件，请结合附件继续处理当前任务。",
+            "docs": [uploaded],
+        },
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert ingested == [uploaded]
+    assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert update["tasks"][1]["use_resources"] == ["/tmp/standard.pdf"]
+
+
+def test_uploaded_evidence_helper_calls_rag_ingestion(monkeypatch):
+    from src.rag import service as rag_service_module
+
+    calls = []
+
+    class Service:
+        def ingest(self, paths):
+            calls.append(paths)
+            return {
+                "success": True,
+                "loaded_files": 1,
+                "loaded_with_warnings_files": 0,
+                "skipped_files": 0,
+                "failed_files": 0,
+                "total_chunks": 4,
+            }
+
+    monkeypatch.setattr(rag_service_module, "ChemicalRAGService", Service)
+
+    result = recovery_module._ingest_uploaded_evidence(
+        [{"path": "/tmp/standard.pdf"}]
+    )
+
+    assert calls == [["/tmp/standard.pdf"]]
+    assert result["total_chunks"] == 4
+
+
+def test_adjust_requirement_changes_only_current_task_and_bumps_revision(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "action": "ADJUST_REQUIREMENT",
+            "text": "仅报告知识库已有定义，并明确列出缺口。",
+            "docs": [],
+        },
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "REWORK"
+    assert "仅报告知识库已有定义" in update["tasks"][1]["task_description"]
+    assert update["tasks"][0] == state["tasks"][0]
+    assert update["task_revisions"]["T2"] == 2
+    assert state["task_revisions"]["T2"] == 1
+
+
+def test_adjust_requirement_rejects_missing_concrete_requirement(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "action": "ADJUST_REQUIREMENT",
+            "text": "调整任务要求",
+            "docs": [],
+        },
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="调整任务要求："):
+        needs_user_input(state, {})
+
+
+def test_streamlit_text_resume_understands_user_facing_evidence_choices(monkeypatch):
+    state = graph_state(
+        web_authorized=False,
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": evidence_gap_assessment()["issues"],
+        },
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"text": "授权公开网络检索", "docs": []},
+    )
+
+    web_update = needs_user_input(state, {})
+
+    assert web_update["web_authorized"] is True
+    assert web_update["worker_state"]["execution_feedback"]["allow_web"] is True
+
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "text": "调整任务要求：仅报告知识库已有证据及缺口",
+            "docs": [],
+        },
+    )
+
+    adjusted = needs_user_input(state, {})
+
+    assert adjusted["workflow_action"] == "REWORK"
+    assert adjusted["tasks"][1]["task_description"].endswith(
+        "用户明确调整的要求：仅报告知识库已有证据及缺口"
+    )
 
 
 def test_evidence_blocker_honors_explicit_rework_resume(monkeypatch):

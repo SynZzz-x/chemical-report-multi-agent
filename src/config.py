@@ -35,6 +35,7 @@ DEFAULT_MAX_CONTEXT_TOKENS = 5000
 DEFAULT_CONCEPT_GRAPH_MAX_NODES = 24
 DEFAULT_CONCEPT_GRAPH_MAX_EDGES = 40
 DEFAULT_EVIDENCE_RAG_MAX_QUERIES = 3
+DEFAULT_EVIDENCE_RAG_ADAPTIVE_RESERVE = 1
 DEFAULT_EVIDENCE_WEB_MAX_QUERIES = 3
 
 
@@ -74,6 +75,7 @@ class ConceptGraphSettings:
     max_edges: int
     font_family: str
     rag_max_queries: int
+    rag_adaptive_reserve: int
     web_max_queries: int
     web_fallback: bool
     web_allowed_source_classes: tuple[str, ...]
@@ -279,6 +281,10 @@ def get_app_config() -> AppConfig:
             ),
             rag_max_queries=_positive_int_from_env(
                 "EVIDENCE_RAG_MAX_QUERIES", DEFAULT_EVIDENCE_RAG_MAX_QUERIES
+            ),
+            rag_adaptive_reserve=_non_negative_int_from_env(
+                "EVIDENCE_RAG_ADAPTIVE_RESERVE",
+                DEFAULT_EVIDENCE_RAG_ADAPTIVE_RESERVE,
             ),
             web_max_queries=_positive_int_from_env(
                 "EVIDENCE_WEB_MAX_QUERIES", DEFAULT_EVIDENCE_WEB_MAX_QUERIES

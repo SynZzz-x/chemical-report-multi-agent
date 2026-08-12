@@ -1875,7 +1875,12 @@ class AutonomousToolNode:
         )
         if kb_tool is None:
             return []
-        rag_query_limit = get_app_config().concept_graph_settings.rag_max_queries
+        settings = get_app_config().concept_graph_settings
+        rag_query_limit = settings.rag_max_queries
+        adaptive_reserve = min(
+            max(int(getattr(settings, "rag_adaptive_reserve", 1) or 0), 0),
+            rag_query_limit,
+        )
         inherited = [
             deepcopy(call)
             for call in task.get("_inherited_rag_calls") or []
@@ -1895,6 +1900,11 @@ class AutonomousToolNode:
             for call in inherited
         }
         recovery_queries = list(task.get("_recovery_queries") or [])
+        static_query_limit = (
+            max(rag_query_limit - adaptive_reserve, 0)
+            if recovery_queries
+            else rag_query_limit
+        )
         planner_query = str(
             task.get("query") or task.get("task_description") or ""
         ).strip()
@@ -1906,13 +1916,13 @@ class AutonomousToolNode:
         elif planner_query:
             candidates.append(("planner_query", planner_query))
 
-        calls = inherited
+        calls = list(inherited)
         used_for_attempt = 0
         for source, query in candidates:
             normalized = re.sub(r"\s+", " ", query.strip().casefold())
             if not normalized or normalized in known_queries:
                 continue
-            if used_for_attempt >= rag_query_limit:
+            if used_for_attempt >= static_query_limit:
                 break
             used_for_attempt += 1
             known_queries.add(normalized)
@@ -1958,6 +1968,40 @@ class AutonomousToolNode:
                     "prefetch_source": source,
                 }
             calls.append(call)
+        if recovery_queries:
+            inherited_evidence_items = 0
+            inherited_fingerprints: list[str] = []
+            for call in inherited:
+                query = str((call.get("parameters") or {}).get("query") or "")
+                if query:
+                    inherited_fingerprints.append(
+                        hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
+                    )
+                full_result = call.get("full_result")
+                if not isinstance(full_result, dict):
+                    continue
+                for key in ("evidence", "results", "chunks", "documents"):
+                    items = full_result.get(key)
+                    if isinstance(items, list):
+                        inherited_evidence_items += len(items)
+                        break
+            recovery_prefetch_queries = sum(
+                1
+                for call in calls
+                if call.get("prefetch_source") == "recovery_gap"
+                and call.get("budgeted_for_attempt") is True
+            )
+            print(
+                "📚 Recovery RAG context: "
+                f"task={task.get('task_id') or ''} "
+                f"plan_revision={task.get('_plan_revision') or 1} "
+                f"task_revision={task.get('_task_revision') or 1} "
+                f"inherited_rag_calls={len(inherited)} "
+                f"inherited_evidence_items={inherited_evidence_items} "
+                f"recovery_prefetch_queries={recovery_prefetch_queries} "
+                f"adaptive_budget={max(rag_query_limit - used_for_attempt, 0)} "
+                f"inherited_query_fingerprints={inherited_fingerprints}"
+            )
         return calls
 
     def _build_system_prompt(self, task: Task, tools: List[BaseTool]) -> str:

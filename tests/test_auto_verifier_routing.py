@@ -74,6 +74,7 @@ def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
                 "description": "关键结论缺少知识库依据",
                 "suggestion": "扩大检索覆盖并补充引用",
                 "severity": "major",
+                "retrieval_query": "聚乙烯 关键结论 知识库依据",
             }
         ],
         "requirements_met": ["包含背景"],
@@ -87,6 +88,10 @@ def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
     assert "decision" not in update
     assert "recommended_decision" not in update["assessment"]
     assert update["assessment"]["issues"][0]["category"] == "EVIDENCE_GAP"
+    assert (
+        update["assessment"]["issues"][0]["retrieval_query"]
+        == "聚乙烯 关键结论 知识库依据"
+    )
     assert update["assessment"]["requirements_missing"] == ["关键结论来源"]
 
 
@@ -130,6 +135,62 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
     assert assets["citations"] == [{"evidence_id": "E1"}]
     assert assets["tables"] == []
     assert "actual_length" in assets
+
+
+def test_verifier_receives_effective_source_policy(monkeypatch):
+    state = _state()
+    state["tasks"][0].update({"use_rag": True, "use_web": False})
+    state["web_authorized"] = False
+
+    _, captured = _run(
+        monkeypatch,
+        state,
+        {
+            "status": "PASS",
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": ["内容完整"],
+            "requirements_missing": [],
+        },
+    )
+
+    assert json.loads(captured["source_policy"]) == {
+        "rag_allowed": True,
+        "web_authorized": False,
+        "web_allowed": False,
+    }
+
+
+def test_sanitizer_rewrites_unauthorized_web_demand_as_source_gap():
+    state = _state()
+    state["tasks"][0].update({"use_rag": True, "use_web": False})
+    state["web_authorized"] = False
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "未从其他权威标准文献补充鱼眼检测方法。",
+                "suggestion": "应查询公开网络中的权威标准。",
+                "severity": "major",
+                "retrieval_query": "聚乙烯 鱼眼 检测方法",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["鱼眼检测方法"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    issue = sanitized["issues"][0]
+    assert issue["code"] == "EVIDENCE_GAP"
+    assert issue["description"] == (
+        "当前已授权来源不足以支持该证据要求：聚乙烯 鱼眼 检测方法"
+    )
+    assert "授权公开网络检索" in issue["suggestion"]
+    assert "应查询" not in issue["suggestion"]
 
 
 def test_deterministic_length_failure_overrides_llm_pass(monkeypatch):
@@ -191,6 +252,91 @@ def test_deterministic_length_replaces_llm_estimate_for_the_same_issue(monkeypat
     assert len(issues) == 1
     assert issues[0]["actual"] == 2
     assert issues[0]["required_min"] == 20
+
+
+def test_deterministic_length_removes_generic_duplicate_issue(monkeypatch):
+    state = _state()
+    state["tasks"][0]["task_description"] = "字数：20-30字。"
+    state["current_result"].update({"text_output": "太短。", "citations": []})
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "CONTENT_DEFECT",
+                "category": "CONTENT_DEFECT",
+                "description": "正文篇幅不足，未达到20字的最低要求。",
+                "suggestion": "扩写到20-30字。",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["正文篇幅"],
+    }
+
+    update, _ = _run(monkeypatch, state, assessment)
+
+    assert [issue["code"] for issue in update["assessment"]["issues"]] == [
+        "TOO_SHORT"
+    ]
+
+
+def test_invalid_retrieval_query_is_dropped_without_reusing_description():
+    state = _state()
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "任务要求某项证据但正文没有完成。",
+                "suggestion": "补充证据。",
+                "severity": "major",
+                "retrieval_query": [],
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["证据"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    assert sanitized["issues"][0]["code"] == "EVIDENCE_GAP"
+    assert "retrieval_query" not in sanitized["issues"][0]
+
+
+def test_verifier_audit_keeps_raw_issues_separate_from_sanitized_policy_issues(
+    monkeypatch, tmp_path
+):
+    log_path = tmp_path / "verifier.jsonl"
+    monkeypatch.setattr(auto_verifier_module, "LOG_PATH", str(log_path))
+    state = _state()
+    state["current_result"].update({"text_output": "正文。[E1]"})
+    raw_issue = {
+        "code": "MISSING_EVIDENCE",
+        "category": "EVIDENCE_GAP",
+        "description": "缺少直接证据",
+        "suggestion": "补充证据",
+        "severity": "major",
+        "retrieval_query": "聚乙烯 反应压力 质量影响",
+    }
+
+    update, _ = _run(
+        monkeypatch,
+        state,
+        {
+            "status": "FAILED",
+            "current_section": "引言",
+            "issues": [raw_issue],
+            "requirements_met": [],
+            "requirements_missing": ["直接证据"],
+        },
+    )
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert entry["raw_issues"] == [raw_issue]
+    assert entry["assessment"] == update["assessment"]
 
 
 def test_deterministic_asset_gate_requires_formal_assets_after_materialization():

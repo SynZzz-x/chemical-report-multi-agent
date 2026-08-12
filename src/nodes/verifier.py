@@ -15,6 +15,7 @@ from src.config import get_app_config
 from src.llm import get_llm
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
+from src.task_contract import effective_web_allowed
 
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs")
@@ -64,6 +65,33 @@ _ISSUE_REQUIRED_STRING_FIELDS = {
     "suggestion",
     "severity",
 }
+_GENERIC_DETERMINISTIC_CODES = {"CONTENT_DEFECT", "REQUIREMENT_MISSING"}
+_DETERMINISTIC_DUPLICATE_MARKERS = {
+    "TOO_SHORT": ("字数", "篇幅", "长度", "最低", "不足", "过短", "扩写"),
+    "TOO_LONG": ("字数", "篇幅", "长度", "最高", "超过", "过长", "压缩"),
+    "MISSING_TABLE": ("表格", "table", "结构化资产"),
+    "MISSING_FIGURE": ("图形", "figure", "因果图", "流程图", "结构化资产"),
+}
+_UNAUTHORIZED_WEB_SOURCE_MARKERS = (
+    "外部",
+    "网络",
+    "web",
+    "互联网",
+    "公开资料",
+    "公开来源",
+    "其他权威",
+)
+_UNAUTHORIZED_WEB_DEMAND_MARKERS = (
+    "未查询",
+    "未检索",
+    "未使用",
+    "未从",
+    "应查询",
+    "建议查询",
+    "需要查询",
+    "补充",
+)
+_RETRIEVAL_QUERY_MAX_CHARS = 200
 
 
 def _task_name(tasks: list[dict[str, Any]], index: int) -> str:
@@ -125,8 +153,19 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             format_instructions = (
                 "仅输出 JSON 对象：status 为 PASS|FAILED|BLOCKED；issues 每项必须含 "
                 "code、category、description、suggestion、severity，可选 resource_name；"
+                "EVIDENCE_GAP 可选 retrieval_query；"
                 "另含 current_section、requirements_met、requirements_missing。不得输出路由建议。"
             )
+            web_authorized = (
+                state.get("web_authorized")
+                if isinstance(state.get("web_authorized"), bool)
+                else None
+            )
+            source_policy = {
+                "rag_allowed": current_task.get("use_rag") is True,
+                "web_authorized": web_authorized,
+                "web_allowed": effective_web_allowed(current_task, web_authorized),
+            }
             chain = ChatPromptTemplate.from_messages([("system", template)]) | get_llm(
                 config, json_mode=True
             )
@@ -140,6 +179,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "worker_assets": worker_assets,
                     "deterministic_checks": json.dumps(
                         _deterministic_issues(state), ensure_ascii=False
+                    ),
+                    "source_policy": json.dumps(
+                        source_policy, ensure_ascii=False
                     ),
                     "format_instructions": format_instructions,
                 }
@@ -157,6 +199,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             "LLM is not enabled for verification",
         )
 
+    raw_issues = _bounded_raw_issues(assessment)
     sanitized = _sanitize_assessment(assessment, state)
     sanitized = _apply_citation_integrity(sanitized, current_result)
     sanitized = _apply_deterministic_validation(sanitized, state)
@@ -172,7 +215,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     for issue in issues[:5]:
         description = re.sub(r"\s+", " ", str(issue.get("description") or "")).strip()
         print(f"  - {issue.get('code')}: {description}")
-    _log_verifier_output(state, sanitized, llm_record)
+    _log_verifier_output(state, sanitized, llm_record, raw_issues=raw_issues)
     return {"assessment": sanitized}
 
 
@@ -326,6 +369,14 @@ def _apply_deterministic_validation(
         if isinstance(issue, dict)
     }
     requirements_missing = list(updated.get("requirements_missing") or [])
+    deterministic_codes = {
+        str(issue.get("code") or "").strip().upper() for issue in deterministic
+    }
+    issues = [
+        issue
+        for issue in issues
+        if not _duplicates_deterministic_issue(issue, deterministic_codes)
+    ]
     for issue in deterministic:
         if issue["code"] in existing_codes:
             issues = [
@@ -347,6 +398,27 @@ def _apply_deterministic_validation(
         }
     )
     return updated
+
+
+def _duplicates_deterministic_issue(
+    issue: dict[str, Any], deterministic_codes: set[str]
+) -> bool:
+    """Drop generic LLM issues that only restate a deterministic failure."""
+
+    code = str(issue.get("code") or "").strip().upper()
+    if code not in _GENERIC_DETERMINISTIC_CODES:
+        return False
+    text = " ".join(
+        (
+            str(issue.get("description") or ""),
+            str(issue.get("suggestion") or ""),
+        )
+    ).casefold()
+    for deterministic_code in deterministic_codes:
+        markers = _DETERMINISTIC_DUPLICATE_MARKERS.get(deterministic_code, ())
+        if sum(marker.casefold() in text for marker in markers) >= 2:
+            return True
+    return False
 
 
 def _service_error_assessment(
@@ -433,6 +505,12 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     requires_image = bool(current_task.get("generate_figure")) or any(
         marker in description for marker in ("趋势图", "因果图", "流程图", "生成图")
     )
+    web_authorized = (
+        state.get("web_authorized")
+        if isinstance(state.get("web_authorized"), bool)
+        else None
+    )
+    web_allowed = effective_web_allowed(current_task, web_authorized)
 
     issues: list[dict[str, Any]] = []
     valid_issue_seen = bool(assessment["issues"])
@@ -461,6 +539,25 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
         resource_name = str(issue.get("resource_name") or "").strip()
         if resource_name:
             normalized["resource_name"] = resource_name
+        retrieval_query = issue.get("retrieval_query")
+        if category == "EVIDENCE_GAP" and isinstance(retrieval_query, str):
+            retrieval_query = re.sub(r"\s+", " ", retrieval_query).strip()[
+                :_RETRIEVAL_QUERY_MAX_CHARS
+            ]
+            if retrieval_query:
+                normalized["retrieval_query"] = retrieval_query
+        if not web_allowed and _demands_unauthorized_web(issue):
+            detail = normalized.get("retrieval_query") or "当前硬性证据要求"
+            normalized.update(
+                {
+                    "code": "EVIDENCE_GAP",
+                    "category": "EVIDENCE_GAP",
+                    "description": f"当前已授权来源不足以支持该证据要求：{detail}",
+                    "suggestion": (
+                        "上传相关资料、明确授权公开网络检索，或调整任务要求。"
+                    ),
+                }
+            )
         issues.append(normalized)
 
     requirements_missing = list(assessment["requirements_missing"])
@@ -506,10 +603,24 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     }
 
 
+def _demands_unauthorized_web(issue: dict[str, Any]) -> bool:
+    text = " ".join(
+        (
+            str(issue.get("description") or ""),
+            str(issue.get("suggestion") or ""),
+        )
+    ).casefold()
+    return any(marker.casefold() in text for marker in _UNAUTHORIZED_WEB_SOURCE_MARKERS) and any(
+        marker.casefold() in text for marker in _UNAUTHORIZED_WEB_DEMAND_MARKERS
+    )
+
+
 def _log_verifier_output(
     state: State,
     assessment: dict[str, Any],
     llm_record: dict[str, Any] | None = None,
+    *,
+    raw_issues: list[dict[str, Any]] | None = None,
 ) -> None:
     def safe(value: Any) -> Any:
         try:
@@ -524,6 +635,7 @@ def _log_verifier_output(
         "cursor": safe(state.get("cursor")),
         "plan_revision": int(state.get("plan_revision", 1) or 1),
         "assessment": safe(assessment),
+        "raw_issues": safe(raw_issues or []),
     }
     if llm_record:
         entry["llm"] = safe(llm_record)
@@ -532,3 +644,24 @@ def _log_verifier_output(
             log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def _bounded_raw_issues(assessment: Any) -> list[dict[str, Any]]:
+    """Keep bounded structured LLM issues for audit without logging full prompts."""
+
+    if not isinstance(assessment, dict) or not isinstance(assessment.get("issues"), list):
+        return []
+    bounded: list[dict[str, Any]] = []
+    for raw_issue in assessment["issues"][:50]:
+        if not isinstance(raw_issue, dict):
+            continue
+        issue: dict[str, Any] = {}
+        for key, value in raw_issue.items():
+            if isinstance(value, str):
+                issue[str(key)] = value[:2000]
+            elif value is None or isinstance(value, (bool, int, float)):
+                issue[str(key)] = value
+            else:
+                issue[str(key)] = str(value)[:2000]
+        bounded.append(issue)
+    return bounded

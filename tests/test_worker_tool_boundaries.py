@@ -411,7 +411,9 @@ def test_rag_is_prefetched_before_autonomous_tool_selection(monkeypatch, capsys)
         worker_graph_module,
         "get_app_config",
         lambda: SimpleNamespace(
-            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
         ),
     )
 
@@ -444,7 +446,9 @@ def test_recovery_prefetch_reuses_prior_evidence_and_runs_only_incremental_queri
         worker_graph_module,
         "get_app_config",
         lambda: SimpleNamespace(
-            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
         ),
     )
 
@@ -462,8 +466,11 @@ def test_recovery_prefetch_reuses_prior_evidence_and_runs_only_incremental_queri
         "success": True,
     }
     task = {
+        "task_id": "T2",
         "use_rag": True,
         "query": "反应温度 熔融指数",
+        "_plan_revision": 1,
+        "_task_revision": 1,
         "_inherited_rag_calls": [inherited],
         "_recovery_queries": [
             "反应压力 熔融指数",
@@ -488,6 +495,53 @@ def test_recovery_prefetch_reuses_prior_evidence_and_runs_only_incremental_queri
     assert 'source=recovery_gap query="反应压力 熔融指数"' in output
     assert 'source=recovery_gap query="停留时间 分子量分布"' in output
     assert 'source=planner_query query="反应温度 熔融指数"' not in output
+    assert "inherited_rag_calls=1" in output
+    assert "inherited_evidence_items=1" in output
+    assert "recovery_prefetch_queries=2" in output
+    assert "adaptive_budget=1" in output
+
+
+def test_recovery_prefetch_reserves_adaptive_budget(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
+        ),
+    )
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def invoke(self, parameters):
+            calls.append(parameters)
+            return {"success": True, "evidence": []}
+
+    prefetched = AutonomousToolNode._prefetch_rag(
+        {
+            "task_id": "T2",
+            "use_rag": True,
+            "query": "原始查询",
+            "_recovery_queries": ["缺口一", "缺口二", "缺口三"],
+            "_inherited_rag_calls": [
+                {
+                    "tool": "chemical_knowledge_base_tool",
+                    "parameters": {"query": "原始查询"},
+                    "full_result": {"success": True, "evidence": []},
+                    "success": True,
+                }
+            ],
+            "_plan_revision": 1,
+            "_task_revision": 1,
+        },
+        [KnowledgeTool()],
+    )
+
+    assert [call["query"] for call in calls] == ["缺口一", "缺口二"]
+    assert len(prefetched) == 3
 
 
 def test_inherited_rag_calls_do_not_consume_current_attempt_adaptive_budget(

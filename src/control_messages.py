@@ -52,3 +52,38 @@ def blocker_guidance(payload: Any) -> str | None:
     return str(
         payload.get("guidance_text") or "需要你的输入后才能继续当前任务。"
     )
+
+
+def blocker_choices(payload: Any) -> list[str]:
+    """Return the exact actions exposed by a user-input blocker."""
+
+    if not isinstance(payload, dict) or payload.get("type") != "needs_user_input":
+        return []
+    choices = payload.get("accepted_choices")
+    if not isinstance(choices, list):
+        return []
+    return [
+        str(choice).strip()
+        for choice in choices
+        if isinstance(choice, str) and str(choice).strip()
+    ]
+
+
+def build_resume_payload(
+    *,
+    text: str,
+    docs: list[dict[str, Any]],
+    message_id: str,
+    action: str | None = None,
+) -> dict[str, Any]:
+    """Build the graph resume payload without losing a selected blocker action."""
+
+    payload: dict[str, Any] = {
+        "text": str(text),
+        "message_id": str(message_id),
+        "docs": list(docs),
+    }
+    selected = str(action or "").strip()
+    if selected:
+        payload["action"] = selected
+    return payload

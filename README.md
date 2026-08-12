@@ -67,7 +67,9 @@ Provider and hybrid-RAG configuration is centralized in `src/config.py`:
 - `AGENT_CACHE_ROOT` defaults to `cache`; hybrid RAG data lives below it.
 - `CONCEPT_GRAPH_*` controls evidence-grounded causal diagrams; every rendered
   relation carries one or more `[E编号]` citations.
-- `EVIDENCE_RAG_MAX_QUERIES` caps duplicate-prone Worker retrieval, while
+- `EVIDENCE_RAG_MAX_QUERIES` caps duplicate-prone Worker retrieval;
+  `EVIDENCE_RAG_ADAPTIVE_RESERVE` reserves part of that budget for adaptive
+  queries after recovery prefetch, while
   `EVIDENCE_WEB_MAX_QUERIES` and `EVIDENCE_WEB_FALLBACK` control RAG-first
   public-web supplementation.
 

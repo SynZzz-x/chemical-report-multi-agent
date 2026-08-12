@@ -54,6 +54,13 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     second = decide_recovery_action(second_state, assessment)
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
     assert second["pending_user_action"]["category"] == "EVIDENCE_GAP"
+    assert second["pending_user_action"]["accepted_choices"] == [
+        "UPLOAD_RESOURCES",
+        "AUTHORIZE_WEB",
+        "ADJUST_REQUIREMENT",
+        "ACCEPT_EVIDENCE_GAP",
+    ]
+    assert "上传" in second["pending_user_action"]["guidance"]
 
 
 def test_missing_resource_without_available_match_is_external_blocker():

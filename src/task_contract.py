@@ -16,3 +16,13 @@ def task_allows_web(task: Mapping[str, Any]) -> bool:
             and visualization.get("allow_web_fallback") is True
         )
     )
+
+
+def effective_web_allowed(
+    task: Mapping[str, Any], web_authorized: bool | None
+) -> bool:
+    """Apply the job-level web gate to a task's explicit source policy."""
+
+    if web_authorized is False:
+        return False
+    return task_allows_web(task)

@@ -33,6 +33,13 @@ MAX_TASK_PATCHES = 1
 MAX_JOB_PATCHES = 3
 MAX_VERIFIER_RETRIES = 1
 
+_EVIDENCE_USER_CHOICES = [
+    "UPLOAD_RESOURCES",
+    "AUTHORIZE_WEB",
+    "ADJUST_REQUIREMENT",
+    "ACCEPT_EVIDENCE_GAP",
+]
+
 _CATEGORY_PRIORITY = {
     IssueCategory.CONTENT_DEFECT: 0,
     IssueCategory.EVIDENCE_GAP: 1,
@@ -257,11 +264,32 @@ def _pending_user_action(
     state: Dict[str, Any],
     assessment: Dict[str, Any],
 ) -> Dict[str, Any]:
-    return {
+    pending = {
         "category": category.value,
         "task_id": _current_task_id(state),
         "issues": list(assessment.get("issues") or []),
     }
+    if category is IssueCategory.EVIDENCE_GAP:
+        descriptions = [
+            str(issue.get("description") or "").strip()
+            for issue in assessment.get("issues") or []
+            if isinstance(issue, dict)
+            and classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
+            and str(issue.get("description") or "").strip()
+        ]
+        gap_list = "\n".join(f"- {description}" for description in descriptions)
+        pending.update(
+            {
+                "accepted_choices": list(_EVIDENCE_USER_CHOICES),
+                "guidance": (
+                    "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
+                    f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
+                    "请选择并直接回复：上传补充资料；授权公开网络检索；"
+                    "“调整任务要求：<新要求>”；或接受仅报告现有证据及缺口。"
+                ),
+            }
+        )
+    return pending
 
 
 def _content_retry_warning(
