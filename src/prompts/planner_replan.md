@@ -34,6 +34,7 @@
 12. 概念关系图必须设置 `generate_figure=true`，visualization 必须且只能包含 kind、title、required_concepts、web_queries、allow_web_fallback；当前 kind 只能是 causal。required_concepts 必须包含 1～6 个主因果链所需的原子概念，不得把多个概念合并在一个字符串中。
 13. 除非用户明确要求，否则不得自行创建“知识库依据与说明”“知识库文件及引用说明”等章节。
 14. “知识目录”只用于判断 `use_rag/query`，其中的条目不能填写到 `use_resources`；`use_resources` 只能引用“可用资源”中的真实 Job 附件。
+15. 不得把主题相关自动升级为“必然存在细粒度因果关系、具体控制范围或定量依据”。当用户没有明确要求必须取得确定结论，而目录又未明确显示相应证据能力时，应把任务写成调查目标：找到证据则形成结论，未找到则准确报告可追溯的证据缺口；不得虚构结论。用户明确要求必须由证据支持的硬性结论时，应保留该硬性要求，不能用缺口披露替代。
 
 # Output Contract
 只输出一个 JSON Object，顶层只能包含 `tasks`，不使用 Markdown 代码块或解释文字。

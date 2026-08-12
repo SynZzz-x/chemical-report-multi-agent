@@ -148,7 +148,12 @@ def test_evidence_recovery_builds_query_and_honors_task_web_gate():
 
     feedback = update["worker_state"]["execution_feedback"]
     assert feedback["mode"] == "evidence_recovery"
-    assert "catalyst life evidence" in feedback["recovery_query"]
+    plan = feedback["recovery_plan"]
+    assert plan["task_id"] == "T2"
+    assert plan["plan_revision"] == 1
+    assert plan["task_revision"] == 1
+    assert plan["recovery_sequence"] == 1
+    assert any("catalyst life" in query for query in plan["evidence_queries"])
     assert feedback["allow_web"] is False
     assert state["tasks"] == original_tasks
 
@@ -156,6 +161,98 @@ def test_evidence_recovery_builds_query_and_honors_task_web_gate():
     web_state["tasks"][1]["visualization"] = {"allow_web_fallback": True}
     web_update = evidence_recovery(web_state, {})
     assert web_update["worker_state"]["execution_feedback"]["allow_web"] is True
+
+
+def test_evidence_recovery_filters_non_evidence_issues_and_orders_dependent_assets():
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "EVIDENCE_GAP",
+                    "category": "EVIDENCE_GAP",
+                    "description": "缺少反应压力对熔融指数影响的直接证据",
+                    "suggestion": "检索反应压力与熔融指数的因果关系",
+                    "severity": "major",
+                },
+                {
+                    "code": "MISSING_FIGURE",
+                    "category": "CONTENT_DEFECT",
+                    "description": "缺少正式因果图资产",
+                    "suggestion": "生成因果图",
+                    "severity": "major",
+                },
+                {
+                    "code": "MISSING_TABLE",
+                    "category": "CONTENT_DEFECT",
+                    "description": "Markdown 表格没有结构化资产",
+                    "suggestion": "转换表格资产",
+                    "severity": "major",
+                },
+            ],
+            "requirements_missing": [
+                "结构化资产中未提供 table 和 figure 对象",
+                "反应压力证据",
+            ],
+        }
+    )
+    state["tasks"][1]["generate_figure"] = True
+    state["tasks"][1]["visualization"] = {
+        "kind": "causal",
+        "required_concepts": ["反应压力", "熔融指数"],
+    }
+
+    update = evidence_recovery(state, {})
+
+    plan = update["worker_state"]["execution_feedback"]["recovery_plan"]
+    assert plan["evidence_queries"] == ["缺少反应压力对熔融指数影响的直接证据"]
+    assert not any("table" in query or "figure" in query for query in plan["evidence_queries"])
+    assert {
+        "asset": "causal_figure",
+        "action": "regenerate",
+        "after": "evidence_recovery",
+    } in plan["asset_actions"]
+    assert {
+        "asset": "table",
+        "action": "materialize",
+    } in plan["asset_actions"]
+
+
+def test_recovery_plan_sequence_uses_the_updated_bounded_counter():
+    state = graph_state(
+        evidence_recovery_count={"T2": 1},
+        assessment=evidence_gap_assessment(),
+    )
+
+    update = evidence_recovery(state, {})
+
+    plan = update["worker_state"]["execution_feedback"]["recovery_plan"]
+    assert plan["recovery_sequence"] == 1
+    assert plan["recovery_id"] == "T2:p1:t1:evidence_recovery:1"
+
+
+def test_citation_binding_issue_reuses_evidence_without_generating_rag_query():
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "MISSING_INLINE_CITATION",
+                    "category": "EVIDENCE_GAP",
+                    "description": "正文已有结构化证据但没有绑定 [E编号]",
+                    "suggestion": "把现有证据编号绑定到相邻论断",
+                    "severity": "major",
+                }
+            ],
+            "requirements_met": [],
+            "requirements_missing": ["正文中的证据编号绑定"],
+        }
+    )
+
+    update = evidence_recovery(state, {})
+
+    plan = update["worker_state"]["execution_feedback"]["recovery_plan"]
+    assert plan["evidence_queries"] == []
 
 
 @pytest.mark.parametrize(
@@ -475,23 +572,70 @@ def test_worker_feedback_is_execution_only_and_web_is_explicitly_gated():
             "mode": "evidence_recovery",
             "issues": [{"code": "EVIDENCE_GAP"}],
             "instructions": "Use synonyms and preserve citations",
-            "recovery_query": "catalyst lifetime deactivation",
+            "recovery_plan": {
+                "recovery_id": "T2:p1:t1:evidence_recovery:1",
+                "task_id": "T2",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "recovery_sequence": 1,
+                "evidence_queries": ["catalyst lifetime deactivation"],
+                "asset_actions": [],
+                "length_target": None,
+                "scope_constraints": [],
+            },
             "allow_web": False,
         },
     }
 
     execution_task, instructions, cleaned_state = AutonomousToolNode._prepare_execution_task(
-        task, worker_state
+        task,
+        worker_state,
+        {"plan_revision": 1, "task_revision": 1},
     )
 
     assert task == original
-    assert execution_task["query"] == "catalyst lifetime deactivation"
+    assert execution_task["query"] == "query T2"
+    assert execution_task["_recovery_queries"] == ["catalyst lifetime deactivation"]
     assert execution_task["use_web"] is False
     assert "spider_tool" not in execution_task["tool_requirements"]
     assert execution_task["visualization"]["allow_web_fallback"] is False
     assert "Use synonyms" in instructions
+    assert "T2:p1:t1:evidence_recovery:1" in instructions
     assert "execution_feedback" not in cleaned_state
     assert cleaned_state["retained"] is True
+
+
+def test_worker_discards_stale_recovery_plan_after_checkpoint_resume():
+    task = _task("T2", use_web=True, tool_requirements=["spider_tool"])
+    worker_state = {
+        "retained": True,
+        "execution_feedback": {
+            "mode": "evidence_recovery",
+            "instructions": "stale instructions",
+            "allow_web": False,
+            "recovery_plan": {
+                "recovery_id": "T2:p1:t1:evidence_recovery:1",
+                "task_id": "T2",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "recovery_sequence": 1,
+                "evidence_queries": ["stale query"],
+                "asset_actions": [],
+                "length_target": None,
+                "scope_constraints": [],
+            },
+        },
+    }
+
+    execution_task, instructions, cleaned_state = AutonomousToolNode._prepare_execution_task(
+        task,
+        worker_state,
+        {"plan_revision": 2, "task_revision": 1},
+    )
+
+    assert execution_task == task
+    assert instructions == ""
+    assert "execution_feedback" not in cleaned_state
 
 
 def test_worker_preserves_task_web_access_when_feedback_has_no_web_override():

@@ -48,6 +48,10 @@ _CONTENT_CODES = {
     "MISSING_FIGURE",
     "MISSING_TABLE",
     "TOO_SHORT",
+    "TOO_LONG",
+    "OUT_OF_SCOPE",
+    "SCOPE_VIOLATION",
+    "UNSUPPORTED_RECOMMENDATION",
     "REQUIREMENT_MISSING",
 }
 _VERIFIER_CODES = {
@@ -197,7 +201,6 @@ def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCatego
         return IssueCategory.LOCAL_PLAN_DEFECT
     if code in _CONTENT_CODES:
         return IssueCategory.CONTENT_DEFECT
-
     category = str(issue.get("category") or "").strip().upper()
     if category == IssueCategory.LOCAL_PLAN_DEFECT.value:
         return IssueCategory.EXTERNAL_BLOCKER
@@ -205,6 +208,12 @@ def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCatego
         return IssueCategory(category)
     except ValueError:
         return IssueCategory.CONTENT_DEFECT
+
+
+def classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
+    """Classify one normalized issue for execution-level recovery planning."""
+
+    return _classify_issue(issue, state)
 
 
 def classify_assessment(assessment: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:

@@ -436,6 +436,184 @@ def test_rag_is_prefetched_before_autonomous_tool_selection(monkeypatch, capsys)
     )
 
 
+def test_recovery_prefetch_reuses_prior_evidence_and_runs_only_incremental_queries(
+    monkeypatch, capsys
+):
+    calls = []
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def invoke(self, parameters):
+            calls.append(parameters)
+            return {"success": True, "evidence": [{"content": parameters["query"]}]}
+
+    inherited = {
+        "tool": "chemical_knowledge_base_tool",
+        "parameters": {"query": "反应温度 熔融指数", "top_k": 5},
+        "full_result": {"success": True, "evidence": [{"content": "existing"}]},
+        "success": True,
+    }
+    task = {
+        "use_rag": True,
+        "query": "反应温度 熔融指数",
+        "_inherited_rag_calls": [inherited],
+        "_recovery_queries": [
+            "反应压力 熔融指数",
+            "停留时间 分子量分布",
+            "反应温度 熔融指数",
+        ],
+    }
+
+    prefetched = AutonomousToolNode._prefetch_rag(task, [KnowledgeTool()])
+
+    assert calls == [
+        {"query": "反应压力 熔融指数", "top_k": 5},
+        {"query": "停留时间 分子量分布", "top_k": 5},
+    ]
+    assert prefetched[0]["inherited"] is True
+    assert prefetched[0]["budgeted_for_attempt"] is False
+    assert [call["parameters"]["query"] for call in prefetched[1:]] == [
+        "反应压力 熔融指数",
+        "停留时间 分子量分布",
+    ]
+    output = capsys.readouterr().out
+    assert 'source=recovery_gap query="反应压力 熔融指数"' in output
+    assert 'source=recovery_gap query="停留时间 分子量分布"' in output
+    assert 'source=planner_query query="反应温度 熔融指数"' not in output
+
+
+def test_inherited_rag_calls_do_not_consume_current_attempt_adaptive_budget(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "rag-adaptive",
+                            "name": "chemical_knowledge_base_tool",
+                            "args": {"query": "催化剂注入量 灰分"},
+                        }
+                    ],
+                )
+            return SimpleNamespace(content="完成正文。" * 80, tool_calls=[])
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def invoke(self, parameters):
+            return {"success": True, "evidence": []}
+
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
+    node.llm_client = Model()
+    initial_calls = [
+        {
+            "tool": "chemical_knowledge_base_tool",
+            "parameters": {"query": "旧查询"},
+            "success": True,
+            "inherited": True,
+            "budgeted_for_attempt": False,
+        },
+        {
+            "tool": "chemical_knowledge_base_tool",
+            "parameters": {"query": "恢复查询"},
+            "success": True,
+            "prefetched": True,
+            "budgeted_for_attempt": True,
+        },
+    ]
+
+    node._execute_tool_loop(
+        node.llm_client,
+        [],
+        [KnowledgeTool()],
+        {"task_name": "工艺参数"},
+        initial_tool_calls=initial_calls,
+    )
+
+    assert (
+        'Worker RAG adaptive query 2/3: query="催化剂注入量 灰分"'
+        in capsys.readouterr().out
+    )
+
+
+def test_task_result_materializes_markdown_tables_and_removes_mermaid_placeholders():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    content = """工艺参数分析正文，以下内容用于验证正式表格资产生成。
+
+| 参数 | 质量影响 | 证据 |
+| --- | --- | --- |
+| 温度 | 影响熔融指数 | [E1] |
+
+```mermaid
+graph TD
+A --> B
+```
+
+正文继续说明该关系必须经过正式概念图生成器验证。"""
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="工艺文档",
+                supporting_text="温度影响熔融指数。",
+                file_path="/docs/process.pdf",
+            ),
+        )
+    )
+
+    result = node._create_task_result(
+        {
+            "task_id": "T3",
+            "task_name": "工艺参数",
+            "generate_table": True,
+            "generate_figure": True,
+            "use_resources": [],
+            "_plan_revision": 2,
+            "_task_revision": 3,
+        },
+        0,
+        content,
+        [],
+        {},
+        0.1,
+        True,
+        False,
+        evidence_bundle=evidence,
+    )
+
+    assert result["tables"][0]["type"] == "markdown"
+    assert result["tables"][0]["evidence_refs"] == ["E1"]
+    assert "| 温度 |" in result["text_output"]
+    assert "graph TD" not in result["text_output"]
+    assert result["plan_revision"] == 2
+    assert result["task_revision"] == 3
+
+
 def test_adaptive_rag_query_logs_its_position_in_shared_budget(monkeypatch, capsys):
     monkeypatch.setattr(
         worker_graph_module,

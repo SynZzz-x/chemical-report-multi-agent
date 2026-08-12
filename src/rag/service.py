@@ -337,7 +337,7 @@ class ChemicalRAGService:
                     document,
                     parents,
                     chunks,
-                    build_catalog_entry(document),
+                    build_catalog_entry(document, chunks),
                 )
             except ValueError as exc:
                 if "already ready" in str(exc):

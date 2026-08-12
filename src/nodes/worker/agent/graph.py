@@ -6,6 +6,11 @@ from ....config import get_app_config, get_rag_settings
 from ....llm import get_llm
 from ....task_contract import task_allows_web
 from ....tool_names import canonical_tool_name
+from ....report_validation import (
+    count_report_length,
+    extract_markdown_tables,
+    remove_mermaid_blocks,
+)
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -186,6 +191,8 @@ class TaskResult(TypedDict):
     citations: List[Dict[str, Any]]
     graph_spec: Dict[str, Any]
     evidence_coverage: Dict[str, Any]
+    plan_revision: int
+    task_revision: int
 
 
 class State(TypedDict):
@@ -1369,7 +1376,9 @@ class AutonomousToolNode:
 
     @staticmethod
     def _prepare_execution_task(
-        task: Task, worker_state: Dict[str, Any]
+        task: Task,
+        worker_state: Dict[str, Any],
+        execution_context: Optional[Dict[str, Any]] = None,
     ) -> tuple[Task, str, Dict[str, Any]]:
         """Consume recovery feedback into a task copy used only for this execution."""
         execution_task = deepcopy(task)
@@ -1378,10 +1387,42 @@ class AutonomousToolNode:
         if not isinstance(feedback, dict):
             return execution_task, "", cleaned_worker_state
 
+        recovery_plan = feedback.get("recovery_plan")
+        if isinstance(recovery_plan, dict):
+            context = execution_context or {}
+            expected_task_id = str(task.get("task_id") or "")
+            expected_plan_revision = int(context.get("plan_revision", 1) or 1)
+            expected_task_revision = int(context.get("task_revision", 1) or 1)
+            try:
+                plan_matches = (
+                    str(recovery_plan.get("task_id") or "") == expected_task_id
+                    and int(recovery_plan.get("plan_revision", 0) or 0)
+                    == expected_plan_revision
+                    and int(recovery_plan.get("task_revision", 0) or 0)
+                    == expected_task_revision
+                )
+            except (TypeError, ValueError):
+                plan_matches = False
+            if not plan_matches:
+                return execution_task, "", cleaned_worker_state
+            execution_task["_recovery_plan"] = deepcopy(recovery_plan)
+            execution_task["_recovery_queries"] = [
+                str(query).strip()
+                for query in recovery_plan.get("evidence_queries") or []
+                if str(query).strip()
+            ]
+
         instructions = str(feedback.get("instructions") or "").strip()
-        recovery_query = str(feedback.get("recovery_query") or "").strip()
-        if recovery_query:
-            execution_task["query"] = recovery_query
+        if isinstance(recovery_plan, dict):
+            serialized_plan = json.dumps(recovery_plan, ensure_ascii=False)
+            instructions = (
+                f"{instructions}\nRecoveryPlan: {serialized_plan}"
+                if instructions
+                else f"RecoveryPlan: {serialized_plan}"
+            )
+        legacy_recovery_query = str(feedback.get("recovery_query") or "").strip()
+        if legacy_recovery_query and "_recovery_queries" not in execution_task:
+            execution_task["_recovery_queries"] = [legacy_recovery_query]
 
         if "allow_web" in feedback:
             allow_web = feedback.get("allow_web") is True
@@ -1405,6 +1446,44 @@ class AutonomousToolNode:
                 execution_task["visualization"] = visualization
 
         return execution_task, instructions, cleaned_worker_state
+
+    @staticmethod
+    def _inherited_rag_calls(
+        state: State, task: Task
+    ) -> List[Dict[str, Any]]:
+        """Reuse successful evidence only within the same task and revisions."""
+
+        if "_recovery_plan" not in task:
+            return []
+        previous = state.get("current_result") or {}
+        task_id = str(task.get("task_id") or "")
+        if str(previous.get("task_id") or "") != task_id:
+            return []
+        try:
+            same_revision = (
+                int(previous.get("plan_revision", 0) or 0)
+                == int(task.get("_plan_revision", 0) or 0)
+                and int(previous.get("task_revision", 0) or 0)
+                == int(task.get("_task_revision", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            same_revision = False
+        if not same_revision:
+            return []
+
+        inherited: List[Dict[str, Any]] = []
+        for raw_call in previous.get("tool_calls") or []:
+            if (
+                not isinstance(raw_call, dict)
+                or raw_call.get("tool") != "chemical_knowledge_base_tool"
+                or raw_call.get("success") is not True
+            ):
+                continue
+            call = deepcopy(raw_call)
+            call["inherited"] = True
+            call["budgeted_for_attempt"] = False
+            inherited.append(call)
+        return inherited
 
     @staticmethod
     def _enforce_job_web_policy(
@@ -1438,7 +1517,9 @@ class AutonomousToolNode:
     @staticmethod
     def _persistable_execution_task(task: Task) -> Task:
         persisted_task = deepcopy(task)
-        persisted_task.pop("_recovery_allow_web", None)
+        for key in tuple(persisted_task):
+            if str(key).startswith("_"):
+                persisted_task.pop(key, None)
         return persisted_task
 
     def process(self, state: State) -> Dict[str, Any]:
@@ -1451,8 +1532,28 @@ class AutonomousToolNode:
 
         current_task, feedback_instructions, consumed_worker_state = (
             self._prepare_execution_task(
-                tasks[cursor], state.get("worker_state", {}) or {}
+                tasks[cursor],
+                state.get("worker_state", {}) or {},
+                {
+                    "plan_revision": int(state.get("plan_revision", 1) or 1),
+                    "task_revision": int(
+                        (state.get("task_revisions") or {}).get(
+                            str(tasks[cursor].get("task_id") or ""), 1
+                        )
+                        or 1
+                    ),
+                },
             )
+        )
+        current_task["_plan_revision"] = int(state.get("plan_revision", 1) or 1)
+        current_task["_task_revision"] = int(
+            (state.get("task_revisions") or {}).get(
+                str(current_task.get("task_id") or ""), 1
+            )
+            or 1
+        )
+        current_task["_inherited_rag_calls"] = self._inherited_rag_calls(
+            state, current_task
         )
         current_task = self._enforce_job_web_policy(
             current_task,
@@ -1492,11 +1593,15 @@ class AutonomousToolNode:
 
             prefetched_calls = self._prefetch_rag(current_task, tools)
             if prefetched_calls:
-                prefetched_result = prefetched_calls[0].get("full_result", {})
+                prefetched_results = [
+                    call.get("full_result", {})
+                    for call in prefetched_calls
+                    if call.get("success") is True
+                ]
                 messages.append(HumanMessage(content=(
-                    "系统已按 RAG-first 规则完成知识库预检索。请先使用以下证据，"
+                    "系统已按 RAG-first 规则提供继承及增量知识库证据。请先使用以下证据，"
                     "只有证据不足时才考虑公开网络资料：\n"
-                    + json.dumps(prefetched_result, ensure_ascii=False)
+                    + json.dumps(prefetched_results, ensure_ascii=False)
                 )))
 
             if tools:
@@ -1761,7 +1866,7 @@ class AutonomousToolNode:
 
     @staticmethod
     def _prefetch_rag(task: Task, tools: List[BaseTool]) -> List[Dict[str, Any]]:
-        """Execute one deterministic RAG query before autonomous tool selection."""
+        """Provide inherited evidence and run bounded incremental RAG queries."""
         if not task.get("use_rag"):
             return []
         kb_tool = next(
@@ -1770,44 +1875,90 @@ class AutonomousToolNode:
         )
         if kb_tool is None:
             return []
-        query = str(task.get("query") or task.get("task_description") or "").strip()
-        parameters = {"query": query, "top_k": 5}
         rag_query_limit = get_app_config().concept_graph_settings.rag_max_queries
-        print(
-            f'🔎 Worker RAG prefetch 1/{rag_query_limit}: '
-            f'source=planner_query query="{query}"'
-        )
-        try:
-            result = kb_tool.invoke(parameters)
-            full_result = result
-            if isinstance(result, str):
-                try:
-                    full_result = json.loads(result)
-                except (TypeError, ValueError):
-                    full_result = {"content": result}
-            success = not isinstance(full_result, dict) or (
-                bool(full_result.get("success", True)) and not full_result.get("error")
+        inherited = [
+            deepcopy(call)
+            for call in task.get("_inherited_rag_calls") or []
+            if isinstance(call, dict)
+        ]
+        for call in inherited:
+            call["inherited"] = True
+            call["budgeted_for_attempt"] = False
+        known_queries = {
+            re.sub(
+                r"\s+",
+                " ",
+                str((call.get("parameters") or {}).get("query") or "")
+                .strip()
+                .casefold(),
             )
-            return [{
-                "tool": "chemical_knowledge_base_tool",
-                "parameters": parameters,
-                "result": str(result)[:500],
-                "full_result": full_result,
-                "success": success,
-                "iteration": 0,
-                "timestamp": datetime.now().isoformat(),
-                "prefetched": True,
-            }]
-        except Exception as exc:
-            return [{
-                "tool": "chemical_knowledge_base_tool",
-                "parameters": parameters,
-                "result": f"RAG 预检索失败: {exc}",
-                "success": False,
-                "iteration": 0,
-                "timestamp": datetime.now().isoformat(),
-                "prefetched": True,
-            }]
+            for call in inherited
+        }
+        recovery_queries = list(task.get("_recovery_queries") or [])
+        planner_query = str(
+            task.get("query") or task.get("task_description") or ""
+        ).strip()
+        candidates: List[tuple[str, str]] = []
+        if recovery_queries:
+            if not inherited and planner_query:
+                candidates.append(("planner_query", planner_query))
+            candidates.extend(("recovery_gap", str(query).strip()) for query in recovery_queries)
+        elif planner_query:
+            candidates.append(("planner_query", planner_query))
+
+        calls = inherited
+        used_for_attempt = 0
+        for source, query in candidates:
+            normalized = re.sub(r"\s+", " ", query.strip().casefold())
+            if not normalized or normalized in known_queries:
+                continue
+            if used_for_attempt >= rag_query_limit:
+                break
+            used_for_attempt += 1
+            known_queries.add(normalized)
+            parameters = {"query": query, "top_k": 5}
+            print(
+                f"🔎 Worker RAG prefetch {used_for_attempt}/{rag_query_limit}: "
+                f'source={source} query="{query}"'
+            )
+            try:
+                result = kb_tool.invoke(parameters)
+                full_result = result
+                if isinstance(result, str):
+                    try:
+                        full_result = json.loads(result)
+                    except (TypeError, ValueError):
+                        full_result = {"content": result}
+                success = not isinstance(full_result, dict) or (
+                    bool(full_result.get("success", True))
+                    and not full_result.get("error")
+                )
+                call = {
+                    "tool": "chemical_knowledge_base_tool",
+                    "parameters": parameters,
+                    "result": str(result)[:500],
+                    "full_result": full_result,
+                    "success": success,
+                    "iteration": 0,
+                    "timestamp": datetime.now().isoformat(),
+                    "prefetched": True,
+                    "budgeted_for_attempt": True,
+                    "prefetch_source": source,
+                }
+            except Exception as exc:
+                call = {
+                    "tool": "chemical_knowledge_base_tool",
+                    "parameters": parameters,
+                    "result": f"RAG 预检索失败: {exc}",
+                    "success": False,
+                    "iteration": 0,
+                    "timestamp": datetime.now().isoformat(),
+                    "prefetched": True,
+                    "budgeted_for_attempt": True,
+                    "prefetch_source": source,
+                }
+            calls.append(call)
+        return calls
 
     def _build_system_prompt(self, task: Task, tools: List[BaseTool]) -> str:
         """构建系统提示词 - 明确要求生成报告正文"""
@@ -2020,13 +2171,19 @@ class AutonomousToolNode:
 
         generated_chart_types = set()
         seen_rag_queries: set[str] = set()
+        known_rag_queries: set[str] = set()
         for call in tool_calls:
             name = call.get("tool")
-            if name:
+            inherited = call.get("inherited") is True
+            if name and not inherited:
                 tool_usage_stats[name] = tool_usage_stats.get(name, 0) + 1
             if name == "chemical_knowledge_base_tool":
                 query = str((call.get("parameters") or {}).get("query") or "")
-                seen_rag_queries.add(re.sub(r"\s+", " ", query.strip().casefold()))
+                normalized_query = re.sub(r"\s+", " ", query.strip().casefold())
+                if normalized_query:
+                    known_rag_queries.add(normalized_query)
+                    if call.get("budgeted_for_attempt") is not False:
+                        seen_rag_queries.add(normalized_query)
         rag_query_limit = get_app_config().concept_graph_settings.rag_max_queries
 
         print(f"🔄 开始工具调用循环，最多{max_iterations}次迭代")
@@ -2079,7 +2236,7 @@ class AutonomousToolNode:
                             normalized_query = re.sub(
                                 r"\s+", " ", str(tool_args.get("query") or "").strip().casefold()
                             )
-                            if normalized_query in seen_rag_queries:
+                            if normalized_query in known_rag_queries:
                                 message = "已跳过重复的知识库查询，请基于已有证据完成任务。"
                                 messages.append(ToolMessage(
                                     content=message,
@@ -2113,6 +2270,7 @@ class AutonomousToolNode:
                                 f'query="{tool_args.get("query", "")}"'
                             )
                             seen_rag_queries.add(normalized_query)
+                            known_rag_queries.add(normalized_query)
 
                         if tool_args:
                             print(f"    🔍 工具参数: {json.dumps(tool_args, ensure_ascii=False, indent=4)}")
@@ -2243,6 +2401,18 @@ class AutonomousToolNode:
             content = self._extract_content_from_tool_calls(tool_calls)
 
         content = self._clean_report_content(content)
+        content = remove_mermaid_blocks(content)
+        markdown_tables = extract_markdown_tables(content)
+        existing_table_signatures = {
+            json.dumps(table, ensure_ascii=False, sort_keys=True, default=str)
+            for table in tables
+            if isinstance(table, dict)
+        }
+        for table in markdown_tables:
+            signature = json.dumps(table, ensure_ascii=False, sort_keys=True)
+            if signature not in existing_table_signatures:
+                tables.append(table)
+                existing_table_signatures.add(signature)
 
         if evidence_bundle is None:
             from ....evidence.normalizer import normalize_rag_tool_calls
@@ -2275,7 +2445,9 @@ class AutonomousToolNode:
             "figures": figures,
             "sources_used": sources_used,
             "figures_generated": figures_generated,
-            "word_count": len(content),
+            "word_count": count_report_length(content),
+            "plan_revision": int(task.get("_plan_revision", 1) or 1),
+            "task_revision": int(task.get("_task_revision", 1) or 1),
             "generated_at": datetime.now().isoformat(),
             "execution_time": execution_time,
             "tool_calls": tool_calls,

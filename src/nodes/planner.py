@@ -807,13 +807,14 @@ def _normalize_knowledge_catalog(entries):
         "content_type",
         "has_structured_data",
         "supports",
+        "capabilities",
         "catalog_version",
     )
     result = []
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
-        result.append({key: entry.get(key) for key in allowed})
+        result.append({key: entry.get(key) for key in allowed if key in entry})
     return result
 
 

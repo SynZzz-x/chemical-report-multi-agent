@@ -1424,6 +1424,40 @@ def test_all_planner_prompts_share_rag_semantics_and_catalog_boundary():
         assert "不能填写到 `use_resources`" in prompt
 
 
+def test_planner_and_verifier_share_investigative_evidence_gap_semantics():
+    root = Path(__file__).parents[1]
+    for name in (
+        "planner_to_worker.md",
+        "planner_replan.md",
+        "planner_intake_replan.md",
+    ):
+        prompt = (root / "src" / "prompts" / name).read_text(encoding="utf-8")
+        assert "调查目标" in prompt
+        assert "可追溯的证据缺口" in prompt
+        assert "不得把主题相关自动升级" in prompt
+
+    verifier_prompt = (root / "src" / "prompts" / "verifier.md").read_text(
+        encoding="utf-8"
+    )
+    assert "调查型任务" in verifier_prompt
+    assert "证据缺口" in verifier_prompt
+    assert "可以 PASS" in verifier_prompt
+
+
+def test_worker_prompt_uses_task_length_and_requires_formal_assets():
+    root = Path(__file__).parents[1]
+    system_prompt = (
+        root / "src" / "prompts" / "worker_system_template.md"
+    ).read_text(encoding="utf-8")
+
+    assert "800-1000" not in system_prompt
+    assert "任务描述中的字数要求" in system_prompt
+    assert "Mermaid" in system_prompt
+    assert "正式 table asset" in system_prompt
+    assert "正式 figure asset" in system_prompt
+    assert "证据缺口" in system_prompt
+
+
 def test_plan_guidance_explicitly_uses_json_mode(monkeypatch):
     modes = []
 

@@ -66,6 +66,8 @@ class ResourceCatalogEntry:
     content_type: str
     has_structured_data: bool
     supports: tuple[str, ...]
+    capabilities: JSONMetadata
+    coverage_evidence: JSONMetadata
     catalog_version: str
 
 

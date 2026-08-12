@@ -189,6 +189,8 @@ class BM25Store:
                     has_structured_data INTEGER NOT NULL
                         CHECK (has_structured_data IN (0, 1)),
                     supports_json TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    coverage_evidence_json TEXT NOT NULL DEFAULT '{}',
                     catalog_version TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -199,6 +201,20 @@ class BM25Store:
                 );
                 """
             )
+            catalog_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(resource_catalog)")
+            }
+            if "capabilities_json" not in catalog_columns:
+                connection.execute(
+                    "ALTER TABLE resource_catalog ADD COLUMN "
+                    "capabilities_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "coverage_evidence_json" not in catalog_columns:
+                connection.execute(
+                    "ALTER TABLE resource_catalog ADD COLUMN "
+                    "coverage_evidence_json TEXT NOT NULL DEFAULT '{}'"
+                )
         try:
             with connection:
                 connection.execute(
@@ -870,8 +886,9 @@ class BM25Store:
             INSERT INTO resource_catalog(
                 version_id, file_name, file_type, summary, topics_json,
                 content_type, has_structured_data,
-                supports_json, catalog_version, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                supports_json, capabilities_json, coverage_evidence_json,
+                catalog_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(version_id) DO UPDATE SET
                 file_name = excluded.file_name,
                 file_type = excluded.file_type,
@@ -880,6 +897,8 @@ class BM25Store:
                 content_type = excluded.content_type,
                 has_structured_data = excluded.has_structured_data,
                 supports_json = excluded.supports_json,
+                capabilities_json = excluded.capabilities_json,
+                coverage_evidence_json = excluded.coverage_evidence_json,
                 catalog_version = excluded.catalog_version,
                 updated_at = excluded.updated_at
             """,
@@ -892,6 +911,8 @@ class BM25Store:
                 catalog.content_type,
                 int(catalog.has_structured_data),
                 _json_array(catalog.supports),
+                _metadata_json(catalog.capabilities),
+                _metadata_json(catalog.coverage_evidence),
                 catalog.catalog_version,
                 now,
                 now,

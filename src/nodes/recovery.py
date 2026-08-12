@@ -16,10 +16,13 @@ from src.llm import get_llm
 from src.nodes.planner import planner as planner_node
 from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
 from src.recovery.policy import (
+    IssueCategory,
     WorkflowAction,
+    classify_issue,
     commit_current_result,
     decide_recovery_action,
 )
+from src.report_validation import parse_length_target
 from src.state import State
 from src.task_contract import task_allows_web
 
@@ -50,6 +53,15 @@ _FULL_REPLAN_ACTIONS = {
     "FULL_REPLAN_ERROR",
 }
 _FULL_REPLAN_DECISIONS = {"REPLAN", "FULL_REPLAN"}
+_RETRIEVAL_EVIDENCE_CODES = {
+    "EVIDENCE_GAP",
+    "INSUFFICIENT_EVIDENCE",
+    "MISSING_CITATION",
+    "MISSING_EVIDENCE",
+    "RAG_COVERAGE_GAP",
+    "RAG_INSUFFICIENT",
+    "SOURCE_UNSUPPORTED",
+}
 
 
 def _canonical_resume_action(value: Any) -> str | None:
@@ -175,6 +187,109 @@ def _issue_instructions(issues: list[dict[str, Any]]) -> str:
     return "\n".join(f"- {instruction}" for instruction in instructions)
 
 
+def _recovery_sequence(state: State, mode: str, task_id: str) -> int:
+    field = (
+        "evidence_recovery_count"
+        if mode == "evidence_recovery"
+        else "task_retry_count"
+    )
+    counter = state.get(field) or {}
+    try:
+        return max(1, int(counter.get(task_id, 0) or 0))
+    except (AttributeError, TypeError, ValueError):
+        return 1
+
+
+def _build_recovery_plan(
+    state: State,
+    issues: list[dict[str, Any]],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    """Build an execution-only, version-bound plan from all verifier issues."""
+
+    task = _current_task(state)
+    task_id = _current_task_id(state)
+    plan_revision = int(state.get("plan_revision", 1) or 1)
+    task_revision = int((state.get("task_revisions") or {}).get(task_id, 1) or 1)
+    sequence = _recovery_sequence(state, mode, task_id)
+    evidence_issues = [
+        issue
+        for issue in issues
+        if isinstance(issue, dict)
+        and classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
+    ]
+
+    evidence_queries: list[str] = []
+    for issue in evidence_issues:
+        code = str(issue.get("code") or "").strip().upper()
+        if code not in _RETRIEVAL_EVIDENCE_CODES:
+            continue
+        query = str(issue.get("description") or issue.get("suggestion") or "").strip()
+        if query and query not in evidence_queries:
+            evidence_queries.append(query)
+
+    has_evidence_root = bool(evidence_queries)
+    asset_actions: list[dict[str, Any]] = []
+    scope_constraints: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        code = str(issue.get("code") or "").strip().upper()
+        if code in {"MISSING_FIGURE", "MISSING_IMAGE"}:
+            visualization = task.get("visualization")
+            causal = (
+                isinstance(visualization, dict)
+                and str(visualization.get("kind") or "").strip().lower() == "causal"
+            )
+            action: dict[str, Any] = {
+                "asset": "causal_figure" if causal else "figure",
+                "action": "regenerate",
+            }
+            if causal and has_evidence_root:
+                action["after"] = "evidence_recovery"
+            if action not in asset_actions:
+                asset_actions.append(action)
+        elif code == "MISSING_TABLE":
+            action = {"asset": "table", "action": "materialize"}
+            if action not in asset_actions:
+                asset_actions.append(action)
+        elif code in {
+            "OUT_OF_SCOPE",
+            "SCOPE_VIOLATION",
+            "UNSUPPORTED_RECOMMENDATION",
+        }:
+            constraint = str(
+                issue.get("suggestion") or issue.get("description") or ""
+            ).strip()
+            if constraint and constraint not in scope_constraints:
+                scope_constraints.append(constraint)
+
+    length_target = (
+        parse_length_target(str(task.get("task_description") or ""))
+        if any(
+            str(issue.get("code") or "").strip().upper()
+            in {"TOO_SHORT", "TOO_LONG"}
+            for issue in issues
+            if isinstance(issue, dict)
+        )
+        else None
+    )
+    return {
+        "recovery_id": (
+            f"{task_id}:p{plan_revision}:t{task_revision}:{mode}:{sequence}"
+        ),
+        "task_id": task_id,
+        "plan_revision": plan_revision,
+        "task_revision": task_revision,
+        "recovery_sequence": sequence,
+        "evidence_queries": evidence_queries,
+        "asset_actions": asset_actions,
+        "length_target": length_target,
+        "scope_constraints": scope_constraints,
+    }
+
+
 def _continuation_message(action: str, state: State) -> AIMessage | None:
     if action == WorkflowAction.NEXT.value:
         return AIMessage(
@@ -207,12 +322,16 @@ def decision_policy(
     action = str(update.get("workflow_action") or "")
     if action == WorkflowAction.REWORK.value:
         issues = list(assessment.get("issues") or [])
+        recovery_state = {**state, **update}
         update["worker_state"] = _worker_state_with_feedback(
             state,
             {
                 "mode": "rework",
                 "issues": issues,
                 "instructions": _issue_instructions(issues),
+                "recovery_plan": _build_recovery_plan(
+                    recovery_state, issues, mode="rework"
+                ),
             },
         )
 
@@ -241,22 +360,12 @@ def evidence_recovery(
     """Prepare one evidence-focused Worker retry without changing the plan."""
     assessment = state.get("assessment") or {}
     issues = list(assessment.get("issues") or [])
-    missing = [
-        str(item).strip()
-        for item in assessment.get("requirements_missing") or []
-        if str(item).strip()
-    ]
-    if not missing:
-        missing = [
-            str(issue.get("description") or issue.get("code") or "").strip()
-            for issue in issues
-            if isinstance(issue, dict)
-            and str(issue.get("description") or issue.get("code") or "").strip()
-        ]
-    recovery_query = " ".join(missing)
+    recovery_plan = _build_recovery_plan(
+        state, issues, mode="evidence_recovery"
+    )
     instructions = (
-        "Rewrite the retrieval query around the missing requirements, broaden RAG coverage, "
-        "preserve source provenance and evidence coverage, and do not fill gaps with unsourced claims."
+        "Run only the supplemental evidence queries in recovery_plan, preserve the original "
+        "Planner query and inherited evidence, and do not fill gaps with unsourced claims."
     )
     issue_guidance = _issue_instructions(issues)
     if issue_guidance:
@@ -265,7 +374,7 @@ def evidence_recovery(
         "mode": "evidence_recovery",
         "issues": issues,
         "instructions": instructions,
-        "recovery_query": recovery_query,
+        "recovery_plan": recovery_plan,
         "allow_web": task_allows_web(_current_task(state)),
     }
     return {

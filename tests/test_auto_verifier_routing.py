@@ -129,6 +129,143 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
     assets = json.loads(captured["worker_assets"])
     assert assets["citations"] == [{"evidence_id": "E1"}]
     assert assets["tables"] == []
+    assert "actual_length" in assets
+
+
+def test_deterministic_length_failure_overrides_llm_pass(monkeypatch):
+    state = _state()
+    state["tasks"][0]["task_description"] = "撰写引言，字数：20-30字。"
+    state["current_result"].update(
+        {
+            "text_output": "太短。",
+            "citations": [],
+            "word_count": 999,
+        }
+    )
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["内容完整"],
+        "requirements_missing": [],
+    }
+
+    update, captured = _run(monkeypatch, state, assessment)
+
+    issue = next(
+        item for item in update["assessment"]["issues"] if item["code"] == "TOO_SHORT"
+    )
+    assert update["assessment"]["status"] == "FAILED"
+    assert issue["actual"] == 2
+    assert issue["required_min"] == 20
+    assets = json.loads(captured["worker_assets"])
+    assert assets["actual_length"] == 2
+    assert assets["length_target"] == {"min": 20, "max": 30}
+
+
+def test_deterministic_length_replaces_llm_estimate_for_the_same_issue(monkeypatch):
+    state = _state()
+    state["tasks"][0]["task_description"] = "字数：20-30字。"
+    state["current_result"].update({"text_output": "太短。", "citations": []})
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "TOO_SHORT",
+                "category": "CONTENT_DEFECT",
+                "description": "估计只有约5字。",
+                "suggestion": "扩写。",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["正文篇幅"],
+    }
+
+    update, _ = _run(monkeypatch, state, assessment)
+
+    issues = [
+        issue for issue in update["assessment"]["issues"] if issue["code"] == "TOO_SHORT"
+    ]
+    assert len(issues) == 1
+    assert issues[0]["actual"] == 2
+    assert issues[0]["required_min"] == 20
+
+
+def test_deterministic_asset_gate_requires_formal_assets_after_materialization():
+    state = _state(cursor=1)
+    state["current_result"].update({"citations": [], "tables": [], "figures": []})
+    assessment = {
+        "status": "PASS",
+        "current_section": "质量指标体系",
+        "issues": [],
+        "requirements_met": ["正文完整"],
+        "requirements_missing": [],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+    checked = auto_verifier_module._apply_deterministic_validation(sanitized, state)
+
+    assert checked["status"] == "FAILED"
+    assert any(issue["code"] == "MISSING_TABLE" for issue in checked["issues"])
+
+
+def test_causal_figure_missing_from_insufficient_evidence_is_not_a_second_root_issue():
+    state = _state()
+    state["tasks"][0].update(
+        {
+            "generate_figure": True,
+            "visualization": {
+                "kind": "causal",
+                "required_concepts": ["反应压力", "熔融指数"],
+            },
+        }
+    )
+    state["current_result"].update(
+        {
+            "citations": [],
+            "figures": [],
+            "evidence_coverage": {
+                "status": "insufficient",
+                "uncovered_concepts": ["反应压力"],
+            },
+        }
+    )
+
+    checked = auto_verifier_module._apply_deterministic_validation(
+        {
+            "status": "PASS",
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": [],
+            "requirements_missing": [],
+        },
+        state,
+    )
+
+    assert not any(issue["code"] == "MISSING_FIGURE" for issue in checked["issues"])
+
+
+def test_deterministic_length_check_emits_too_long():
+    state = _state()
+    state["tasks"][0]["task_description"] = "不超过3字。"
+    state["current_result"].update({"text_output": "聚乙烯生产工艺", "citations": []})
+
+    checked = auto_verifier_module._apply_deterministic_validation(
+        {
+            "status": "PASS",
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": [],
+            "requirements_missing": [],
+        },
+        state,
+    )
+
+    issue = next(issue for issue in checked["issues"] if issue["code"] == "TOO_LONG")
+    assert issue["actual"] == 7
+    assert issue["required_max"] == 3
 
 
 def test_verifier_prints_short_issue_summary(monkeypatch, capsys):

@@ -13,6 +13,9 @@ Worker 正文：
 Worker 结构化资产：
 {worker_assets}
 
+程序确定性检查结果：
+{deterministic_checks}
+
 # Assessment
 将状态设为 `PASS`、`FAILED` 或 `BLOCKED`，并逐项记录问题。问题分类必须遵循：
 
@@ -21,9 +24,19 @@ Worker 结构化资产：
 - `LOCAL_PLAN_DEFECT`：资源已经存在但未分配、未完成任务顺序错误或任务粒度不可执行；
 - `EXTERNAL_BLOCKER`：必需外部资源不存在、权限缺失或需求冲突需用户选择。
 
+字数、引用编号、结构化资产是否存在等确定性事实由程序检查负责。不得自行估算字数，
+也不要重复生成 `TOO_SHORT`、`TOO_LONG`、`MISSING_TABLE` 或 `MISSING_FIGURE`；
+你只审核内容完整性、专业逻辑、证据是否真正支持相邻结论以及是否偏题。
+
 不要把知识库检索不足写成计划错误。`MISSING_RESOURCE` 仅用于明确命名资源：
 资源存在但未分配时分类为 `LOCAL_PLAN_DEFECT`；资源根本不存在时分类为
 `EXTERNAL_BLOCKER`。证据搜索覆盖不足必须使用 `EVIDENCE_GAP`。
+
+区分硬性证据任务和调查型任务。只有当任务描述明确允许“未找到时报告可追溯的
+证据缺口”时，才属于调查型任务：如果 Worker 准确说明未检出的关系、检索范围和
+现有来源边界，没有把缺口改写成确定结论，并完成其他交付要求，该缺口披露可以 PASS。
+如果任务要求必须取得证据支持的确定结论，或者没有明确允许缺口交付，缺少证据仍应
+使用 `EVIDENCE_GAP` 并设为 FAILED/BLOCKED。
 
 当 `citations` 非空时，正文中的证据性论断必须在相邻位置使用真实的 `[E编号]`。
 检查正文引用的编号是否存在于 `citations`，并结合对应 `supporting_text` 判断相邻论断

@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
 from src.llm import get_llm
+from src.report_validation import count_report_length, parse_length_target
 from src.state import State
 
 
@@ -30,6 +31,10 @@ _CATEGORY_BY_CODE = {
     "SOURCE_UNSUPPORTED": "EVIDENCE_GAP",
     "INVALID_CITATION_ID": "EVIDENCE_GAP",
     "MISSING_INLINE_CITATION": "EVIDENCE_GAP",
+    "TOO_SHORT": "CONTENT_DEFECT",
+    "TOO_LONG": "CONTENT_DEFECT",
+    "MISSING_TABLE": "CONTENT_DEFECT",
+    "MISSING_FIGURE": "CONTENT_DEFECT",
     "INVALID_TASK_ORDER": "LOCAL_PLAN_DEFECT",
     "MISSING_DEPENDENCY": "LOCAL_PLAN_DEFECT",
     "RESOURCE_NOT_ASSIGNED": "LOCAL_PLAN_DEFECT",
@@ -95,6 +100,10 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
         try:
             current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
             content = current_result.get("content") or current_result.get("text_output") or ""
+            actual_length = count_report_length(str(content))
+            length_target = parse_length_target(
+                str(current_task.get("task_description") or "")
+            )
             worker_assets = json.dumps(
                 {
                     "status": current_result.get("status"),
@@ -103,6 +112,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "citations": current_result.get("citations", []),
                     "sources_used": current_result.get("sources_used", []),
                     "evidence_coverage": current_result.get("evidence_coverage", {}),
+                    "actual_length": actual_length,
+                    "length_target": length_target,
                 },
                 ensure_ascii=False,
             )
@@ -127,6 +138,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     ),
                     "worker_result": content,
                     "worker_assets": worker_assets,
+                    "deterministic_checks": json.dumps(
+                        _deterministic_issues(state), ensure_ascii=False
+                    ),
                     "format_instructions": format_instructions,
                 }
             )
@@ -145,6 +159,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
 
     sanitized = _sanitize_assessment(assessment, state)
     sanitized = _apply_citation_integrity(sanitized, current_result)
+    sanitized = _apply_deterministic_validation(sanitized, state)
     plan_revision = int(state.get("plan_revision", 1) or 1)
     current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
     issues = list(sanitized.get("issues") or [])
@@ -208,6 +223,122 @@ def _apply_citation_integrity(
     requirements_missing = list(updated.get("requirements_missing") or [])
     if missing_requirement not in requirements_missing:
         requirements_missing.append(missing_requirement)
+    updated.update(
+        {
+            "status": "FAILED",
+            "issues": issues,
+            "requirements_missing": requirements_missing,
+        }
+    )
+    return updated
+
+
+def _deterministic_issues(state: State) -> list[dict[str, Any]]:
+    """Return facts that do not require semantic judgement by the LLM."""
+
+    tasks = state.get("tasks") or []
+    cursor = int(state.get("cursor", 0) or 0)
+    task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
+    result = state.get("current_result") or {}
+    content = str(result.get("content") or result.get("text_output") or "")
+    actual = count_report_length(content)
+    target = parse_length_target(str(task.get("task_description") or ""))
+    issues: list[dict[str, Any]] = []
+    if target and target.get("min") is not None and actual < int(target["min"]):
+        issues.append(
+            {
+                "code": "TOO_SHORT",
+                "category": "CONTENT_DEFECT",
+                "description": (
+                    f"正文确定性计数为 {actual} 字，低于最低要求 {target['min']} 字。"
+                ),
+                "suggestion": "补充任务要求的有效内容，并保持证据与范围约束。",
+                "severity": "major",
+                "actual": actual,
+                "required_min": int(target["min"]),
+                "required_max": target.get("max"),
+            }
+        )
+    if target and target.get("max") is not None and actual > int(target["max"]):
+        issues.append(
+            {
+                "code": "TOO_LONG",
+                "category": "CONTENT_DEFECT",
+                "description": (
+                    f"正文确定性计数为 {actual} 字，超过最高要求 {target['max']} 字。"
+                ),
+                "suggestion": "压缩重复内容，但保留必要结论、证据和资产说明。",
+                "severity": "major",
+                "actual": actual,
+                "required_min": target.get("min"),
+                "required_max": int(target["max"]),
+            }
+        )
+    if task.get("generate_table") is True and not list(result.get("tables") or []):
+        issues.append(
+            {
+                "code": "MISSING_TABLE",
+                "category": "CONTENT_DEFECT",
+                "description": "任务要求正式表格资产，但 current_result.tables 为空。",
+                "suggestion": "生成或从正文 Markdown 表格确定性转换正式 table asset。",
+                "severity": "major",
+            }
+        )
+    visualization = task.get("visualization")
+    coverage = result.get("evidence_coverage") or {}
+    causal_figure_blocked_by_evidence = (
+        isinstance(visualization, dict)
+        and str(visualization.get("kind") or "").strip().lower() == "causal"
+        and isinstance(coverage, dict)
+        and str(coverage.get("status") or "").strip().lower()
+        in {"insufficient", "unavailable"}
+    )
+    if (
+        task.get("generate_figure") is True
+        and not list(result.get("figures") or [])
+        and not causal_figure_blocked_by_evidence
+    ):
+        issues.append(
+            {
+                "code": "MISSING_FIGURE",
+                "category": "CONTENT_DEFECT",
+                "description": "任务要求正式图形资产，但 current_result.figures 为空。",
+                "suggestion": "满足数据或证据覆盖要求后，通过正式图形生成器创建 figure asset。",
+                "severity": "major",
+            }
+        )
+    return issues
+
+
+def _apply_deterministic_validation(
+    assessment: dict[str, Any], state: State
+) -> dict[str, Any]:
+    """Merge deterministic gate failures after normalizing the LLM contract."""
+
+    deterministic = _deterministic_issues(state)
+    if not deterministic:
+        return assessment
+    updated = dict(assessment)
+    issues = list(updated.get("issues") or [])
+    existing_codes = {
+        str(issue.get("code") or "").strip().upper()
+        for issue in issues
+        if isinstance(issue, dict)
+    }
+    requirements_missing = list(updated.get("requirements_missing") or [])
+    for issue in deterministic:
+        if issue["code"] in existing_codes:
+            issues = [
+                existing
+                for existing in issues
+                if str(existing.get("code") or "").strip().upper()
+                != issue["code"]
+            ]
+        issues.append(issue)
+        existing_codes.add(issue["code"])
+        requirement = issue["description"]
+        if requirement not in requirements_missing:
+            requirements_missing.append(requirement)
     updated.update(
         {
             "status": "FAILED",
