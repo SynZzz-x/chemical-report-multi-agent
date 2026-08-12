@@ -30,7 +30,7 @@
 9. 临时候选任务 ID 必须从 T1 开始连续编号；提交候选计划时由系统重新分配不冲突的稳定 ID。
 10. `use_rag=false` 时 query 必须为空字符串；`use_rag=true` 时 query 必须非空。
 11. `generate_figure=false` 时 visualization 必须为 null；普通数据图可使用 `generate_figure=true` 和 `visualization=null`，但必须有真实数据资源。
-12. 概念关系图必须设置 `generate_figure=true`，visualization 必须且只能包含 kind、title、required_concepts、web_queries、allow_web_fallback；当前 kind 只能是 causal。
+12. 概念关系图必须设置 `generate_figure=true`，visualization 必须且只能包含 kind、title、required_concepts、web_queries、allow_web_fallback；当前 kind 只能是 causal。required_concepts 必须包含 1～6 个主因果链所需的原子概念，不得把多个概念合并在一个字符串中。
 
 # Output Contract
 只输出一个 JSON Object，顶层只能包含 `tasks`，不使用 Markdown 代码块或解释文字。

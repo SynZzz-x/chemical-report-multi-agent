@@ -62,6 +62,8 @@ def _run(monkeypatch, state, assessment):
 
 
 def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
+    state = _state()
+    state["current_result"]["text_output"] += "[E1]"
     assessment = {
         "status": "BLOCKED",
         "current_section": "引言",
@@ -79,7 +81,7 @@ def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
         "recommended_decision": "REPLAN",
     }
 
-    update, _ = _run(monkeypatch, _state(), assessment)
+    update, _ = _run(monkeypatch, state, assessment)
 
     assert set(update) == {"assessment"}
     assert "decision" not in update
@@ -127,6 +129,85 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
     assets = json.loads(captured["worker_assets"])
     assert assets["citations"] == [{"evidence_id": "E1"}]
     assert assets["tables"] == []
+
+
+def test_verifier_prints_short_issue_summary(monkeypatch, capsys):
+    state = _state()
+    state["current_result"]["text_output"] += "[E1]"
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "关键结论缺少可追溯来源",
+                "suggestion": "补充引用",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["关键结论来源"],
+    }
+
+    _run(monkeypatch, state, assessment)
+
+    output = capsys.readouterr().out
+    assert "issue_count=1" in output
+    assert "EVIDENCE_GAP: 关键结论缺少可追溯来源" in output
+
+
+def test_verifier_rejects_unknown_inline_evidence_id(monkeypatch):
+    state = _state()
+    state["current_result"]["text_output"] = "温度影响熔融指数。[E404]"
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["内容完整"],
+        "requirements_missing": [],
+    }
+
+    update, _ = _run(monkeypatch, state, assessment)
+
+    assert update["assessment"]["status"] == "FAILED"
+    assert update["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
+    assert "E404" in update["assessment"]["issues"][0]["description"]
+
+
+def test_verifier_requires_inline_binding_when_citations_are_available(monkeypatch):
+    state = _state()
+    state["current_result"]["text_output"] = "温度影响熔融指数。"
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["内容完整"],
+        "requirements_missing": [],
+    }
+
+    update, _ = _run(monkeypatch, state, assessment)
+
+    assert update["assessment"]["status"] == "FAILED"
+    assert update["assessment"]["issues"][0]["code"] == "MISSING_INLINE_CITATION"
+
+
+def test_verifier_rejects_inline_id_when_structured_citations_are_empty(monkeypatch):
+    state = _state()
+    state["current_result"]["citations"] = []
+    state["current_result"]["text_output"] = "温度影响熔融指数。[E404]"
+    assessment = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["内容完整"],
+        "requirements_missing": [],
+    }
+
+    update, _ = _run(monkeypatch, state, assessment)
+
+    assert update["assessment"]["status"] == "FAILED"
+    assert update["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
 
 
 def test_sanitizer_rejects_pass_assessment_that_still_contains_issues():

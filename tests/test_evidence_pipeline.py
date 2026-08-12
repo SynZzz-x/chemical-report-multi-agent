@@ -1,3 +1,5 @@
+import pytest
+
 from src.evidence.coordinator import EvidenceCoordinator
 from src.evidence.coverage import assess_coverage
 from src.evidence.models import EvidenceBundle, EvidenceRecord
@@ -58,6 +60,56 @@ def test_coverage_requires_every_requested_concept():
     assert report.covered_concepts == ("反应温度", "熔融指数")
     assert report.uncovered_concepts == ("密度",)
     assert report.web_fallback_required is True
+
+
+def test_coverage_uses_auditable_aliases_for_equivalent_process_terms():
+    bundle = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="工艺说明",
+                supporting_text="反应温度和反应压力会影响聚合过程。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    report = assess_coverage(bundle, ["聚合温度", "聚合压力"])
+
+    assert report.status == "sufficient"
+    assert report.covered_concepts == ("聚合温度", "聚合压力")
+    assert report.uncovered_concepts == ()
+
+
+@pytest.mark.parametrize(
+    ("evidence_text", "required_concept"),
+    [
+        ("装置记录了催化剂类型。", "催化剂体系"),
+        ("循环气中的氢气含量发生变化。", "氢气加入量"),
+        ("产品共聚单体含量为控制指标。", "共聚单体加入量"),
+    ],
+)
+def test_coverage_does_not_equate_distinct_process_properties(
+    evidence_text,
+    required_concept,
+):
+    bundle = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="工艺说明",
+                supporting_text=evidence_text,
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    report = assess_coverage(bundle, [required_concept])
+
+    assert report.status == "insufficient"
+    assert report.uncovered_concepts == (required_concept,)
 
 
 class _FakeWebProvider:

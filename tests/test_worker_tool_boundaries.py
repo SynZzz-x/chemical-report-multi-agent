@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.evidence.models import EvidenceRecord
+from src.evidence.models import EvidenceBundle, EvidenceRecord
 from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode, ChemicalKnowledgeBaseTool, ToolManager
 from src.tool_names import canonical_tool_name
@@ -404,8 +404,16 @@ def test_concept_graph_uses_sufficient_internal_rag_without_public_web(monkeypat
     assert graph_result == {"success": True, "record_count": 1}
 
 
-def test_rag_is_prefetched_before_autonomous_tool_selection():
+def test_rag_is_prefetched_before_autonomous_tool_selection(monkeypatch, capsys):
     calls = []
+
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
 
     class KnowledgeTool:
         name = "chemical_knowledge_base_tool"
@@ -422,3 +430,197 @@ def test_rag_is_prefetched_before_autonomous_tool_selection():
     assert calls == [{"query": "反应温度 熔融指数", "top_k": 5}]
     assert prefetched[0]["prefetched"] is True
     assert prefetched[0]["tool"] == "chemical_knowledge_base_tool"
+    assert (
+        'Worker RAG prefetch 1/3: source=planner_query query="反应温度 熔融指数"'
+        in capsys.readouterr().out
+    )
+
+
+def test_adaptive_rag_query_logs_its_position_in_shared_budget(monkeypatch, capsys):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "rag-2",
+                            "name": "chemical_knowledge_base_tool",
+                            "args": {"query": "氢气 熔融指数"},
+                        }
+                    ],
+                )
+            return SimpleNamespace(content="完成正文。" * 80, tool_calls=[])
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def invoke(self, parameters):
+            return {"success": True, "evidence": []}
+
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
+    node.llm_client = Model()
+    initial_call = {
+        "tool": "chemical_knowledge_base_tool",
+        "parameters": {"query": "聚合温度"},
+        "success": True,
+        "prefetched": True,
+    }
+
+    node._execute_tool_loop(
+        node.llm_client,
+        [],
+        [KnowledgeTool()],
+        {"task_name": "工艺参数"},
+        initial_tool_calls=[initial_call],
+    )
+
+    assert (
+        'Worker RAG adaptive query 2/3: query="氢气 熔融指数"'
+        in capsys.readouterr().out
+    )
+
+
+def test_worker_binds_rag_claims_to_known_evidence_ids():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def invoke(self, messages):
+            assert '"evidence_id": "E1"' in messages[0].content
+            return SimpleNamespace(content="聚合温度会影响熔融指数。[E1]")
+
+    node.llm_client = Model()
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="聚乙烯工艺说明",
+                supporting_text="聚合温度会影响熔融指数。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度对质量的影响"},
+        "聚合温度会影响熔融指数。",
+        evidence,
+    )
+
+    assert revised == "聚合温度会影响熔融指数。[E1]"
+
+
+def test_worker_rejects_unknown_evidence_ids_from_binding_pass(capsys):
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def invoke(self, messages):
+            return SimpleNamespace(content="聚合温度会影响熔融指数。[E404]")
+
+    node.llm_client = Model()
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="聚乙烯工艺说明",
+                supporting_text="聚合温度会影响熔融指数。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度对质量的影响"},
+        "原始正文。",
+        evidence,
+    )
+
+    assert revised == "原始正文。"
+    assert "E404" in capsys.readouterr().out
+
+
+def test_worker_binding_pass_reviews_partially_cited_content():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def __init__(self):
+            self.called = False
+
+        def invoke(self, messages):
+            self.called = True
+            return SimpleNamespace(content="温度影响熔指。[E1]压力影响密度。[E2]")
+
+    model = Model()
+    node.llm_client = model
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="温度证据",
+                supporting_text="温度影响熔指。",
+                file_path="/srv/docs/process.docx",
+            ),
+            EvidenceRecord(
+                evidence_id="E2",
+                source_type="rag",
+                title="压力证据",
+                supporting_text="压力影响密度。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度和压力"},
+        "温度影响熔指。[E1]压力影响密度。",
+        evidence,
+    )
+
+    assert model.called is True
+    assert "[E2]" in revised
+
+
+def test_worker_fallback_removes_unknown_ids_from_original_content():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def invoke(self, messages):
+            return SimpleNamespace(content="模型仍然返回伪引用。[E404]")
+
+    node.llm_client = Model()
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="温度证据",
+                supporting_text="温度影响熔指。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度"},
+        "原文包含伪引用。[E404]",
+        evidence,
+    )
+
+    assert revised == "原文包含伪引用。"
+    assert "E404" not in revised

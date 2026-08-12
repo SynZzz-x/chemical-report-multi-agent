@@ -25,6 +25,11 @@ Worker 结构化资产：
 资源存在但未分配时分类为 `LOCAL_PLAN_DEFECT`；资源根本不存在时分类为
 `EXTERNAL_BLOCKER`。证据搜索覆盖不足必须使用 `EVIDENCE_GAP`。
 
+当 `citations` 非空时，正文中的证据性论断必须在相邻位置使用真实的 `[E编号]`。
+检查正文引用的编号是否存在于 `citations`，并结合对应 `supporting_text` 判断相邻论断
+是否得到支持。不存在的编号使用 `INVALID_CITATION_ID`；有证据表但正文没有引用绑定时
+使用 `MISSING_INLINE_CITATION`；引用存在但不能支持相邻论断时使用 `SOURCE_UNSUPPORTED`。
+
 # Output Contract
 {format_instructions}
 

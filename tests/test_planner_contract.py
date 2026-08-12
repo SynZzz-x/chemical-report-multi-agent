@@ -587,6 +587,102 @@ def test_initial_planner_accepts_supported_concept_visualization(monkeypatch):
     assert planner_module._build_tasks_with_llm(_intake_summary(), {}) == [task]
 
 
+def test_initial_planner_rejects_more_than_six_required_concepts(monkeypatch):
+    task = _task(
+        generate_figure=True,
+        visualization={
+            "kind": "causal",
+            "title": "概念关系图",
+            "required_concepts": [f"概念{i}" for i in range(1, 8)],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="at most 6"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+@pytest.mark.parametrize(
+    "compound_concept",
+    ["氢气/共聚单体比例", "温度与压力", "催化剂、添加剂"],
+)
+def test_initial_planner_rejects_non_atomic_required_concepts(
+    monkeypatch,
+    compound_concept,
+):
+    task = _task(
+        generate_figure=True,
+        visualization={
+            "kind": "causal",
+            "title": "概念关系图",
+            "required_concepts": [compound_concept],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="atomic"):
+        planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+
+@pytest.mark.parametrize(
+    "required_concepts",
+    [
+        [f"概念{i}" for i in range(1, 8)],
+        ["温度与压力"],
+    ],
+)
+def test_replacement_planner_enforces_concept_scope(required_concepts):
+    candidate = {
+        "task_name": "工艺参数",
+        "task_description": "分析关键工艺参数。",
+        "visualization": {
+            "kind": "causal",
+            "title": "概念关系图",
+            "required_concepts": required_concepts,
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    }
+
+    with pytest.raises(ValueError, match="at most 6|atomic"):
+        planner_module._validate_replacement_task_schema([candidate])
+
+
+@pytest.mark.parametrize(
+    "visualization",
+    [
+        {
+            "kind": "flowchart",
+            "title": "流程图",
+            "required_concepts": ["温度"],
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+        {
+            "kind": "causal",
+            "title": "缺失概念的关系图",
+            "web_queries": [],
+            "allow_web_fallback": False,
+        },
+    ],
+)
+def test_replacement_planner_requires_complete_causal_visualization(visualization):
+    candidate = {
+        "task_name": "工艺参数",
+        "task_description": "分析关键工艺参数。",
+        "visualization": visualization,
+    }
+
+    with pytest.raises(ValueError, match="visualization|causal|required_concepts"):
+        planner_module._validate_replacement_task_schema([candidate])
+
+
 def test_initial_planner_rejects_concept_graph_without_evidence_channel(monkeypatch):
     task = _task(
         task_description="绘制温度与产品质量关系图。",

@@ -22,7 +22,7 @@ generate_figure, generate_table, visualization
 - `generate_figure=false` 时，`visualization` 必须为 null。
 - `generate_figure=true` 且 `visualization=null` 表示普通数据图，此时必须为任务分配真实数据资源。
 - 概念关系图不要求数据文件，但 `generate_figure` 必须为 true，且 `visualization` 必须且只能包含 `kind`、`title`、`required_concepts`、`web_queries`、`allow_web_fallback` 五个字段。
-- 当前概念图执行器只支持 `visualization.kind="causal"`；不得规划尚未实现的其他图类型。`required_concepts` 必须为非空 String Array。
+- 当前概念图执行器只支持 `visualization.kind="causal"`；不得规划尚未实现的其他图类型。`required_concepts` 必须包含 1～6 个完成主因果链所必需的原子概念。每个元素只能表示一个概念，禁止使用 `/`、`、`、“与/和/及”等方式把多个概念合并到一个字符串中。
 
 # Planning Rules
 1. 保持标题、用户意图、核心内容和约束条件中的研究对象一致，不得替换成其他化工装置或项目。

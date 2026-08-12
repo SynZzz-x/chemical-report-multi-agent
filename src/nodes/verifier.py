@@ -28,6 +28,8 @@ _CATEGORY_BY_CODE = {
     "RAG_COVERAGE_GAP": "EVIDENCE_GAP",
     "RAG_INSUFFICIENT": "EVIDENCE_GAP",
     "SOURCE_UNSUPPORTED": "EVIDENCE_GAP",
+    "INVALID_CITATION_ID": "EVIDENCE_GAP",
+    "MISSING_INLINE_CITATION": "EVIDENCE_GAP",
     "INVALID_TASK_ORDER": "LOCAL_PLAN_DEFECT",
     "MISSING_DEPENDENCY": "LOCAL_PLAN_DEFECT",
     "RESOURCE_NOT_ASSIGNED": "LOCAL_PLAN_DEFECT",
@@ -142,14 +144,78 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
         )
 
     sanitized = _sanitize_assessment(assessment, state)
+    sanitized = _apply_citation_integrity(sanitized, current_result)
     plan_revision = int(state.get("plan_revision", 1) or 1)
+    current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
+    issues = list(sanitized.get("issues") or [])
     print(
         "🔍 AutoVerifier assessment: "
-        f"task={_task_name(tasks, cursor)} status={sanitized.get('status')} "
-        f"plan_revision={plan_revision}"
+        f"task={current_task.get('task_id') or cursor} "
+        f"name={_task_name(tasks, cursor)} status={sanitized.get('status')} "
+        f"issue_count={len(issues)} plan_revision={plan_revision}"
     )
+    for issue in issues[:5]:
+        description = re.sub(r"\s+", " ", str(issue.get("description") or "")).strip()
+        print(f"  - {issue.get('code')}: {description}")
     _log_verifier_output(state, sanitized, llm_record)
     return {"assessment": sanitized}
+
+
+def _apply_citation_integrity(
+    assessment: dict[str, Any],
+    current_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Add deterministic failures for missing or invented inline evidence IDs."""
+    citations = current_result.get("citations") or []
+    known_ids = {
+        str(citation.get("evidence_id") or "").strip().upper()
+        for citation in citations
+        if isinstance(citation, dict) and citation.get("evidence_id")
+    }
+    content = str(
+        current_result.get("content") or current_result.get("text_output") or ""
+    )
+    cited_ids = {
+        value.upper() for value in re.findall(r"\[(E\d+)\]", content, re.IGNORECASE)
+    }
+    unknown_ids = cited_ids - known_ids
+    issue = None
+    missing_requirement = "正文中的证据编号绑定"
+    if unknown_ids:
+        issue = {
+            "code": "INVALID_CITATION_ID",
+            "category": "EVIDENCE_GAP",
+            "description": "正文引用了不存在的证据编号："
+            + ", ".join(sorted(unknown_ids)),
+            "suggestion": "仅使用 current_result.citations 中存在的 [E编号]。",
+            "severity": "major",
+        }
+    elif known_ids and not cited_ids:
+        issue = {
+            "code": "MISSING_INLINE_CITATION",
+            "category": "EVIDENCE_GAP",
+            "description": "正文已有结构化证据，但没有把具体论断绑定到 [E编号]。",
+            "suggestion": "在对应论断或段落后添加真实的 [E编号]。",
+            "severity": "major",
+        }
+    if issue is None:
+        return assessment
+
+    updated = dict(assessment)
+    issues = list(updated.get("issues") or [])
+    if not any(item.get("code") == issue["code"] for item in issues):
+        issues.append(issue)
+    requirements_missing = list(updated.get("requirements_missing") or [])
+    if missing_requirement not in requirements_missing:
+        requirements_missing.append(missing_requirement)
+    updated.update(
+        {
+            "status": "FAILED",
+            "issues": issues,
+            "requirements_missing": requirements_missing,
+        }
+    )
+    return updated
 
 
 def _service_error_assessment(

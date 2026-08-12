@@ -49,6 +49,8 @@ _VISUALIZATION_REQUIRED_FIELDS = {
     "allow_web_fallback",
 }
 _SUPPORTED_VISUALIZATION_KINDS = {"causal"}
+_MAX_REQUIRED_CONCEPTS = 6
+_CONCEPT_LIST_DELIMITERS = re.compile(r"[/／、,，;；]")
 _KNOWLEDGE_REQUIREMENT_MARKERS = (
     "知识库",
     "可追溯引用",
@@ -70,6 +72,17 @@ _DATA_ANALYSIS_MARKERS = (
     "定量操作窗口",
 )
 _DATA_RESOURCE_SUFFIXES = (".csv",)
+
+
+def _is_atomic_concept(value: str) -> bool:
+    concept = value.strip()
+    if _CONCEPT_LIST_DELIMITERS.search(concept):
+        return False
+    for connector in ("以及", "与", "和", "及"):
+        left, separator, right = concept.partition(connector)
+        if separator and len(left.strip()) >= 2 and len(right.strip()) >= 2:
+            return False
+    return True
 
 """
 Planner 节点：
@@ -170,6 +183,49 @@ def _validate_string_list(value: Any, field: str) -> None:
         raise ValueError(f"{field} must be a list of non-empty strings")
 
 
+def _validate_required_concepts(value: Any) -> None:
+    field = "visualization.required_concepts"
+    _validate_string_list(value, field)
+    if not value:
+        raise ValueError(f"{field} must not be empty")
+    if len(value) > _MAX_REQUIRED_CONCEPTS:
+        raise ValueError(f"{field} must contain at most 6 concepts")
+    non_atomic = [concept for concept in value if not _is_atomic_concept(concept)]
+    if non_atomic:
+        raise ValueError(
+            f"{field} must contain atomic concepts; split={non_atomic}"
+        )
+
+
+def _validate_visualization_contract(visualization: Any) -> None:
+    if not isinstance(visualization, dict):
+        raise ValueError("visualization must be an object or null")
+    if set(visualization) != _VISUALIZATION_REQUIRED_FIELDS:
+        missing = sorted(_VISUALIZATION_REQUIRED_FIELDS - set(visualization))
+        extra = sorted(set(visualization) - _VISUALIZATION_REQUIRED_FIELDS)
+        raise ValueError(
+            "visualization fields must exactly match the concept-graph contract; "
+            f"missing={missing}, extra={extra}"
+        )
+    if (
+        not isinstance(visualization["kind"], str)
+        or visualization["kind"] not in _SUPPORTED_VISUALIZATION_KINDS
+    ):
+        raise ValueError("visualization.kind must be causal")
+    if (
+        not isinstance(visualization["title"], str)
+        or not visualization["title"].strip()
+    ):
+        raise ValueError("visualization.title must be a non-empty string")
+    _validate_required_concepts(visualization["required_concepts"])
+    _validate_string_list(
+        visualization["web_queries"],
+        "visualization.web_queries",
+    )
+    if not isinstance(visualization["allow_web_fallback"], bool):
+        raise ValueError("visualization.allow_web_fallback must be a boolean")
+
+
 def _validate_generated_task_schema(candidate_tasks: Any) -> None:
     """Validate the exact model-facing task contract without legacy fields."""
     if not isinstance(candidate_tasks, list) or not candidate_tasks:
@@ -205,37 +261,7 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
         visualization = task["visualization"]
         if visualization is None:
             continue
-        if not isinstance(visualization, dict):
-            raise ValueError("visualization must be an object or null")
-        if set(visualization) != _VISUALIZATION_REQUIRED_FIELDS:
-            missing = sorted(_VISUALIZATION_REQUIRED_FIELDS - set(visualization))
-            extra = sorted(set(visualization) - _VISUALIZATION_REQUIRED_FIELDS)
-            raise ValueError(
-                "visualization fields must exactly match the concept-graph contract; "
-                f"missing={missing}, extra={extra}"
-            )
-        if (
-            not isinstance(visualization["kind"], str)
-            or visualization["kind"] not in _SUPPORTED_VISUALIZATION_KINDS
-        ):
-            raise ValueError("visualization.kind must be causal")
-        if (
-            not isinstance(visualization["title"], str)
-            or not visualization["title"].strip()
-        ):
-            raise ValueError("visualization.title must be a non-empty string")
-        _validate_string_list(
-            visualization["required_concepts"],
-            "visualization.required_concepts",
-        )
-        if not visualization["required_concepts"]:
-            raise ValueError("visualization.required_concepts must not be empty")
-        _validate_string_list(
-            visualization["web_queries"],
-            "visualization.web_queries",
-        )
-        if not isinstance(visualization["allow_web_fallback"], bool):
-            raise ValueError("visualization.allow_web_fallback must be a boolean")
+        _validate_visualization_contract(visualization)
 
 
 def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
@@ -267,25 +293,18 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
                 _validate_string_list(task[field], field)
         if "visualization" in task and task["visualization"] is not None:
             visualization = task["visualization"]
-            if not isinstance(visualization, dict):
-                raise ValueError("visualization must be an object or null")
-            for field in ("kind", "title"):
-                if field in visualization and (
-                    not isinstance(visualization[field], str)
-                    or not visualization[field].strip()
-                ):
-                    raise ValueError(f"visualization.{field} must be a non-empty string")
-            for field in ("required_concepts", "web_queries"):
-                if field in visualization:
-                    _validate_string_list(
-                        visualization[field], f"visualization.{field}"
+            legacy_policy_only = (
+                isinstance(visualization, dict)
+                and set(visualization) == {"allow_web_fallback"}
+                and task.get("generate_figure") is False
+            )
+            if legacy_policy_only:
+                if not isinstance(visualization["allow_web_fallback"], bool):
+                    raise ValueError(
+                        "visualization.allow_web_fallback must be a boolean"
                     )
-            if "allow_web_fallback" in visualization and not isinstance(
-                visualization["allow_web_fallback"], bool
-            ):
-                raise ValueError(
-                    "visualization.allow_web_fallback must be a boolean"
-                )
+            else:
+                _validate_visualization_contract(visualization)
 
 
 def _normalize_replacement_tasks(
