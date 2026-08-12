@@ -23,6 +23,38 @@ INTERNAL_CONTROL_TYPES = frozenset(
 )
 
 
+BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
+    "AUTHORIZE_WEB": {
+        "label": "授权公开网络检索",
+        "button_label": "授权并继续",
+        "default_text": "已授权公开网络检索，请继续。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "ACCEPT_EVIDENCE_GAP": {
+        "label": "接受现有证据及缺口报告",
+        "button_label": "接受并继续",
+        "default_text": "接受现有证据及缺口报告，请继续。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "ADJUST_REQUIREMENT": {
+        "label": "调整任务要求",
+        "button_label": "提交新要求",
+        "default_text": "",
+        "requires_text": True,
+        "requires_documents": False,
+    },
+    "UPLOAD_RESOURCES": {
+        "label": "上传补充资料",
+        "button_label": "上传并继续",
+        "default_text": "我已上传补充资料，请结合附件继续处理当前任务。",
+        "requires_text": False,
+        "requires_documents": True,
+    },
+}
+
+
 def is_internal_control_message(content: str) -> bool:
     """Return whether serialized content is graph coordination, not chat text."""
     try:
@@ -67,6 +99,41 @@ def blocker_choices(payload: Any) -> list[str]:
         for choice in choices
         if isinstance(choice, str) and str(choice).strip()
     ]
+
+
+def blocker_action_spec(action: str) -> dict[str, Any]:
+    """Return a copy of the UI contract for one blocker action."""
+
+    normalized = str(action or "").strip()
+    if not normalized:
+        return {}
+    configured = BLOCKER_ACTION_SPECS.get(normalized)
+    if configured is not None:
+        return dict(configured)
+    return {
+        "label": normalized,
+        "button_label": "确认并继续",
+        "default_text": f"已选择处理方式：{normalized}。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
+
+
+def validate_blocker_submission(
+    action: str,
+    text: str,
+    document_count: int,
+) -> str | None:
+    """Return a user-facing validation error for an incomplete action."""
+
+    spec = blocker_action_spec(action)
+    if not spec:
+        return "请选择有效的处理方式。"
+    if spec.get("requires_text") and not str(text or "").strip():
+        return "请输入调整后的任务要求。"
+    if spec.get("requires_documents") and document_count <= 0:
+        return "请先上传补充资料。"
+    return None
 
 
 def build_resume_payload(

@@ -29,10 +29,12 @@ from langgraph.types import Command
 
 from src.config import get_cache_root, get_local_user_id, missing_key_message
 from src.control_messages import (
+    blocker_action_spec,
     blocker_choices,
     blocker_guidance,
     build_resume_payload,
     is_displayable_assistant_message,
+    validate_blocker_submission,
 )
 from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
@@ -586,29 +588,74 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
     return True
 
 
-_BLOCKER_ACTION_LABELS = {
-    "UPLOAD_RESOURCES": "上传补充资料",
-    "AUTHORIZE_WEB": "授权公开网络检索",
-    "ADJUST_REQUIREMENT": "调整任务要求",
-    "ACCEPT_EVIDENCE_GAP": "接受现有证据及缺口报告",
-}
-
-
-def _render_pending_resume_action() -> str:
+def _render_pending_resume_submission() -> dict[str, Any] | None:
     payload = st.session_state.get("pending_interrupt")
     choices = blocker_choices(payload)
     if not choices:
-        return ""
-    return str(
+        return None
+
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    widget_scope = (
+        f"{st.session_state['active_job_id']}_"
+        f"{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]}"
+    )
+    action = str(
         st.selectbox(
             "选择当前阻塞的处理方式",
             options=[""] + choices,
             format_func=lambda value: (
-                "请选择……" if not value else _BLOCKER_ACTION_LABELS.get(value, value)
+                "请选择……"
+                if not value
+                else blocker_action_spec(value).get("label", value)
             ),
+            key=f"blocker_action_{widget_scope}",
         )
         or ""
     )
+    if not action:
+        st.caption("选择处理方式后，可在这里直接完成操作并继续工作流。")
+        return None
+
+    spec = blocker_action_spec(action)
+    text = str(spec.get("default_text") or "")
+    uploaded_files: list[Any] = []
+
+    if spec.get("requires_text"):
+        text = st.text_area(
+            "输入调整后的任务要求",
+            placeholder="例如：只报告知识库已有证据，并明确列出证据缺口。",
+            key=f"blocker_text_{widget_scope}_{action}",
+        )
+
+    if spec.get("requires_documents"):
+        uploaded_files = list(
+            st.file_uploader(
+                "上传补充资料",
+                type=["csv", "pdf", "docx", "txt", "md"],
+                accept_multiple_files=True,
+                key=f"blocker_files_{widget_scope}_{action}",
+            )
+            or []
+        )
+
+    if not st.button(
+        str(spec.get("button_label") or "确认并继续"),
+        type="primary",
+        use_container_width=True,
+        key=f"blocker_submit_{widget_scope}_{action}",
+    ):
+        return None
+
+    error = validate_blocker_submission(action, text, len(uploaded_files))
+    if error:
+        st.warning(error)
+        return None
+
+    return {
+        "action": action,
+        "text": text.strip(),
+        "files": uploaded_files,
+    }
 
 
 def _handle_node_delta(node: str, delta: dict[str, Any]) -> None:
@@ -839,7 +886,9 @@ st.caption("Streamlit 只负责输入与渲染；LangGraph State 负责业务上
 
 _render_history()
 _render_report_downloads()
-pending_resume_action = _render_pending_resume_action()
+pending_interrupt = st.session_state.get("pending_interrupt")
+has_blocker_actions = bool(blocker_choices(pending_interrupt))
+blocker_submission = _render_pending_resume_submission()
 
 if "app" not in st.session_state:
     st.warning("请先在左侧编译工作流。")
@@ -851,22 +900,34 @@ if st.session_state.get("compiled_mode") != verifier_mode:
 
 
 chat_value = st.chat_input(
-    "请输入报告需求、确认意见或审核反馈……",
+    (
+        "请先在上方选择阻塞处理方式……"
+        if has_blocker_actions
+        else "请输入报告需求、确认意见或审核反馈……"
+    ),
     accept_file="multiple",
     file_type=["csv", "pdf", "docx", "txt", "md"],
+    disabled=has_blocker_actions,
 )
 
-if chat_value:
+if blocker_submission is not None or chat_value:
     # Streamlit 1.50 returns a ChatInputValue; keep dict compatibility as well.
-    if isinstance(chat_value, str):
+    if blocker_submission is not None:
+        user_text = str(blocker_submission.get("text") or "")
+        uploaded_files = list(blocker_submission.get("files") or [])
+        resume_action = str(blocker_submission.get("action") or "")
+    elif isinstance(chat_value, str):
         user_text = chat_value
         uploaded_files = []
+        resume_action = ""
     elif isinstance(chat_value, dict):
         user_text = str(chat_value.get("text") or "")
         uploaded_files = list(chat_value.get("files") or [])
+        resume_action = ""
     else:
         user_text = str(getattr(chat_value, "text", "") or "")
         uploaded_files = list(getattr(chat_value, "files", []) or [])
+        resume_action = ""
 
     new_docs = _save_uploaded_files(uploaded_files) if uploaded_files else []
     existing_values = _snapshot_values()
@@ -912,7 +973,6 @@ if chat_value:
         "metadata": _job_metadata(),
     }
 
-    pending_interrupt = st.session_state.get("pending_interrupt")
     if pending_interrupt is not None:
         # Interrupt 的用户反馈由被恢复的节点写入 messages。app.py 只负责
         # 传递本轮 resume 数据，避免同一条 HumanMessage 被写入两次。
@@ -921,7 +981,7 @@ if chat_value:
                 text=graph_text,
                 message_id=human_message_id,
                 docs=new_docs,
-                action=pending_resume_action,
+                action=resume_action,
             ),
             update=base_update,
         )

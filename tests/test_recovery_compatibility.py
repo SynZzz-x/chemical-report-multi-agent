@@ -1007,13 +1007,60 @@ def test_shared_blocker_guidance_uses_specific_or_generic_text():
     }
 
 
-def test_streamlit_forwards_selected_blocker_action_and_accepts_evidence_files():
+def test_blocker_action_specs_define_direct_submission_requirements():
+    from src.control_messages import blocker_action_spec
+
+    assert blocker_action_spec("AUTHORIZE_WEB") == {
+        "label": "授权公开网络检索",
+        "button_label": "授权并继续",
+        "default_text": "已授权公开网络检索，请继续。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
+    assert blocker_action_spec("ACCEPT_EVIDENCE_GAP")["default_text"] == (
+        "接受现有证据及缺口报告，请继续。"
+    )
+    assert blocker_action_spec("ADJUST_REQUIREMENT")["requires_text"] is True
+    assert blocker_action_spec("UPLOAD_RESOURCES")["requires_documents"] is True
+    assert blocker_action_spec("RETRY_INITIAL_PLAN") == {
+        "label": "RETRY_INITIAL_PLAN",
+        "button_label": "确认并继续",
+        "default_text": "已选择处理方式：RETRY_INITIAL_PLAN。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
+
+
+def test_blocker_submission_validation_rejects_missing_required_input():
+    from src.control_messages import validate_blocker_submission
+
+    assert validate_blocker_submission("ADJUST_REQUIREMENT", "", 0) == (
+        "请输入调整后的任务要求。"
+    )
+    assert validate_blocker_submission("ADJUST_REQUIREMENT", "缩小指标范围", 0) is None
+    assert validate_blocker_submission("UPLOAD_RESOURCES", "", 0) == (
+        "请先上传补充资料。"
+    )
+    assert validate_blocker_submission("UPLOAD_RESOURCES", "", 1) is None
+    assert validate_blocker_submission("AUTHORIZE_WEB", "", 0) is None
+    assert validate_blocker_submission("", "", 0) == "请选择有效的处理方式。"
+    assert validate_blocker_submission("RETRY_INITIAL_PLAN", "", 0) is None
+
+
+def test_streamlit_uses_action_specific_blocker_submission_controls():
     source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
         encoding="utf-8"
     )
 
-    assert "pending_resume_action = _render_pending_resume_action()" in source
-    assert "action=pending_resume_action" in source
+    assert "_render_pending_resume_submission" in source
+    assert "blocker_action_spec" in source
+    assert "validate_blocker_submission" in source
+    assert "st.file_uploader(" in source
+    assert "st.text_area(" in source
+    assert "has_blocker_actions = bool(blocker_choices(pending_interrupt))" in source
+    assert "disabled=has_blocker_actions" in source
+    assert "disabled=pending_interrupt is not None" not in source
+    assert "pending_resume_action = _render_pending_resume_action()" not in source
     assert 'file_type=["csv", "pdf", "docx", "txt", "md"]' in source
 
 
