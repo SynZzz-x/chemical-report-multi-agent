@@ -13,10 +13,16 @@ from typing import Any
 
 from src.config import RAGSettings, get_rag_settings
 
-from .models import ChildChunk, ParentChunk, RankedHit, SourceDocument
+from .constants import DATABASE_FILENAME
+from .models import (
+    ChildChunk,
+    ParentChunk,
+    RankedHit,
+    ResourceCatalogEntry,
+    SourceDocument,
+)
 from .tokenizer import CHEMICAL_TERMS, ChemicalTokenizer
 
-DATABASE_FILENAME = "hybrid.sqlite"
 INDEX_SCHEMA_VERSION = "4"
 DISTANCE_METRIC = "cosine"
 INDEX_FINGERPRINT_KEYS = frozenset(
@@ -172,6 +178,21 @@ class BM25Store:
                     metadata_json TEXT NOT NULL,
                     ordinal INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS resource_catalog (
+                    version_id TEXT PRIMARY KEY
+                        REFERENCES document_versions(version_id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    topics_json TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    has_structured_data INTEGER NOT NULL
+                        CHECK (has_structured_data IN (0, 1)),
+                    supports_json TEXT NOT NULL,
+                    catalog_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS rag_index_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -270,10 +291,12 @@ class BM25Store:
         document: SourceDocument,
         parents: Sequence[ParentChunk],
         chunks: Sequence[ChildChunk],
+        catalog: ResourceCatalogEntry,
     ) -> None:
         """Stage one document version and all lexical rows without activating it."""
 
         self._validate_version_records(document, parents, chunks)
+        self._validate_catalog_record(document, catalog)
         now = _utc_now()
         with self._connection:
             existing = self._connection.execute(
@@ -339,6 +362,7 @@ class BM25Store:
                     for chunk in chunks
                 ],
             )
+            self._insert_catalog(catalog, now)
             if self._lexical_available:
                 self._connection.executemany(
                     """
@@ -349,6 +373,52 @@ class BM25Store:
                     """,
                     [self._fts_row(document, chunk) for chunk in chunks],
                 )
+
+    def is_ready_version(self, version_id: str) -> bool:
+        """Return whether a document hash already has an active ready version."""
+
+        row = self._connection.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM document_versions AS v
+                JOIN documents AS d
+                  ON d.doc_id = v.doc_id AND d.active_version_id = v.version_id
+                WHERE v.version_id = ? AND v.status = 'ready'
+            )
+            """,
+            (version_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    def has_catalog(self, version_id: str) -> bool:
+        row = self._connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM resource_catalog WHERE version_id = ?)",
+            (version_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    def add_catalog_to_ready_version(self, catalog: ResourceCatalogEntry) -> None:
+        """Backfill catalog metadata for an index created before catalog support."""
+
+        row = self._connection.execute(
+            """
+            SELECT v.doc_id, v.content_hash, v.status, d.active_version_id
+            FROM document_versions AS v
+            JOIN documents AS d ON d.doc_id = v.doc_id
+            WHERE v.version_id = ?
+            """,
+            (catalog.version_id,),
+        ).fetchone()
+        if row is None or row["status"] != "ready":
+            raise ValueError("Catalog backfill requires a ready document version.")
+        if row["active_version_id"] != catalog.version_id:
+            raise ValueError("Catalog backfill requires the active document version.")
+        if row["doc_id"] != catalog.resource_id or row["content_hash"] != catalog.sha256:
+            raise ValueError("Catalog metadata does not match the stored document version.")
+        now = _utc_now()
+        with self._connection:
+            self._insert_catalog(catalog, now)
 
     def activate_version(self, doc_id: str, version_id: str) -> tuple[str | None, set[str]]:
         """Atomically activate a staged version and return superseded vector IDs."""
@@ -362,6 +432,12 @@ class BM25Store:
                 raise ValueError("Cannot activate a version that does not belong to doc_id.")
             if version["status"] != "building":
                 raise ValueError("Only a building version can be activated.")
+            catalog_exists = self._connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM resource_catalog WHERE version_id = ?)",
+                (version_id,),
+            ).fetchone()[0]
+            if not catalog_exists:
+                raise ValueError("Cannot activate a document version without catalog metadata.")
             document = self._connection.execute(
                 "SELECT active_version_id FROM documents WHERE doc_id = ?", (doc_id,)
             ).fetchone()
@@ -774,6 +850,54 @@ class BM25Store:
         if any(chunk.parent_id not in parent_ids for chunk in chunks):
             raise ValueError("Every chunk parent_id must refer to a staged parent.")
 
+    @staticmethod
+    def _validate_catalog_record(
+        document: SourceDocument,
+        catalog: ResourceCatalogEntry,
+    ) -> None:
+        if catalog.resource_id != document.doc_id:
+            raise ValueError("Catalog resource_id must match the source document doc_id.")
+        if catalog.version_id != document.version_id:
+            raise ValueError("Catalog version_id must match the source document version_id.")
+        if catalog.sha256 != document.content_hash:
+            raise ValueError("Catalog sha256 must match the source document content hash.")
+        if not catalog.summary.strip():
+            raise ValueError("Catalog summary must be non-empty.")
+
+    def _insert_catalog(self, catalog: ResourceCatalogEntry, now: str) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO resource_catalog(
+                version_id, file_name, file_type, summary, topics_json,
+                content_type, has_structured_data,
+                supports_json, catalog_version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(version_id) DO UPDATE SET
+                file_name = excluded.file_name,
+                file_type = excluded.file_type,
+                summary = excluded.summary,
+                topics_json = excluded.topics_json,
+                content_type = excluded.content_type,
+                has_structured_data = excluded.has_structured_data,
+                supports_json = excluded.supports_json,
+                catalog_version = excluded.catalog_version,
+                updated_at = excluded.updated_at
+            """,
+            (
+                catalog.version_id,
+                catalog.file_name,
+                catalog.file_type,
+                catalog.summary,
+                _json_array(catalog.topics),
+                catalog.content_type,
+                int(catalog.has_structured_data),
+                _json_array(catalog.supports),
+                catalog.catalog_version,
+                now,
+                now,
+            ),
+        )
+
     def _delete_version_rows(self, version_id: str) -> None:
         chunk_ids = [
             row["chunk_id"]
@@ -786,6 +910,7 @@ class BM25Store:
             self._connection.execute(
                 f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})", chunk_ids
             )
+        self._connection.execute("DELETE FROM resource_catalog WHERE version_id = ?", (version_id,))
         self._connection.execute("DELETE FROM chunks WHERE version_id = ?", (version_id,))
         self._connection.execute("DELETE FROM parents WHERE version_id = ?", (version_id,))
 
@@ -796,6 +921,10 @@ def _utc_now() -> str:
 
 def _metadata_json(metadata: Mapping[str, Any]) -> str:
     return json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_array(values: Sequence[str]) -> str:
+    return json.dumps(list(values), ensure_ascii=False, separators=(",", ":"))
 
 
 def canonical_identifier_aliases(text: str) -> list[str]:

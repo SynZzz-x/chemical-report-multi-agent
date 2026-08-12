@@ -88,6 +88,106 @@ def test_initial_planner_accepts_json_object_envelope_and_enables_json_mode(monk
     assert modes == [True]
 
 
+def test_initial_planner_receives_read_only_knowledge_catalog_separately(
+    monkeypatch,
+):
+    catalog = [
+        {
+            "resource_id": "doc-1",
+            "file_name": "聚乙烯生产技术手册.pdf",
+            "file_type": "pdf",
+            "path": "/private/knowledge/聚乙烯生产技术手册.pdf",
+            "sha256": "hash-1",
+            "indexed": True,
+            "summary": "聚乙烯生产路线及质量控制资料。",
+            "topics": ["聚乙烯", "质量控制"],
+            "content_type": "technical_document",
+            "has_structured_data": False,
+            "supports": ["rag", "citation"],
+            "catalog_version": "1",
+        }
+    ]
+    captured = {}
+    monkeypatch.setattr(planner_module, "load_active_catalog", lambda: catalog)
+
+    def fake_invoke(**kwargs):
+        captured.update(kwargs)
+        return [_task()]
+
+    monkeypatch.setattr(planner_module, "_invoke_plan_generation", fake_invoke)
+
+    planner_module._build_tasks_with_llm(_intake_summary(resources=[]), {})
+
+    visible = captured["prompt_values"]["knowledge_catalog"]
+    assert visible == [
+        {
+            "resource_id": "doc-1",
+            "file_name": "聚乙烯生产技术手册.pdf",
+            "file_type": "pdf",
+            "indexed": True,
+            "summary": "聚乙烯生产路线及质量控制资料。",
+            "topics": ["聚乙烯", "质量控制"],
+            "content_type": "technical_document",
+            "has_structured_data": False,
+            "supports": ["rag", "citation"],
+            "catalog_version": "1",
+        }
+    ]
+    assert "/private/knowledge" not in json.dumps(visible, ensure_ascii=False)
+    assert captured["resources"] == []
+
+
+def test_knowledge_catalog_entry_cannot_be_used_as_job_resource(monkeypatch):
+    catalog = [
+        {
+            "resource_id": "doc-1",
+            "file_name": "聚乙烯生产技术手册.pdf",
+            "file_type": "pdf",
+            "indexed": True,
+            "summary": "聚乙烯生产资料。",
+            "topics": ["聚乙烯"],
+            "content_type": "technical_document",
+            "has_structured_data": False,
+            "supports": ["rag", "citation"],
+            "catalog_version": "1",
+        }
+    ]
+    task = _task(use_resources=["聚乙烯生产技术手册.pdf"])
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    monkeypatch.setattr(planner_module, "load_active_catalog", lambda: catalog)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="unknown resource"):
+        planner_module._build_tasks_with_llm(_intake_summary(resources=[]), {})
+
+
+def test_importing_planner_does_not_initialize_full_rag_runtime():
+    script = textwrap.dedent(
+        """
+        import sys
+        import src.nodes.planner
+        forbidden = {
+            'src.rag.service',
+            'src.rag.tokenizer',
+            'src.rag.vector_store',
+        }
+        loaded = sorted(forbidden.intersection(sys.modules))
+        if loaded:
+            raise SystemExit('unexpected RAG imports: ' + ', '.join(loaded))
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
 def test_initial_planner_repairs_one_invalid_response(monkeypatch):
     model, _ = _patch_model(
         monkeypatch,
@@ -196,29 +296,39 @@ def test_initial_planner_rejects_query_when_rag_is_disabled(monkeypatch, query):
         )
 
 
-def test_initial_planner_rejects_explicit_knowledge_base_task_without_rag(monkeypatch):
-    task = _task(use_rag=False, query="")
-    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
-    _patch_model(monkeypatch, [encoded, encoded])
+def test_initial_planner_allows_knowledge_base_context_without_rag(monkeypatch):
+    task = _task(
+        task_name="引言",
+        task_description="介绍本报告基于企业知识库开展分析，并说明背景和结构。",
+        use_rag=False,
+        query="",
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
 
-    with pytest.raises(ValueError, match="use_rag"):
-        planner_module._build_tasks_with_llm(_intake_summary(), {})
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(constraints=[], sections=["引言"]),
+        {},
+    ) == [task]
 
 
-def test_initial_planner_rejects_local_citation_requirement_without_rag(monkeypatch):
+def test_initial_planner_does_not_reinfer_rag_from_task_wording(monkeypatch):
     task = _task(
         task_description="分析工艺参数并提供出处和引用依据。",
         use_rag=False,
         query="",
     )
-    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
-    _patch_model(monkeypatch, [encoded, encoded])
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
 
-    with pytest.raises(ValueError, match="use_rag"):
-        planner_module._build_tasks_with_llm(
-            _intake_summary(constraints=[]),
-            {},
-        )
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(constraints=[]),
+        {},
+    ) == [task]
 
 
 @pytest.mark.parametrize(
@@ -774,20 +884,21 @@ def test_global_knowledge_constraint_requires_some_rag_not_every_task(monkeypatc
     assert planned == tasks
 
 
-def test_global_knowledge_constraint_rejects_plan_without_any_rag(monkeypatch):
+def test_validator_does_not_reinfer_rag_from_global_wording(monkeypatch):
     task = _task(
         task_description="梳理聚乙烯生产工艺。",
         use_rag=False,
         query="",
     )
-    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
-    _patch_model(monkeypatch, [encoded, encoded])
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
 
-    with pytest.raises(ValueError, match="at least one"):
-        planner_module._build_tasks_with_llm(
-            _intake_summary(constraints=["所有内容严格基于知识库"]),
-            {},
-        )
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(constraints=["所有内容严格基于知识库"]),
+        {},
+    ) == [task]
 
 
 @pytest.mark.parametrize(
@@ -922,6 +1033,8 @@ def test_replan_and_refine_accept_the_same_json_object_contract(monkeypatch):
 
 def test_replan_and_refine_pass_complete_original_context(monkeypatch):
     calls = []
+    catalog = [{"resource_id": "doc-1", "file_name": "知识手册.pdf"}]
+    monkeypatch.setattr(planner_module, "load_active_catalog", lambda: catalog)
     monkeypatch.setattr(
         planner_module,
         "_invoke_plan_generation",
@@ -957,6 +1070,7 @@ def test_replan_and_refine_pass_complete_original_context(monkeypatch):
         assert call["prompt_values"]["style"] == "formal"
         assert call["prompt_values"]["output_format"] == "PDF"
         assert call["prompt_values"]["web_authorized"] is True
+        assert call["prompt_values"]["knowledge_catalog"][0]["resource_id"] == "doc-1"
         assert call["policy_context"] == intake_payload
 
 
@@ -1275,6 +1389,7 @@ def test_planner_prompts_use_one_valid_json_object_contract():
         assert "{core_content}" in prompt
         assert "{style}" in prompt
         assert "{output_format}" in prompt
+        assert "{knowledge_catalog}" in prompt
 
 
 def test_initial_planner_prompt_matches_deterministic_contract():
@@ -1290,6 +1405,23 @@ def test_initial_planner_prompt_matches_deterministic_contract():
     assert "causal" in prompt
     assert "flowchart" not in prompt
     assert "fault_tree" not in prompt
+    assert "当前任务是否需要新增知识库证据" in prompt
+    assert "知识库依据与说明" in prompt
+    assert "不得自行创建" in prompt
+
+
+def test_all_planner_prompts_share_rag_semantics_and_catalog_boundary():
+    root = Path(__file__).parents[1]
+    for name in (
+        "planner_to_worker.md",
+        "planner_replan.md",
+        "planner_intake_replan.md",
+    ):
+        prompt = (root / "src" / "prompts" / name).read_text(encoding="utf-8")
+        assert "当前任务是否需要新增知识库证据" in prompt
+        assert "知识目录" in prompt
+        assert "不得自行创建" in prompt
+        assert "不能填写到 `use_resources`" in prompt
 
 
 def test_plan_guidance_explicitly_uses_json_mode(monkeypatch):

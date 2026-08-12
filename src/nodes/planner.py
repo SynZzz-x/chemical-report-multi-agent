@@ -11,6 +11,7 @@ from typing import Dict, Any, List
 from ..state import State, merge_docs
 from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
+from ..rag.catalog import load_active_catalog
 from ..task_contract import task_allows_web
 from ..tool_names import canonical_tool_name
 from .intake import web_authorization_directive
@@ -51,16 +52,6 @@ _VISUALIZATION_REQUIRED_FIELDS = {
 _SUPPORTED_VISUALIZATION_KINDS = {"causal"}
 _MAX_REQUIRED_CONCEPTS = 6
 _CONCEPT_LIST_DELIMITERS = re.compile(r"[/／、,，;；]")
-_KNOWLEDGE_REQUIREMENT_MARKERS = (
-    "知识库",
-    "可追溯引用",
-    "可追溯依据",
-    "引用",
-    "出处",
-    "注明来源",
-    "注明出处",
-    "文件来源",
-)
 _DATA_ANALYSIS_MARKERS = (
     "pearson",
     "相关系数",
@@ -573,25 +564,6 @@ def _task_has_data_resource(assigned_resources: List[Dict[str, Any]]) -> bool:
     return False
 
 
-def _requires_knowledge_evidence(text: Any) -> bool:
-    """Detect active evidence requirements while ignoring explicit opt-outs."""
-    normalized = str(text or "").casefold()
-    non_requirement_patterns = (
-        r"(?:不使用|不得使用|不可使用|不要使用|禁止使用|无需使用|不需要使用)"
-        r"\s*知识库",
-        r"(?:不新增|无需|不需要|不要求|不要|禁止)"
-        r"(?:任何|额外|新的)?\s*(?:引用|出处|来源|可追溯依据)",
-        r"引用\s*(?:格式|规范|样式|标准)",
-        r"(?:参考文献|文献)\s*(?:格式|规范|样式|标准)",
-    )
-    for pattern in non_requirement_patterns:
-        normalized = re.sub(pattern, "", normalized)
-    return any(
-        marker.casefold() in normalized
-        for marker in _KNOWLEDGE_REQUIREMENT_MARKERS
-    )
-
-
 def _requires_data_resource(text: Any) -> bool:
     normalized = str(text or "").casefold()
     if any(marker in normalized for marker in _DATA_ANALYSIS_MARKERS):
@@ -609,17 +581,6 @@ def _validate_generated_task_semantics(
     resources: List[Dict[str, Any]],
     policy_context: Dict[str, Any],
 ) -> None:
-    global_requirements = " ".join(
-        [
-            str(policy_context.get("user_intent") or ""),
-            *[
-                str(value)
-                for value in policy_context.get("constraints") or []
-                if value is not None
-            ],
-        ]
-    ).casefold()
-    global_requires_knowledge = _requires_knowledge_evidence(global_requirements)
     web_authorized = policy_context.get("web_authorized") is True
 
     for task in tasks:
@@ -628,12 +589,6 @@ def _validate_generated_task_semantics(
             for field in ("task_name", "task_description", "query")
         )
         normalized = task_text.casefold()
-        requires_knowledge = _requires_knowledge_evidence(normalized)
-        if requires_knowledge and task.get("use_rag") is not True:
-            raise ValueError(
-                f"task {task.get('task_id')} explicitly requires knowledge-base "
-                "evidence and must set use_rag=true"
-            )
         if task.get("use_rag") is True and not str(task.get("query") or "").strip():
             raise ValueError(
                 f"task {task.get('task_id')} sets use_rag=true but has an empty query"
@@ -681,14 +636,6 @@ def _validate_generated_task_semantics(
             raise ValueError(
                 f"task {task.get('task_id')} requires explicit web authorization"
             )
-
-    if global_requires_knowledge and not any(
-        task.get("use_rag") is True for task in tasks
-    ):
-        raise ValueError(
-            "global knowledge-base grounding requires at least one use_rag=true task"
-        )
-
 
 def _is_abstract_section(section: Any) -> bool:
     value = str(section or "").strip()
@@ -847,6 +794,37 @@ def _normalize_resources(resources):
     return result
 
 
+def _normalize_knowledge_catalog(entries):
+    """Expose only compact planning metadata, never source paths or chunks."""
+
+    allowed = (
+        "resource_id",
+        "file_name",
+        "file_type",
+        "indexed",
+        "summary",
+        "topics",
+        "content_type",
+        "has_structured_data",
+        "supports",
+        "catalog_version",
+    )
+    result = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        result.append({key: entry.get(key) for key in allowed})
+    return result
+
+
+def _knowledge_catalog_for_planner():
+    try:
+        return _normalize_knowledge_catalog(load_active_catalog())
+    except Exception as exc:
+        logger.warning("Planner could not read Knowledge Catalog: %s", exc)
+        return []
+
+
 def _build_resource_index(resources):
     index = {}
     for r in resources or []:
@@ -888,6 +866,7 @@ def _build_tasks_with_llm(intake_obj, config):
     """初始规划：基于 Intake 摘要与统一 Prompt 生成任务列表。"""
     resource_objs = intake_obj.get("resources", []) or []
     resources = _normalize_resources(resource_objs)
+    knowledge_catalog = _knowledge_catalog_for_planner()
     sections = intake_obj.get("sections") or []
     task_type = intake_obj.get("task_type") or "analysis"
     title = intake_obj.get("title") or "未知项目"
@@ -907,6 +886,7 @@ def _build_tasks_with_llm(intake_obj, config):
             "doc_length": doc_length,
             "sections": sections,
             "resources": resources,
+            "knowledge_catalog": knowledge_catalog,
             "core_content": intake_obj.get("core_content") or [],
             "style": intake_obj.get("style"),
             "output_format": intake_obj.get("output_format"),
@@ -976,6 +956,7 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
         intake_data,
     )
     resource_objs = intake_data.get("resources", []) or []
+    knowledge_catalog = _knowledge_catalog_for_planner()
     feedback_obj = state.get("feedback", {}) or {}
     if isinstance(feedback_obj, str):
         try:
@@ -1001,6 +982,7 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
                 "suggestion": suggestion,
                 "prev_tasks": [t.get("task_name") for t in current_tasks or []],
                 "resources": _normalize_resources(resource_objs),
+                "knowledge_catalog": knowledge_catalog,
                 "core_content": intake_data.get("core_content") or [],
                 "style": intake_data.get("style"),
                 "output_format": intake_data.get("output_format"),
@@ -1082,6 +1064,7 @@ def _refine_tasks(
         return current_tasks
 
     all_resources = merge_docs(initial_resources, new_resources)
+    knowledge_catalog = _knowledge_catalog_for_planner()
     previous_tasks = json.dumps(current_tasks, ensure_ascii=False)
     system_prompt = _read_prompt("../prompts/planner_intake_replan.md")
 
@@ -1096,6 +1079,7 @@ def _refine_tasks(
                 "task_type": intake_data.get("task_type", "通用"),
                 "resources": _normalize_resources(initial_resources),
                 "new_resources": _normalize_resources(new_resources),
+                "knowledge_catalog": knowledge_catalog,
                 "prev_tasks": previous_tasks,
                 "doc_length": intake_data.get("doc_length"),
                 "constraints": intake_data.get("constraints") or [],

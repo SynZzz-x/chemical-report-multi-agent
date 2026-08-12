@@ -12,6 +12,7 @@ from uuid import uuid4
 from src.config import RAGSettings, get_rag_settings
 
 from .bm25_store import BM25Store, index_fingerprint
+from .catalog import build_catalog_entry
 from .chunking import ChemicalDocumentLoader, StructureAwareChunker
 from .embeddings import TEIEmbeddings
 from .hybrid_retriever import HybridRetriever, _sanitize_exception
@@ -314,6 +315,17 @@ class ChemicalRAGService:
                     "Document extraction produced no structural blocks; "
                     "the current active version was preserved."
                 )
+            if self._bm25_store.is_ready_version(document.version_id):
+                if not self._bm25_store.has_catalog(document.version_id):
+                    self._bm25_store.add_catalog_to_ready_version(
+                        build_catalog_entry(document)
+                    )
+                return {
+                    "path": path,
+                    "status": "skipped",
+                    "chunks": 0,
+                    "version_id": document.version_id,
+                }
             parents, chunks = self._chunker.chunk(document)
             if not parents or not chunks:
                 raise ValueError(
@@ -321,7 +333,12 @@ class ChemicalRAGService:
                     "the current active version was preserved."
                 )
             try:
-                self._bm25_store.begin_version(document, parents, chunks)
+                self._bm25_store.begin_version(
+                    document,
+                    parents,
+                    chunks,
+                    build_catalog_entry(document),
+                )
             except ValueError as exc:
                 if "already ready" in str(exc):
                     return {

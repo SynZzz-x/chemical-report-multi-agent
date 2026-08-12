@@ -54,6 +54,22 @@ class ChildChunk:
 
 
 @dataclass(frozen=True)
+class ResourceCatalogEntry:
+    resource_id: str
+    version_id: str
+    file_name: str
+    file_type: str
+    sha256: str
+    indexed: bool
+    summary: str
+    topics: tuple[str, ...]
+    content_type: str
+    has_structured_data: bool
+    supports: tuple[str, ...]
+    catalog_version: str
+
+
+@dataclass(frozen=True)
 class RankedHit:
     chunk_id: str
     rank: int

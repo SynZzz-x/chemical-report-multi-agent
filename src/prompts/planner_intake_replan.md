@@ -12,6 +12,7 @@
 - 输出格式：{output_format}
 - 公开网络授权：{web_authorized}
 - 原始资源：{resources}
+- 知识目录：{knowledge_catalog}
 
 # Refinement Context
 - 新增资源：{new_resources}
@@ -22,7 +23,7 @@
 1. 修改局部计划时不得丢失原始标题、研究对象、用户意图、核心内容或约束条件。
 2. 只修改用户反馈涉及的内容；没有要求变化的章节保持其语义和顺序。
 3. `use_resources` 只能引用原始资源或新增资源中的真实名称。
-4. 要求知识库、出处或可追溯引用的任务必须 `use_rag=true` 且 query 非空。
+4. 判断 `use_rag` 的唯一语义标准是“当前任务是否需要新增知识库证据”。需要从知识库获取新事实、专业依据、案例、参数、文件内容或来源证据时设置 `use_rag=true` 并提供非空 query；只说明报告背景、目的、结构、整体知识库依据，或总结已生成并验证的前文时设置 `use_rag=false` 且 query 为 `""`。
 5. 没有具备可用文件路径的真实 CSV 资源时，不得增加相关系数、回归、时间序列、热力图、R²、转化率或能耗的定量计算、普通数据图或虚构定量分析；定性机理分析不受此限制。
 6. 只有“公开网络授权”为 true 时才可设置任何 Web 字段；概念图继续遵守原始授权。
 7. 不创建摘要或 Abstract 任务。
@@ -31,6 +32,8 @@
 10. `use_rag=false` 时 query 必须为空字符串；`use_rag=true` 时 query 必须非空。
 11. `generate_figure=false` 时 visualization 必须为 null；普通数据图可使用 `generate_figure=true` 和 `visualization=null`，但必须有真实数据资源。
 12. 概念关系图必须设置 `generate_figure=true`，visualization 必须且只能包含 kind、title、required_concepts、web_queries、allow_web_fallback；当前 kind 只能是 causal。required_concepts 必须包含 1～6 个主因果链所需的原子概念，不得把多个概念合并在一个字符串中。
+13. 除非用户明确要求，否则不得自行创建“知识库依据与说明”“知识库文件及引用说明”等章节。
+14. “知识目录”只用于判断 `use_rag/query`，其中的条目不能填写到 `use_resources`；`use_resources` 只能引用“原始资源”或“新增资源”中的真实 Job 附件。
 
 # Output Contract
 只输出一个 JSON Object，顶层只能包含 `tasks`，不使用 Markdown 代码块或解释文字。
