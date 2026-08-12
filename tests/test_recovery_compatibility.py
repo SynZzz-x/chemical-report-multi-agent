@@ -1023,9 +1023,9 @@ def test_blocker_action_specs_define_direct_submission_requirements():
     assert blocker_action_spec("ADJUST_REQUIREMENT")["requires_text"] is True
     assert blocker_action_spec("UPLOAD_RESOURCES")["requires_documents"] is True
     assert blocker_action_spec("RETRY_INITIAL_PLAN") == {
-        "label": "RETRY_INITIAL_PLAN",
-        "button_label": "确认并继续",
-        "default_text": "已选择处理方式：RETRY_INITIAL_PLAN。",
+        "label": "重新生成初始规划",
+        "button_label": "重新生成",
+        "default_text": "请重新生成初始规划。",
         "requires_text": False,
         "requires_documents": False,
     }
@@ -1047,6 +1047,60 @@ def test_blocker_submission_validation_rejects_missing_required_input():
     assert validate_blocker_submission("RETRY_INITIAL_PLAN", "", 0) is None
 
 
+def test_blocker_resume_payload_applies_defaults_and_preserves_action_and_docs():
+    from src.control_messages import build_blocker_resume_payload
+
+    assert build_blocker_resume_payload(
+        action="AUTHORIZE_WEB",
+        text="",
+        docs=[],
+        message_id="msg-web",
+    ) == {
+        "text": "已授权公开网络检索，请继续。",
+        "message_id": "msg-web",
+        "docs": [],
+        "action": "AUTHORIZE_WEB",
+    }
+
+    docs = [{"file_id": "file-1", "path": "/tmp/standard.pdf"}]
+    assert build_blocker_resume_payload(
+        action="UPLOAD_RESOURCES",
+        text="",
+        docs=docs,
+        message_id="msg-upload",
+    ) == {
+        "text": "我已上传补充资料，请结合附件继续处理当前任务。",
+        "message_id": "msg-upload",
+        "docs": docs,
+        "action": "UPLOAD_RESOURCES",
+    }
+
+
+@pytest.mark.parametrize(
+    ("action", "text", "docs", "message"),
+    [
+        ("ADJUST_REQUIREMENT", "", [], "请输入调整后的任务要求。"),
+        ("UPLOAD_RESOURCES", "", [], "请先上传补充资料。"),
+        ("", "", [], "请选择有效的处理方式。"),
+    ],
+)
+def test_blocker_resume_payload_rejects_incomplete_submission(
+    action,
+    text,
+    docs,
+    message,
+):
+    from src.control_messages import build_blocker_resume_payload
+
+    with pytest.raises(ValueError, match=message):
+        build_blocker_resume_payload(
+            action=action,
+            text=text,
+            docs=docs,
+            message_id="msg-invalid",
+        )
+
+
 def test_streamlit_uses_action_specific_blocker_submission_controls():
     source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
         encoding="utf-8"
@@ -1055,12 +1109,15 @@ def test_streamlit_uses_action_specific_blocker_submission_controls():
     assert "_render_pending_resume_submission" in source
     assert "blocker_action_spec" in source
     assert "validate_blocker_submission" in source
+    assert "build_blocker_resume_payload" in source
     assert "st.file_uploader(" in source
     assert "st.text_area(" in source
     assert "has_blocker_actions = bool(blocker_choices(pending_interrupt))" in source
     assert "disabled=has_blocker_actions" in source
     assert "disabled=pending_interrupt is not None" not in source
     assert "pending_resume_action = _render_pending_resume_action()" not in source
+    assert '"resume_action": resume_action' in source
+    assert '"resume_action_label": resume_action_label' in source
     assert 'file_type=["csv", "pdf", "docx", "txt", "md"]' in source
 
 

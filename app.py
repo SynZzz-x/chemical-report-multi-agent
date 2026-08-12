@@ -32,6 +32,7 @@ from src.control_messages import (
     blocker_action_spec,
     blocker_choices,
     blocker_guidance,
+    build_blocker_resume_payload,
     build_resume_payload,
     is_displayable_assistant_message,
     validate_blocker_submission,
@@ -944,6 +945,13 @@ if blocker_submission is not None or chat_value:
     if new_docs:
         names = ", ".join(doc["original_name"] for doc in new_docs)
         display_content = f"{display_content}\n\n已上传附件：{names}"
+    resume_action_label = (
+        str(blocker_action_spec(resume_action).get("label") or resume_action)
+        if resume_action
+        else ""
+    )
+    if resume_action_label:
+        display_content = f"处理方式：{resume_action_label}\n\n{display_content}"
 
     _ensure_job_record(graph_text, st.session_state["compiled_mode"])
     _update_job(status="running", pending_interrupt=None)
@@ -954,6 +962,14 @@ if blocker_submission is not None or chat_value:
         "user",
         display_content,
         message_id=human_message_id,
+        payload=(
+            {
+                "resume_action": resume_action,
+                "resume_action_label": resume_action_label,
+            }
+            if resume_action
+            else None
+        ),
     )
     with st.chat_message("user"):
         st.write(display_content)
@@ -976,13 +992,22 @@ if blocker_submission is not None or chat_value:
     if pending_interrupt is not None:
         # Interrupt 的用户反馈由被恢复的节点写入 messages。app.py 只负责
         # 传递本轮 resume 数据，避免同一条 HumanMessage 被写入两次。
-        stream_input: Any = Command(
-            resume=build_resume_payload(
+        resume_payload = (
+            build_blocker_resume_payload(
                 text=graph_text,
                 message_id=human_message_id,
                 docs=new_docs,
                 action=resume_action,
-            ),
+            )
+            if resume_action
+            else build_resume_payload(
+                text=graph_text,
+                message_id=human_message_id,
+                docs=new_docs,
+            )
+        )
+        stream_input: Any = Command(
+            resume=resume_payload,
             update=base_update,
         )
     else:

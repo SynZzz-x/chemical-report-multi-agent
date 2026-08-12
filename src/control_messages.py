@@ -52,6 +52,62 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_text": False,
         "requires_documents": True,
     },
+    "RETRY_INITIAL_PLAN": {
+        "label": "重新生成初始规划",
+        "button_label": "重新生成",
+        "default_text": "请重新生成初始规划。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "RETRY_FULL_REPLAN": {
+        "label": "重新生成替换规划",
+        "button_label": "重新生成",
+        "default_text": "请重新生成替换规划。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "RESUME_OLD_PLAN": {
+        "label": "恢复原规划",
+        "button_label": "恢复并继续",
+        "default_text": "恢复原规划并继续。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "CANCEL": {
+        "label": "取消当前任务",
+        "button_label": "确认取消",
+        "default_text": "取消当前任务。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "REWORK": {
+        "label": "按反馈返工",
+        "button_label": "返工并继续",
+        "default_text": "请根据当前反馈返工。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "EVIDENCE_RECOVERY": {
+        "label": "继续证据恢复",
+        "button_label": "恢复并继续",
+        "default_text": "请继续执行证据恢复。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "NEXT": {
+        "label": "接受当前结果并继续",
+        "button_label": "接受并继续",
+        "default_text": "接受当前结果并继续下一任务。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "DONE": {
+        "label": "结束工作流",
+        "button_label": "确认结束",
+        "default_text": "结束当前工作流。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
 }
 
 
@@ -154,3 +210,27 @@ def build_resume_payload(
     if selected:
         payload["action"] = selected
     return payload
+
+
+def build_blocker_resume_payload(
+    *,
+    action: str,
+    text: str,
+    docs: list[dict[str, Any]],
+    message_id: str,
+) -> dict[str, Any]:
+    """Validate and build a resume payload for an explicit blocker action."""
+
+    selected = str(action or "").strip()
+    documents = list(docs)
+    spec = blocker_action_spec(selected)
+    resolved_text = str(text or "").strip() or str(spec.get("default_text") or "")
+    error = validate_blocker_submission(selected, resolved_text, len(documents))
+    if error:
+        raise ValueError(error)
+    return build_resume_payload(
+        text=resolved_text,
+        docs=documents,
+        message_id=message_id,
+        action=selected,
+    )

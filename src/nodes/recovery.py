@@ -644,8 +644,8 @@ def needs_user_input(
     default_evidence_guidance = (
         "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
         + "\n".join(f"- {description}" for description in evidence_descriptions)
-        + "\n请选择并直接回复：上传补充资料；授权公开网络检索；"
-        "“调整任务要求：<新要求>”；或接受仅报告现有证据及缺口。"
+        + "\n请在页面的阻塞处理区选择：上传补充资料、授权公开网络检索、"
+        "调整任务要求，或接受仅报告现有证据及缺口。"
     )
     guidance = str(
         pending.get("guidance")

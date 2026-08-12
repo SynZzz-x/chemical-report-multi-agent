@@ -61,6 +61,8 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
         "ACCEPT_EVIDENCE_GAP",
     ]
     assert "上传" in second["pending_user_action"]["guidance"]
+    assert "页面" in second["pending_user_action"]["guidance"]
+    assert "直接回复" not in second["pending_user_action"]["guidance"]
 
 
 def test_missing_resource_without_available_match_is_external_blocker():
