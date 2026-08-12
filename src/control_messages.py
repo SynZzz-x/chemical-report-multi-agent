@@ -74,9 +74,9 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_documents": False,
     },
     "CANCEL": {
-        "label": "取消当前任务",
+        "label": "取消本次处理",
         "button_label": "确认取消",
-        "default_text": "取消当前任务。",
+        "default_text": "取消本次处理。",
         "requires_text": False,
         "requires_documents": False,
     },

@@ -1029,6 +1029,13 @@ def test_blocker_action_specs_define_direct_submission_requirements():
         "requires_text": False,
         "requires_documents": False,
     }
+    assert blocker_action_spec("CANCEL") == {
+        "label": "取消本次处理",
+        "button_label": "确认取消",
+        "default_text": "取消本次处理。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
 
 
 def test_blocker_submission_validation_rejects_missing_required_input():
