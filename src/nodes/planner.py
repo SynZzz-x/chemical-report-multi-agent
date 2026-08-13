@@ -1614,6 +1614,7 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "pending_user_action": {},
                 "plan_patch_history": history,
                 "verification_warnings": [],
+                "accepted_evidence_gaps": {},
                 "guidance": {},
                 "final_result": {},
                 "decision": "NEXT",

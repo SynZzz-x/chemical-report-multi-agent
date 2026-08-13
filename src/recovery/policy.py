@@ -6,10 +6,15 @@ from enum import Enum
 from os.path import basename
 from typing import Any, Dict, Iterable, List
 
+from src.evidence_waivers import (
+    is_waivable_evidence_gap,
+    matching_evidence_gap_acceptance,
+)
 from src.report_acceptance import (
     ACCEPT_WITH_WARNING,
     BLOCKED,
     EXTERNAL_BLOCKER,
+    USER_ACCEPTED_GAP,
     VERIFIED_PASS,
     derive_report_status,
     record_section_status,
@@ -305,22 +310,34 @@ def _pending_user_action(
         "issues": list(assessment.get("issues") or []),
     }
     if category is IssueCategory.EVIDENCE_GAP:
-        descriptions = [
-            str(issue.get("description") or "").strip()
+        evidence_issues = [
+            issue
             for issue in assessment.get("issues") or []
             if isinstance(issue, dict)
             and classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
-            and str(issue.get("description") or "").strip()
+        ]
+        accepted_choices = list(_EVIDENCE_USER_CHOICES[:-1])
+        if any(is_waivable_evidence_gap(issue) for issue in evidence_issues):
+            accepted_choices.append("ACCEPT_EVIDENCE_GAP")
+        descriptions = [
+            str(issue.get("description") or "").strip()
+            for issue in evidence_issues
+            if str(issue.get("description") or "").strip()
         ]
         gap_list = "\n".join(f"- {description}" for description in descriptions)
+        choice_guidance = (
+            "上传补充资料、授权公开网络检索、调整任务要求，"
+            "或接受仅报告现有证据及缺口。"
+            if "ACCEPT_EVIDENCE_GAP" in accepted_choices
+            else "上传补充资料、授权公开网络检索，或调整任务要求。"
+        )
         pending.update(
             {
-                "accepted_choices": list(_EVIDENCE_USER_CHOICES),
+                "accepted_choices": accepted_choices,
                 "guidance": (
                     "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
                     f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
-                    "请在页面的阻塞处理区选择：上传补充资料、授权公开网络检索、"
-                    "调整任务要求，或接受仅报告现有证据及缺口。"
+                    f"请在页面的阻塞处理区选择：{choice_guidance}"
                 ),
             }
         )
@@ -375,11 +392,13 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     }
 
     if str(assessment.get("status") or "").upper() == "PASS":
+        accepted_gap = matching_evidence_gap_acceptance(state)
+        status = USER_ACCEPTED_GAP if accepted_gap is not None else VERIFIED_PASS
         statuses = record_section_status(
             state,
-            VERIFIED_PASS,
-            accepted_by="verifier",
-            issues=[],
+            status,
+            accepted_by="user" if accepted_gap is not None else "verifier",
+            issues=(accepted_gap or {}).get("issues") or [],
         )
         update["workflow_action"] = _continuation_action(state).value
         update["results"] = commit_current_result(state)

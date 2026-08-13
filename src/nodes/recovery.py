@@ -13,6 +13,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
+from src.evidence_waivers import (
+    record_evidence_gap_acceptance,
+    split_waivable_evidence_gaps,
+)
 from src.llm import get_llm
 from src.nodes.planner import planner as planner_node
 from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
@@ -755,11 +759,41 @@ def needs_user_input(
     else:
         action = WorkflowAction.REWORK.value
 
+    policy_update: dict[str, Any] = {}
+    accepted_gap_issues: list[dict[str, Any]] = []
+    accepted_evidence_gaps = deepcopy(state.get("accepted_evidence_gaps") or {})
+    if special_choice_accepted and requested_choice == "ACCEPT_EVIDENCE_GAP":
+        accepted_gap_issues, remaining_issues = split_waivable_evidence_gaps(issues)
+        accepted_evidence_gaps = record_evidence_gap_acceptance(
+            state, accepted_gap_issues
+        )
+        issues = remaining_issues
+        if remaining_issues:
+            residual_assessment = {
+                **(state.get("assessment") or {}),
+                "status": "FAILED",
+                "issues": remaining_issues,
+            }
+            policy_state = {
+                **state,
+                "accepted_evidence_gaps": accepted_evidence_gaps,
+            }
+            policy_update = decide_recovery_action(
+                policy_state, residual_assessment
+            )
+            action = str(
+                policy_update.get("workflow_action")
+                or WorkflowAction.NEEDS_USER_INPUT.value
+            )
+
     update: dict[str, Any] = {
+        **policy_update,
         "workflow_action": action,
-        "pending_user_action": {},
+        "pending_user_action": policy_update.get("pending_user_action", {}),
         "docs": resumed_docs,
     }
+    if special_choice_accepted and requested_choice == "ACCEPT_EVIDENCE_GAP":
+        update["accepted_evidence_gaps"] = accepted_evidence_gaps
     uploaded_paths = [
         str(doc.get("path") or doc.get("file_path") or "").strip()
         for doc in resumed_docs
@@ -850,7 +884,11 @@ def needs_user_input(
             state,
             acceptance_status,
             accepted_by="user",
-            issues=issues,
+            issues=(
+                accepted_gap_issues
+                if requested_choice == "ACCEPT_EVIDENCE_GAP"
+                else issues
+            ),
         )
         update["section_status"] = statuses
         update["report_status"] = derive_report_status(
@@ -862,7 +900,10 @@ def needs_user_input(
             {
                 "mode": "user_resume",
                 "issues": issues,
-                "instructions": text or guidance,
+                "instructions": text or _issue_instructions(issues) or guidance,
+                "recovery_plan": _build_recovery_plan(
+                    {**state, **update}, issues, mode="rework"
+                ),
             },
         )
     message = _continuation_message(action, state)

@@ -1046,6 +1046,7 @@ if blocker_submission is not None or chat_value:
                     "pending_user_action": {},
                     "plan_patch_history": [],
                     "verification_warnings": [],
+                    "accepted_evidence_gaps": {},
                 }
             )
 

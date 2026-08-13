@@ -536,6 +536,49 @@ def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
     assert update["report_status"] == "BLOCKED"
 
 
+def test_accepting_evidence_gap_reworks_remaining_content_defect(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "ACCEPT_EVIDENCE_GAP", "text": "", "docs": []},
+    )
+    evidence_issue = evidence_gap_assessment()["issues"][0]
+    length_issue = {
+        "code": "TOO_LONG",
+        "category": "CONTENT_DEFECT",
+        "description": "正文超过最高字数要求",
+        "suggestion": "压缩正文",
+        "severity": "major",
+    }
+    state = graph_state(
+        assessment={"status": "FAILED", "issues": [evidence_issue, length_issue]},
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": [evidence_issue, length_issue],
+            "accepted_choices": [
+                "UPLOAD_RESOURCES",
+                "AUTHORIZE_WEB",
+                "ADJUST_REQUIREMENT",
+                "ACCEPT_EVIDENCE_GAP",
+            ],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "REWORK"
+    assert "results" not in update
+    assert update["task_retry_count"] == {"T2": 1}
+    feedback = update["worker_state"]["execution_feedback"]
+    assert [issue["code"] for issue in feedback["issues"]] == ["TOO_LONG"]
+    waiver = update["accepted_evidence_gaps"]["T2"]
+    assert waiver["plan_revision"] == 1
+    assert waiver["task_revision"] == 1
+    assert [issue["code"] for issue in waiver["issues"]] == ["EVIDENCE_GAP"]
+    assert update["section_status"]["T2"]["status"] == "BLOCKED"
+
+
 def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch, caplog):
     captured = {}
 

@@ -66,6 +66,22 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     assert "直接回复" not in second["pending_user_action"]["guidance"]
 
 
+def test_nonwaivable_source_failure_does_not_offer_gap_acceptance():
+    state = recovery_state(
+        task_id="T2", evidence_recovery_count={"T2": 1}
+    )
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("SOURCE_UNSUPPORTED", "EVIDENCE_GAP"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert "ACCEPT_EVIDENCE_GAP" not in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+
+
 def test_missing_resource_without_available_match_is_external_blocker():
     state = recovery_state(task_id="T2", docs=[])
     decision = decide_recovery_action(
@@ -255,6 +271,36 @@ def test_pass_commits_current_result_once_and_uses_done_at_final_task():
     assert [result["task_id"] for result in commit_current_result({**state, **first})] == ["T2"]
     assert first["section_status"]["T2"]["status"] == "VERIFIED_PASS"
     assert first["report_status"] == "READY_FOR_FINAL"
+
+
+def test_pass_preserves_matching_user_accepted_evidence_gap_status():
+    state = recovery_state(task_id="T2")
+    state.update(
+        {
+            "plan_revision": 3,
+            "task_revisions": {"T2": 2},
+            "accepted_evidence_gaps": {
+                "T2": {
+                    "plan_revision": 3,
+                    "task_revision": 2,
+                    "issues": [
+                        {
+                            "code": "EVIDENCE_GAP",
+                            "category": "EVIDENCE_GAP",
+                            "description": "知识库没有粒径取样规程",
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    decision = decide_recovery_action(state, {"status": "PASS", "issues": []})
+
+    assert decision["workflow_action"] == WorkflowAction.DONE
+    assert decision["section_status"]["T2"]["status"] == "USER_ACCEPTED_GAP"
+    assert decision["section_status"]["T2"]["accepted_by"] == "user"
+    assert decision["report_status"] == "DRAFT_WITH_GAPS"
 
 
 def test_newly_verified_revision_replaces_stale_result_for_same_task():

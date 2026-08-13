@@ -12,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
+from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
@@ -203,6 +204,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     sanitized = _sanitize_assessment(assessment, state)
     sanitized = _apply_citation_integrity(sanitized, current_result)
     sanitized = _apply_deterministic_validation(sanitized, state)
+    sanitized = apply_evidence_gap_acceptance(sanitized, state)
     plan_revision = int(state.get("plan_revision", 1) or 1)
     current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
     issues = list(sanitized.get("issues") or [])

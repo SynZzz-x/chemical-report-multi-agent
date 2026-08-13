@@ -40,6 +40,13 @@ def _full_replan_state():
         "verification_warning": {"reason": "stale"},
         "pending_user_action": {"category": "EXTERNAL_BLOCKER"},
         "verification_warnings": [{"task_id": "T2"}],
+        "accepted_evidence_gaps": {
+            "T2": {
+                "plan_revision": 3,
+                "task_revision": 2,
+                "issues": [{"code": "EVIDENCE_GAP"}],
+            }
+        },
         "guidance": {"natural_language_guidance": "stale"},
         "final_result": {"path": "/old/report.docx"},
         "messages": [
@@ -142,6 +149,7 @@ def test_full_replan_commits_new_revision_only_after_confirmation(monkeypatch):
     assert committed["verification_warning"] == {}
     assert committed["pending_user_action"] == {}
     assert committed["verification_warnings"] == []
+    assert committed["accepted_evidence_gaps"] == {}
     assert committed["guidance"] == {}
     assert committed["final_result"] == {}
     assert committed["decision"] == "NEXT"
