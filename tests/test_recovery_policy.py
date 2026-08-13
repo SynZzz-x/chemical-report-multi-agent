@@ -123,6 +123,28 @@ def test_classification_uses_priority_and_never_treats_evidence_as_plan_defect()
     )
 
 
+def test_actionable_content_defect_takes_precedence_over_verifier_contract_error():
+    state = recovery_state(task_id="T1")
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "ASSESSMENT_CONTRACT_ERROR",
+                "category": "VERIFIER_FAILURE",
+            },
+            {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+        ],
+    }
+
+    assert classify_assessment(assessment, state) is IssueCategory.CONTENT_DEFECT
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == WorkflowAction.REWORK
+    assert decision["task_retry_count"] == {"T1": 1}
+    assert decision["verifier_retry_count"] == {}
+
+
 def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
     state = recovery_state(task_id="T2", task_retry_count={0: 1})
 

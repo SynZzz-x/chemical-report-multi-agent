@@ -95,7 +95,8 @@ def evidence_gap_assessment():
     }
 
 
-def test_t2_evidence_gap_never_routes_to_planner_or_resets_cursor():
+def test_t2_evidence_gap_never_routes_to_planner_or_resets_cursor(caplog):
+    caplog.set_level("INFO", logger="src.nodes.recovery")
     state = graph_state(cursor=1, accepted_ids=("T1",))
     update = decision_policy({**state, "assessment": evidence_gap_assessment()}, {})
 
@@ -103,6 +104,10 @@ def test_t2_evidence_gap_never_routes_to_planner_or_resets_cursor():
     assert update.get("cursor", state["cursor"]) == 1
     assert [item["task_id"] for item in state["results"]] == ["T1"]
     assert route_policy({**state, **update}) == "EVIDENCE_RECOVERY"
+    assert (
+        "Workflow policy decision: source=system task=T2 "
+        "assessment_status=BLOCKED action=EVIDENCE_RECOVERY"
+    ) in caplog.messages
 
 
 def test_rework_policy_creates_structured_execution_feedback():
@@ -531,7 +536,7 @@ def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
     assert update["report_status"] == "BLOCKED"
 
 
-def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch):
+def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch, caplog):
     captured = {}
 
     def fake_interrupt(payload):
@@ -539,6 +544,7 @@ def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch):
         return {"action": "ACCEPT_AS_DRAFT", "text": "", "docs": []}
 
     monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    caplog.set_level("INFO", logger="src.nodes.recovery")
     state = graph_state(
         pending_user_action={
             "category": "CONTENT_DEFECT",
@@ -559,6 +565,10 @@ def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch):
     assert update["workflow_action"] == "NEXT"
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
     assert update["section_status"]["T2"]["status"] == "USER_ACCEPTED_WARNING"
+    assert (
+        "User blocker decision: task=T2 category=CONTENT_DEFECT "
+        "choice=ACCEPT_AS_DRAFT action=NEXT uploaded_files=false"
+    ) in caplog.messages
 
 
 def test_authorize_web_is_execution_only_and_explicit(monkeypatch):

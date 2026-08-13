@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from copy import deepcopy
@@ -31,6 +32,9 @@ from src.report_acceptance import (
 )
 from src.state import State
 from src.task_contract import effective_web_allowed
+
+
+logger = logging.getLogger(__name__)
 
 
 _RESUME_ACTION_ALIASES = {
@@ -483,6 +487,12 @@ def decision_policy(
     if message is not None:
         update["messages"] = [message]
         update["decision"] = continuation
+    logger.info(
+        "Workflow policy decision: source=system task=%s assessment_status=%s action=%s",
+        _current_task_id(state),
+        str(assessment.get("status") or "UNKNOWN").upper(),
+        action or "UNSPECIFIED",
+    )
     return update
 
 
@@ -859,6 +869,14 @@ def needs_user_input(
     if message is not None:
         update["messages"] = [message]
         update["decision"] = action
+    logger.info(
+        "User blocker decision: task=%s category=%s choice=%s action=%s uploaded_files=%s",
+        task_id,
+        category,
+        requested_choice or "UNSPECIFIED",
+        action,
+        str(bool(resumed_docs)).lower(),
+    )
     return update
 
 

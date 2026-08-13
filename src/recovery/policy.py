@@ -239,13 +239,32 @@ def classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCategor
 
 
 def classify_assessment(assessment: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
-    """Return the highest-priority deterministic category in an assessment."""
-    categories = [
-        _classify_issue(issue, state)
+    """Return the highest-priority actionable category in an assessment.
+
+    A contract error is a Verifier health signal, not a defect in the candidate
+    result. It controls recovery only when no other issue survived assessment.
+    Runtime/service failures retain their existing priority because semantic
+    verification did not run successfully at all.
+    """
+    classified = [
+        (
+            str(issue.get("code") or "").strip().upper(),
+            _classify_issue(issue, state),
+        )
         for issue in assessment.get("issues") or []
         if isinstance(issue, dict)
     ]
-    return max(categories or [IssueCategory.CONTENT_DEFECT], key=_CATEGORY_PRIORITY.get)
+    actionable = [
+        category
+        for code, category in classified
+        if code != "ASSESSMENT_CONTRACT_ERROR"
+    ]
+    return max(
+        actionable
+        or [category for _, category in classified]
+        or [IssueCategory.CONTENT_DEFECT],
+        key=_CATEGORY_PRIORITY.get,
+    )
 
 
 def _continuation_action(state: Dict[str, Any]) -> WorkflowAction:
