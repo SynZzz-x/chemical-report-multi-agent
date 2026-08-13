@@ -23,6 +23,12 @@ from src.recovery.policy import (
     decide_recovery_action,
 )
 from src.report_validation import parse_length_target
+from src.report_acceptance import (
+    USER_ACCEPTED_GAP,
+    USER_ACCEPTED_WARNING,
+    derive_report_status,
+    record_section_status,
+)
 from src.state import State
 from src.task_contract import effective_web_allowed
 
@@ -70,6 +76,7 @@ _EVIDENCE_USER_CHOICES = [
     "ACCEPT_EVIDENCE_GAP",
 ]
 _SPECIAL_RESUME_CHOICES = set(_EVIDENCE_USER_CHOICES)
+_SPECIAL_RESUME_CHOICES.add("ACCEPT_AS_DRAFT")
 _SPECIAL_CHOICE_ALIASES = {
     "上传补充资料": "UPLOAD_RESOURCES",
     "上传资料": "UPLOAD_RESOURCES",
@@ -80,6 +87,8 @@ _SPECIAL_CHOICE_ALIASES = {
     "缩小任务要求": "ADJUST_REQUIREMENT",
     "接受仅报告现有证据及缺口": "ACCEPT_EVIDENCE_GAP",
     "接受证据缺口": "ACCEPT_EVIDENCE_GAP",
+    "接受为带风险草稿": "ACCEPT_AS_DRAFT",
+    "接受当前缺陷并作为带风险草稿继续": "ACCEPT_AS_DRAFT",
 }
 
 
@@ -691,6 +700,8 @@ def needs_user_input(
             requested_action = WorkflowAction.REWORK.value
         elif requested_choice == "ACCEPT_EVIDENCE_GAP":
             requested_action = WorkflowAction.NEXT.value
+        elif requested_choice == "ACCEPT_AS_DRAFT":
+            requested_action = WorkflowAction.NEXT.value
     elif requested_choice in _SPECIAL_RESUME_CHOICES:
         requested_action = None
 
@@ -818,8 +829,23 @@ def needs_user_input(
                 "instructions": adjusted_text,
             },
         )
-    if action in {WorkflowAction.NEXT.value, WorkflowAction.DONE.value}:
+    if action == WorkflowAction.NEXT.value:
         update["results"] = commit_current_result(state)
+        acceptance_status = (
+            USER_ACCEPTED_GAP
+            if requested_choice == "ACCEPT_EVIDENCE_GAP"
+            else USER_ACCEPTED_WARNING
+        )
+        statuses = record_section_status(
+            state,
+            acceptance_status,
+            accepted_by="user",
+            issues=issues,
+        )
+        update["section_status"] = statuses
+        update["report_status"] = derive_report_status(
+            state.get("tasks") or [], statuses
+        )
     if action == WorkflowAction.REWORK.value and "worker_state" not in update:
         update["worker_state"] = _worker_state_with_feedback(
             state,

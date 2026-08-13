@@ -365,6 +365,7 @@ def _job_task_ids(state: State) -> list[str]:
             task_ids.append(str(record["task_id"]))
     for key in (
         "results",
+        "section_status",
         "all_results",
         "tool_execution_history",
         "verification_warnings",
@@ -1603,6 +1604,8 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "task_revisions": task_revisions,
                 "current_result": {},
                 "results": [],
+                "section_status": {},
+                "report_status": "BLOCKED",
                 "all_results": [],
                 "current_task": {},
                 "worker_state": {},

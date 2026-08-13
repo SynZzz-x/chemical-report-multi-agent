@@ -27,6 +27,7 @@ def recovery_state(
         "docs": list(docs or []),
         "current_result": {"task_id": task_id, "text_output": "current result"},
         "results": list(results or []),
+        "section_status": {},
         "task_retry_count": dict(task_retry_count or {}),
         "evidence_recovery_count": dict(evidence_recovery_count or {}),
         "task_patch_count": dict(task_patch_count or {}),
@@ -87,14 +88,21 @@ def test_available_but_unassigned_resource_is_local_plan_defect():
     assert decision["workflow_action"] == "PLAN_PATCH"
 
 
-def test_content_retry_limit_accepts_with_warning_and_commits_result():
+def test_content_retry_limit_requires_explicit_user_acceptance_without_committing():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
     decision = decide_recovery_action(
         state,
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
-    assert decision["workflow_action"] == "ACCEPT_WITH_WARNING"
-    assert decision["results"][-1]["task_id"] == "T2"
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert "results" not in decision
+    assert decision["section_status"]["T2"]["status"] == "ACCEPT_WITH_WARNING"
+    assert decision["pending_user_action"]["accepted_choices"] == [
+        "REWORK",
+        "ADJUST_REQUIREMENT",
+        "ACCEPT_AS_DRAFT",
+        "DONE",
+    ]
 
 
 def test_classification_uses_priority_and_never_treats_evidence_as_plan_defect():
@@ -135,7 +143,7 @@ def test_json_restored_numeric_string_counter_preserves_content_retry_cap():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
     assert decision["task_retry_count"] == {"T2": 2}
 
 
@@ -147,7 +155,7 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
     assert decision["task_retry_count"] == {"0": 2}
 
 
@@ -164,7 +172,7 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
         (
             "task_retry_count",
             assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
-            WorkflowAction.ACCEPT_WITH_WARNING,
+            WorkflowAction.NEEDS_USER_INPUT,
         ),
         (
             "evidence_recovery_count",
@@ -200,6 +208,8 @@ def test_pass_commits_current_result_once_and_uses_done_at_final_task():
     assert [result["task_id"] for result in first["results"]] == ["T2"]
     assert [result["task_id"] for result in second["results"]] == ["T2"]
     assert [result["task_id"] for result in commit_current_result({**state, **first})] == ["T2"]
+    assert first["section_status"]["T2"]["status"] == "VERIFIED_PASS"
+    assert first["report_status"] == "READY_FOR_FINAL"
 
 
 def test_non_final_pass_commits_current_result_and_returns_next():
@@ -321,7 +331,7 @@ def test_blank_code_cannot_use_llm_local_plan_defect_category():
     )
 
 
-def test_content_retry_overflow_continues_next_for_a_non_final_task():
+def test_content_retry_overflow_blocks_non_final_task_for_user_input():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
     state["tasks"].append({"task_id": "T3", "use_resources": []})
 
@@ -330,11 +340,12 @@ def test_content_retry_overflow_continues_next_for_a_non_final_task():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
-    assert decision["continuation_action"] == WorkflowAction.NEXT
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert "continuation_action" not in decision
+    assert decision["report_status"] == "BLOCKED"
 
 
-def test_content_retry_overflow_continues_done_for_a_final_task():
+def test_content_retry_overflow_blocks_final_task_for_user_input():
     state = recovery_state(task_id="T2", task_retry_count={"T2": 2})
 
     decision = decide_recovery_action(
@@ -342,5 +353,6 @@ def test_content_retry_overflow_continues_done_for_a_final_task():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.ACCEPT_WITH_WARNING
-    assert decision["continuation_action"] == WorkflowAction.DONE
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert "continuation_action" not in decision
+    assert decision["report_status"] == "BLOCKED"

@@ -72,6 +72,8 @@ class State(TypedDict, total=False):
     cursor: int
     current_result: Dict[str, Any]
     results: List[Dict[str, Any]]
+    section_status: Dict[str, Dict[str, Any]]
+    report_status: str
 
     decision: Literal[
         "RETRY_WORKER",

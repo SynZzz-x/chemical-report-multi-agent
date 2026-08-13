@@ -6,6 +6,15 @@ from enum import Enum
 from os.path import basename
 from typing import Any, Dict, Iterable, List
 
+from src.report_acceptance import (
+    ACCEPT_WITH_WARNING,
+    BLOCKED,
+    EXTERNAL_BLOCKER,
+    VERIFIED_PASS,
+    derive_report_status,
+    record_section_status,
+)
+
 
 class WorkflowAction(str, Enum):
     PASS = "PASS"
@@ -38,6 +47,12 @@ _EVIDENCE_USER_CHOICES = [
     "AUTHORIZE_WEB",
     "ADJUST_REQUIREMENT",
     "ACCEPT_EVIDENCE_GAP",
+]
+_CONTENT_USER_CHOICES = [
+    "REWORK",
+    "ADJUST_REQUIREMENT",
+    "ACCEPT_AS_DRAFT",
+    "DONE",
 ]
 
 _CATEGORY_PRIORITY = {
@@ -289,6 +304,16 @@ def _pending_user_action(
                 ),
             }
         )
+    elif category is IssueCategory.CONTENT_DEFECT:
+        pending.update(
+            {
+                "accepted_choices": list(_CONTENT_USER_CHOICES),
+                "guidance": (
+                    "当前任务已达到自动返工上限，但仍未通过验收。请在页面的阻塞处理区选择："
+                    "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
+                ),
+            }
+        )
     return pending
 
 
@@ -330,8 +355,18 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     }
 
     if str(assessment.get("status") or "").upper() == "PASS":
+        statuses = record_section_status(
+            state,
+            VERIFIED_PASS,
+            accepted_by="verifier",
+            issues=[],
+        )
         update["workflow_action"] = _continuation_action(state).value
         update["results"] = commit_current_result(state)
+        update["section_status"] = statuses
+        update["report_status"] = derive_report_status(
+            state.get("tasks") or [], statuses
+        )
         return update
 
     category = classify_assessment(assessment, state)
@@ -352,17 +387,27 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         warning = _content_retry_warning(
             update["verification_warnings"], task_id, assessment
         )
-        continuation = _continuation_action(state)
         warnings = update["verification_warnings"]
         if warning not in warnings:
             warnings = [*warnings, warning]
+        statuses = record_section_status(
+            state,
+            ACCEPT_WITH_WARNING,
+            accepted_by="system",
+            issues=assessment.get("issues") or [],
+        )
         update.update(
             {
-                "workflow_action": WorkflowAction.ACCEPT_WITH_WARNING.value,
-                "continuation_action": continuation.value,
+                "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
                 "verification_warning": warning,
                 "verification_warnings": warnings,
-                "results": commit_current_result(state),
+                "pending_user_action": _pending_user_action(
+                    category, state, assessment
+                ),
+                "section_status": statuses,
+                "report_status": derive_report_status(
+                    state.get("tasks") or [], statuses
+                ),
             }
         )
         return update
@@ -380,10 +425,25 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             update["workflow_action"] = WorkflowAction.PLAN_PATCH.value
             return update
 
+    blocking_status = (
+        EXTERNAL_BLOCKER
+        if category is IssueCategory.EXTERNAL_BLOCKER
+        else BLOCKED
+    )
+    statuses = record_section_status(
+        state,
+        blocking_status,
+        accepted_by="system",
+        issues=assessment.get("issues") or [],
+    )
     update.update(
         {
             "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
             "pending_user_action": _pending_user_action(category, state, assessment),
+            "section_status": statuses,
+            "report_status": derive_report_status(
+                state.get("tasks") or [], statuses
+            ),
         }
     )
     return update

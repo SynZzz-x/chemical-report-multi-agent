@@ -38,6 +38,13 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_text": False,
         "requires_documents": False,
     },
+    "ACCEPT_AS_DRAFT": {
+        "label": "接受为带风险草稿",
+        "button_label": "接受并继续",
+        "default_text": "接受当前缺陷并作为带风险草稿继续。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
     "ADJUST_REQUIREMENT": {
         "label": "调整任务要求",
         "button_label": "提交新要求",

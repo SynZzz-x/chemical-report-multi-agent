@@ -59,6 +59,9 @@ def graph_state(*, cursor=1, accepted_ids=("T1",), **overrides):
             {"task_id": task_id, "text_output": f"accepted {task_id}"}
             for task_id in accepted_ids
         ],
+        "section_status": {
+            task_id: {"status": "VERIFIED_PASS"} for task_id in accepted_ids
+        },
         "assessment": {},
         "worker_state": {"next_node": "end", "retained": True},
         "task_retry_count": {},
@@ -126,7 +129,7 @@ def test_rework_policy_creates_structured_execution_feedback():
     assert update["worker_state"]["retained"] is True
 
 
-def test_accept_with_warning_routes_through_continuation_action():
+def test_retry_exhaustion_routes_to_user_input_instead_of_continuing():
     state = graph_state(
         task_retry_count={"T2": 2},
         assessment={
@@ -137,8 +140,10 @@ def test_accept_with_warning_routes_through_continuation_action():
 
     update = decision_policy(state, {})
 
-    assert update["workflow_action"] == "ACCEPT_WITH_WARNING"
-    assert route_policy({**state, **update}) == "NEXT"
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert route_policy({**state, **update}) == "NEEDS_USER_INPUT"
+    assert update["section_status"]["T2"]["status"] == "ACCEPT_WITH_WARNING"
+    assert [result["task_id"] for result in state["results"]] == ["T1"]
 
 
 def test_evidence_recovery_builds_query_and_honors_task_web_gate():
@@ -522,6 +527,38 @@ def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
     assert "catalyst life" in captured["guidance_text"]
     assert update["workflow_action"] == "NEXT"
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+    assert update["section_status"]["T2"]["status"] == "USER_ACCEPTED_GAP"
+    assert update["report_status"] == "BLOCKED"
+
+
+def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "ACCEPT_AS_DRAFT", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        pending_user_action={
+            "category": "CONTENT_DEFECT",
+            "task_id": "T2",
+            "issues": [{"code": "TOO_SHORT", "description": "篇幅不足"}],
+            "accepted_choices": [
+                "REWORK",
+                "ADJUST_REQUIREMENT",
+                "ACCEPT_AS_DRAFT",
+                "DONE",
+            ],
+        }
+    )
+
+    update = needs_user_input(state, {})
+
+    assert "ACCEPT_AS_DRAFT" in captured["accepted_choices"]
+    assert update["workflow_action"] == "NEXT"
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+    assert update["section_status"]["T2"]["status"] == "USER_ACCEPTED_WARNING"
 
 
 def test_authorize_web_is_execution_only_and_explicit(monkeypatch):
@@ -837,7 +874,8 @@ def test_resume_plain_string_alias_routes_to_done(monkeypatch):
     update = needs_user_input(state, {})
 
     assert update["workflow_action"] == "DONE"
-    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+    assert "results" not in update
+    assert [result["task_id"] for result in state["results"]] == ["T1"]
 
 
 def test_resume_aliases_are_deterministic_and_restricted_to_accepted_choices(

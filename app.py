@@ -1027,6 +1027,8 @@ if blocker_submission is not None or chat_value:
                     "cursor": 0,
                     "current_result": {},
                     "results": [],
+                    "section_status": {},
+                    "report_status": "BLOCKED",
                     "decision": "NEXT",
                     "feedback": {},
                     "final_result": {},

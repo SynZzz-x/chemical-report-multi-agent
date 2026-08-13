@@ -8,6 +8,11 @@ from langgraph.types import interrupt
 from src.state import State
 from src.llm import get_llm
 from src.nodes.intake import web_authorization_directive
+from src.report_acceptance import (
+    VERIFIED_PASS,
+    derive_report_status,
+    record_section_status,
+)
 
 
 _DIRECT_APPROVAL_FEEDBACK = {
@@ -238,6 +243,14 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
         # 追加结果
         results = _append_result_once(previous_results, current_result)
         output_updates["results"] = results
+        statuses = record_section_status(
+            state,
+            VERIFIED_PASS,
+            accepted_by="user",
+            issues=[],
+        )
+        output_updates["section_status"] = statuses
+        output_updates["report_status"] = derive_report_status(tasks, statuses)
         
     elif decision_code == "REWORK":
         final_decision = "RETRY_WORKER"
@@ -289,6 +302,14 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             previous_results,
             current_result,
         )
+        statuses = record_section_status(
+            state,
+            VERIFIED_PASS,
+            accepted_by="user",
+            issues=[],
+        )
+        output_updates["section_status"] = statuses
+        output_updates["report_status"] = derive_report_status(tasks, statuses)
     
     msg = AIMessage(content=json.dumps(content_obj, ensure_ascii=False))
     

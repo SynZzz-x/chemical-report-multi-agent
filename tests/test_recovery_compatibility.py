@@ -1020,6 +1020,9 @@ def test_blocker_action_specs_define_direct_submission_requirements():
     assert blocker_action_spec("ACCEPT_EVIDENCE_GAP")["default_text"] == (
         "接受现有证据及缺口报告，请继续。"
     )
+    assert blocker_action_spec("ACCEPT_AS_DRAFT")["default_text"] == (
+        "接受当前缺陷并作为带风险草稿继续。"
+    )
     assert blocker_action_spec("ADJUST_REQUIREMENT")["requires_text"] is True
     assert blocker_action_spec("UPLOAD_RESOURCES")["requires_documents"] is True
     assert blocker_action_spec("RETRY_INITIAL_PLAN") == {
