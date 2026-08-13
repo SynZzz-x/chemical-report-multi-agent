@@ -8,6 +8,7 @@ from langgraph.types import interrupt
 from src.state import State
 from src.llm import get_llm
 from src.nodes.intake import web_authorization_directive
+from src.recovery.policy import commit_current_result
 from src.report_acceptance import (
     VERIFIED_PASS,
     derive_report_status,
@@ -65,22 +66,6 @@ def _is_direct_approval(value: str) -> bool:
 def _normalize_decision(value: object) -> str:
     normalized = str(value or "PASS").strip().upper()
     return _DECISION_ALIASES.get(normalized, "PASS")
-
-
-def _append_result_once(previous_results, current_result):
-    results = list(previous_results or [])
-    if not current_result:
-        return results
-
-    current_task_id = current_result.get("task_id")
-    if current_task_id is not None:
-        if any(result.get("task_id") == current_task_id for result in results):
-            return results
-    elif current_result in results:
-        return results
-
-    results.append(current_result)
-    return results
 
 
 def _task_name(tasks, idx):
@@ -241,7 +226,7 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             }
             
         # 追加结果
-        results = _append_result_once(previous_results, current_result)
+        results = commit_current_result(state)
         output_updates["results"] = results
         statuses = record_section_status(
             state,
@@ -298,10 +283,7 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             "type": "PROCEED",
             "current_section": task_name,
         }
-        output_updates["results"] = _append_result_once(
-            previous_results,
-            current_result,
-        )
+        output_updates["results"] = commit_current_result(state)
         statuses = record_section_status(
             state,
             VERIFIED_PASS,

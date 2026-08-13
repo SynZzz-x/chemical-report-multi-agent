@@ -135,6 +135,29 @@ def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
     assert decision["task_retry_count"] == {"T2": 2}
 
 
+@pytest.mark.parametrize(
+    ("assessment", "expected_action"),
+    [
+        (assessment_with("TOO_SHORT", "CONTENT_DEFECT"), WorkflowAction.REWORK),
+        (
+            assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP"),
+            WorkflowAction.EVIDENCE_RECOVERY,
+        ),
+    ],
+)
+def test_failed_assessment_revokes_stale_pass_while_recovery_runs(
+    assessment, expected_action
+):
+    state = recovery_state(task_id="T2")
+    state["section_status"] = {"T2": {"status": "VERIFIED_PASS"}}
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == expected_action
+    assert decision["section_status"]["T2"]["status"] == "BLOCKED"
+    assert decision["report_status"] == "BLOCKED"
+
+
 def test_json_restored_numeric_string_counter_preserves_content_retry_cap():
     state = recovery_state(task_id="T2", task_retry_count={"0": 2})
 
@@ -210,6 +233,34 @@ def test_pass_commits_current_result_once_and_uses_done_at_final_task():
     assert [result["task_id"] for result in commit_current_result({**state, **first})] == ["T2"]
     assert first["section_status"]["T2"]["status"] == "VERIFIED_PASS"
     assert first["report_status"] == "READY_FOR_FINAL"
+
+
+def test_newly_verified_revision_replaces_stale_result_for_same_task():
+    state = recovery_state(
+        task_id="T2",
+        results=[
+            {
+                "task_id": "T2",
+                "text_output": "old",
+                "plan_revision": 1,
+                "task_revision": 1,
+            }
+        ],
+    )
+    state["plan_revision"] = 1
+    state["task_revisions"] = {"T2": 2}
+    state["current_result"] = {
+        "task_id": "T2",
+        "text_output": "new",
+        "plan_revision": 0,
+        "task_revision": 1,
+    }
+
+    decision = decide_recovery_action(state, {"status": "PASS", "issues": []})
+
+    assert len(decision["results"]) == 1
+    assert decision["results"][0]["text_output"] == "new"
+    assert decision["results"][0]["task_revision"] == 2
 
 
 def test_non_final_pass_commits_current_result_and_returns_next():

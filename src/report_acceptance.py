@@ -16,7 +16,18 @@ READY_FOR_FINAL = "READY_FOR_FINAL"
 DRAFT_WITH_GAPS = "DRAFT_WITH_GAPS"
 
 _DRAFT_STATUSES = {USER_ACCEPTED_GAP, USER_ACCEPTED_WARNING}
-_BLOCKING_STATUSES = {ACCEPT_WITH_WARNING, BLOCKED, EXTERNAL_BLOCKER}
+def is_admitted_section_entry(entry: Mapping[str, Any] | None) -> bool:
+    """Return whether one section status has a valid acceptance actor."""
+
+    if not isinstance(entry, Mapping):
+        return False
+    status = str(entry.get("status") or "")
+    accepted_by = str(entry.get("accepted_by") or "")
+    if status == VERIFIED_PASS:
+        return accepted_by in {"verifier", "user"}
+    if status in _DRAFT_STATUSES:
+        return accepted_by == "user"
+    return False
 
 
 def _task_ids(tasks: Iterable[Mapping[str, Any]]) -> list[str]:
@@ -86,7 +97,7 @@ def derive_report_status(
         if not isinstance(entry, Mapping):
             return BLOCKED
         status = str(entry.get("status") or "")
-        if not status or status in _BLOCKING_STATUSES:
+        if not is_admitted_section_entry(entry):
             return BLOCKED
         values.append(status)
 
@@ -114,6 +125,45 @@ def eligible_task_ids(
     return [
         task_id
         for task_id in _task_ids(tasks)
-        if isinstance(statuses.get(task_id), Mapping)
+        if is_admitted_section_entry(statuses.get(task_id))
         and str(statuses[task_id].get("status") or "") in allowed
     ]
+
+
+def delivery_path_candidates(
+    final_result: Mapping[str, Any] | None,
+    *,
+    stored_paths: Iterable[Any] = (),
+    fallback_paths: Iterable[Any] = (),
+) -> list[str]:
+    """Select downloadable artifacts without bypassing an authoritative gate."""
+
+    result = final_result or {}
+    terminal_status = str(result.get("status") or "").strip().lower()
+    delivery_status = str(result.get("delivery_status") or "").strip().upper()
+    failed = (
+        result.get("success") is False
+        or terminal_status in {"failed", "cancelled", "blocked"}
+        or delivery_status == "FAILED"
+    )
+    if failed:
+        return []
+    authoritative = any(
+        key in result for key in ("report_status", "attachments", "path")
+    )
+    if authoritative:
+        if str(result.get("report_status") or "") == BLOCKED:
+            return []
+        values = [*(result.get("attachments") or [])]
+        if result.get("path"):
+            values.append(result["path"])
+    else:
+        recorded = list(stored_paths)
+        values = recorded if recorded else list(fallback_paths)
+
+    selected: list[str] = []
+    for value in values:
+        path = str(value or "").strip()
+        if path and path not in selected:
+            selected.append(path)
+    return selected

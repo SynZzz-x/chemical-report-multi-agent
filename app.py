@@ -41,6 +41,7 @@ from src.graph import WorkFlow, WorkFlowAuto
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
+from src.report_acceptance import delivery_path_candidates
 from src.ui_projection import summarize_step as _summarize_step
 from src.utils.path_manager import get_session_cache_dir
 
@@ -687,24 +688,14 @@ def _handle_node_delta(node: str, delta: dict[str, Any]) -> None:
 def _report_paths_from_state() -> list[Path]:
     values = _snapshot_values()
     final_result = values.get("final_result") or {}
-
-    candidates: list[Path] = []
-    for item in final_result.get("attachments") or []:
-        if item:
-            candidates.append(Path(str(item)))
-    if final_result.get("path"):
-        candidates.append(Path(str(final_result["path"])))
-
     record = _current_job()
-    if not candidates and record:
-        candidates.extend(Path(path) for path in record.get("report_paths") or [])
-
-    # Compatibility fallback for the current Summarizer/path_manager.
-    if not candidates and values:
+    stored_paths = (record.get("report_paths") or []) if record else []
+    fallback_paths: list[Path] = []
+    if values:
         try:
             session_dir = Path(get_session_cache_dir(values, _graph_config()))
             report_dir = session_dir / "report"
-            candidates.extend(
+            fallback_paths.extend(
                 [
                     report_dir / "report.docx",
                     report_dir / "report.pdf",
@@ -714,6 +705,14 @@ def _report_paths_from_state() -> list[Path]:
             )
         except Exception:
             pass
+    candidates = [
+        Path(path)
+        for path in delivery_path_candidates(
+            final_result,
+            stored_paths=stored_paths,
+            fallback_paths=fallback_paths,
+        )
+    ]
 
     try:
         job_root = Path(

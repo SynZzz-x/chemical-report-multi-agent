@@ -22,6 +22,8 @@ TEXT_SUFFIXES = {
 }
 IGNORED_DIRS = {
     ".git",
+    ".venv",
+    ".worktrees",
     "__pycache__",
     ".pytest_cache",
     "cache",

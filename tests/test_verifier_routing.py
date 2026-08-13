@@ -120,7 +120,13 @@ def test_manual_pass_does_not_duplicate_an_accepted_task_result(monkeypatch):
 
     verifier_update = verifier_manual(state, {})
 
-    assert verifier_update["results"] == [accepted_result]
+    assert verifier_update["results"] == [
+        {
+            **accepted_result,
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    ]
 
 
 def test_manual_pass_on_last_task_routes_to_summarizer(monkeypatch):
@@ -136,7 +142,39 @@ def test_manual_pass_on_last_task_routes_to_summarizer(monkeypatch):
     assert verifier_update["decision"] == "DONE"
     control_message = json.loads(verifier_update["messages"][-1].content)
     assert control_message["type"] == "SUMMARIZE"
-    assert verifier_update["results"] == [state["current_result"]]
+    assert verifier_update["results"] == [
+        {
+            **state["current_result"],
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    ]
+
+
+def test_manual_approval_replaces_stale_revision(monkeypatch):
+    state = _manual_state(
+        results=[
+            {
+                "task_id": "T1",
+                "text_output": "旧结果",
+                "plan_revision": 1,
+                "task_revision": 1,
+            }
+        ]
+    )
+    state["task_revisions"] = {"T1": 2}
+    state["current_result"] = {"task_id": "T1", "text_output": "新结果"}
+    monkeypatch.setattr(
+        manual_verifier_module,
+        "interrupt",
+        lambda payload: {"text": "通过", "message_id": "feedback-new", "docs": []},
+    )
+
+    update = verifier_manual(state, {})
+
+    assert len(update["results"]) == 1
+    assert update["results"][0]["text_output"] == "新结果"
+    assert update["results"][0]["task_revision"] == 2
 
 
 def test_manual_rework_keeps_cursor_result_unaccepted(monkeypatch):

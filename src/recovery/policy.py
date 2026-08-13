@@ -255,21 +255,22 @@ def _continuation_action(state: Dict[str, Any]) -> WorkflowAction:
 
 
 def commit_current_result(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Commit the current result at most once for its stable task ID."""
+    """Commit the current accepted revision once for its stable task ID."""
     results = list(state.get("results") or [])
     current_result = state.get("current_result") or {}
     if not current_result:
         return results
 
     task_id = _current_task_id(state)
-    if any(str(result.get("task_id")) == task_id for result in results if isinstance(result, dict)):
-        return results
-
     committed = dict(current_result)
     committed["task_id"] = task_id
     task_revisions = _normalise_counter(state.get("task_revisions"), state)
-    committed.setdefault("task_revision", task_revisions.get(task_id, 1))
-    committed.setdefault("plan_revision", int(state.get("plan_revision", 1) or 1))
+    committed["task_revision"] = task_revisions.get(task_id, 1)
+    committed["plan_revision"] = int(state.get("plan_revision", 1) or 1)
+    for index, result in enumerate(results):
+        if isinstance(result, dict) and str(result.get("task_id")) == task_id:
+            results[index] = committed
+            return results
     results.append(committed)
     return results
 
@@ -370,6 +371,16 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         return update
 
     category = classify_assessment(assessment, state)
+    in_progress_statuses = record_section_status(
+        state,
+        BLOCKED,
+        accepted_by="system",
+        issues=assessment.get("issues") or [],
+    )
+    update["section_status"] = in_progress_statuses
+    update["report_status"] = derive_report_status(
+        state.get("tasks") or [], in_progress_statuses
+    )
     if category is IssueCategory.VERIFIER_FAILURE:
         retries = verifier_retry_count.get(task_id, 0)
         if retries < MAX_VERIFIER_RETRIES:

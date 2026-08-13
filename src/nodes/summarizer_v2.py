@@ -1,306 +1,535 @@
-import os
-import re
+"""Deterministically assemble admitted task results into a report."""
+
+from __future__ import annotations
+
 import json
 import logging
+import os
+import re
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Any, Mapping, Sequence
 
-from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
+from PIL import Image as PILImage
 
-from ..state import State
-from ..llm import get_llm
-from ..utils import md_to_docx, md_to_pdf, md_rewrite
-from ..utils.path_manager import get_session_cache_dir
 from ..evidence.reporting import append_missing_figures, format_evidence_table
+from ..report_acceptance import (
+    BLOCKED,
+    DRAFT_WITH_GAPS,
+    READY_FOR_FINAL,
+    USER_ACCEPTED_GAP,
+    USER_ACCEPTED_WARNING,
+    derive_report_status,
+    eligible_task_ids,
+    is_admitted_section_entry,
+)
+from ..state import State
+from ..utils import md_to_docx, md_to_pdf
+from ..utils.path_manager import get_session_cache_dir
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
-"""
-Summarizer V2 Node:
-- Refactored to use LLM for generating markdown sections based on tasks and results.
-- Embeds charts and tables using <description> tags.
-- Generates a final report in Markdown, PDF, and DOCX formats.
-"""
-
-def _read_prompt(rel_path: str) -> str:
-    base_dir = os.path.dirname(__file__)
-    path = os.path.join(base_dir, rel_path)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        logger.error(f"Failed to read prompt from {path}: {e}")
-        # Return a fallback or empty string, though this should ideally fail hard if prompt is missing
-        return ""
-
 def find_title(state: State) -> str:
-    for msg in state.get("messages", []) or []:
+    for message in state.get("messages", []) or []:
         try:
-            content = json.loads(msg.content)
-        except Exception:
+            content = json.loads(str(message.content))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
             continue
         if content.get("from") == "Intake" and content.get("to") == "Planner":
-            return content.get("title") or "自动生成报告"
+            return str(content.get("title") or "自动生成报告")
     return "自动生成报告"
 
-def _content_reorganizer(state: State) -> List[Dict[str, Any]]:
-    sections = []
-    tasks = state.get("tasks", []) or []
-    for res in state.get("results", []) or []:
-        # 任务名作为章节标题（若找不到则使用 task_id）
-        title = None
-        for t in tasks:
-            if t.get("task_id") == res.get("task_id"):
-                title = t.get("task_name")
-                break
-        title = title or res.get("task_id") or "章节"
 
-        # 优先使用 res 中的 figures (包含详细描述)
-        figures = res.get("figures", [])
-        if not figures:
-            # Fallback: 从 outputs 提取
-            for p in (res.get("outputs", []) or []):
-                if str(p).lower().endswith((".png", ".jpg", ".jpeg", ".svg")):
-                    figures.append({"path": p, "description": f"图像：{os.path.basename(p)}"})
-        for figure in figures:
-            if figure.get("graph_type") and figure.get("evidence_ids"):
-                markers = "、".join(f"[{value}]" for value in figure["evidence_ids"])
-                description = str(figure.get("description") or "概念关系图")
+def _normalize_title(value: str) -> str:
+    text = re.sub(r"^\s*#+\s*", "", str(value or "").strip())
+    text = re.sub(r"^\s*(?:第?[一二三四五六七八九十百千万\d]+[章节、.．:]|[（(]?[一二三四五六七八九十\d]+[）).、．])\s*", "", text)
+    text = re.sub(r"[\s\-—_：:，,。.!！?？（）()\[\]【】]", "", text)
+    return text.casefold()
+
+
+def _titles_match(heading: str, task_name: str) -> bool:
+    left = _normalize_title(heading)
+    right = _normalize_title(task_name)
+    if not left or not right:
+        return False
+    return left == right
+
+
+def _strip_duplicate_leading_heading(text: str, task_name: str) -> str:
+    """Remove only a matching first Markdown heading and preserve subheadings."""
+
+    lines = str(text or "").splitlines()
+    first_content = next((index for index, line in enumerate(lines) if line.strip()), None)
+    if first_content is None:
+        return ""
+    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", lines[first_content])
+    if not match or not _titles_match(match.group(1), task_name):
+        return str(text or "").strip()
+    del lines[first_content]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _escape_table_cell(value: Any) -> str:
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+
+
+def _is_renderable_local_image(path: str) -> bool:
+    expected_formats = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG"}
+    expected_format = expected_formats.get(os.path.splitext(path)[1].lower())
+    if expected_format is None:
+        return False
+    try:
+        with PILImage.open(path) as image:
+            if image.format != expected_format:
+                return False
+            image.verify()
+        with PILImage.open(path) as image:
+            if image.format != expected_format:
+                return False
+            image.load()
+        return True
+    except Exception:
+        return False
+
+
+def _table_markdown(table: Mapping[str, Any]) -> str:
+    data = table.get("data")
+    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)) or not data:
+        headers = table.get("headers") or table.get("columns")
+        rows = table.get("rows")
+        if not isinstance(headers, Sequence) or isinstance(headers, (str, bytes)):
+            return ""
+        data = [list(headers), *(rows or [])]
+    normalized_rows = [
+        list(row)
+        for row in data
+        if isinstance(row, Sequence) and not isinstance(row, (str, bytes))
+    ]
+    if not normalized_rows or not normalized_rows[0]:
+        return ""
+    width = len(normalized_rows[0])
+    rows = [(row + [""] * width)[:width] for row in normalized_rows]
+    title = str(table.get("title") or table.get("description") or "结构化表格").strip()
+    lines = [
+        f"### {title}",
+        "",
+        "| " + " | ".join(_escape_table_cell(cell) for cell in rows[0]) + " |",
+        "| " + " | ".join("---" for _ in range(width)) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(_escape_table_cell(cell) for cell in row) + " |"
+        for row in rows[1:]
+    )
+    return "\n".join(lines)
+
+
+def _append_missing_tables(markdown: str, tables: Sequence[Mapping[str, Any]]) -> str:
+    blocks: list[str] = []
+    for table in tables:
+        if str(table.get("source") or "").strip() == "worker_markdown":
+            continue
+        block = _table_markdown(table)
+        if block and block not in markdown:
+            blocks.append(block)
+    if not blocks:
+        return markdown
+    return f"{markdown.rstrip()}\n\n" + "\n\n".join(blocks)
+
+
+def _ordered_sections(
+    state: State, admitted_task_ids: Sequence[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tasks = {
+        str(task.get("task_id")): task
+        for task in state.get("tasks", []) or []
+        if isinstance(task, dict) and task.get("task_id") is not None
+    }
+    results = {
+        str(result.get("task_id")): result
+        for result in state.get("results", []) or []
+        if isinstance(result, dict) and result.get("task_id") is not None
+    }
+    statuses = state.get("section_status") or {}
+    sections: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for task_id in admitted_task_ids:
+        task = tasks.get(task_id) or {}
+        result = results.get(task_id)
+        if result is None:
+            missing.append(
+                {
+                    "task_id": task_id,
+                    "task_name": task.get("task_name") or task_id,
+                    "status": BLOCKED,
+                    "issues": [
+                        {
+                            "code": "MISSING_RESULT",
+                            "description": "章节已标记为可交付，但 results 中没有对应结果。",
+                        }
+                    ],
+                }
+            )
+            continue
+        status_entry = statuses.get(task_id) or {}
+        expected_plan_revision = int(status_entry.get("plan_revision", 0) or 0)
+        expected_task_revision = int(status_entry.get("task_revision", 0) or 0)
+        actual_plan_revision = int(result.get("plan_revision", 0) or 0)
+        actual_task_revision = int(result.get("task_revision", 0) or 0)
+        if (
+            expected_plan_revision != actual_plan_revision
+            or expected_task_revision != actual_task_revision
+        ):
+            missing.append(
+                {
+                    "task_id": task_id,
+                    "task_name": task.get("task_name") or task_id,
+                    "status": BLOCKED,
+                    "issues": [
+                        {
+                            "code": "REVISION_MISMATCH",
+                            "description": (
+                                "章节结果版本与验收状态不一致："
+                                f"expected=p{expected_plan_revision}/t{expected_task_revision}, "
+                                f"actual=p{actual_plan_revision}/t{actual_task_revision}。"
+                            ),
+                        }
+                    ],
+                }
+            )
+            continue
+        raw_tables = list(result.get("tables") or [])
+        valid_tables: list[dict[str, Any]] = []
+        invalid_tables = 0
+        for raw_table in raw_tables:
+            if not isinstance(raw_table, Mapping):
+                invalid_tables += 1
+                continue
+            table = dict(raw_table)
+            if not _table_markdown(table):
+                invalid_tables += 1
+                continue
+            valid_tables.append(table)
+        if invalid_tables or (task.get("generate_table") and not valid_tables):
+            code = "INVALID_TABLE_ASSET" if invalid_tables else "MISSING_TABLE_ASSET"
+            missing.append(
+                {
+                    "task_id": task_id,
+                    "task_name": task.get("task_name") or task_id,
+                    "status": BLOCKED,
+                    "issues": [
+                        {
+                            "code": code,
+                            "description": "结构化表格资产不存在或无法确定性物化。",
+                        }
+                    ],
+                }
+            )
+            continue
+        figures: list[dict[str, Any]] = []
+        raw_figures = list(result.get("figures") or [])
+        if not raw_figures:
+            raw_figures.extend(
+                {"path": path, "description": f"图像：{os.path.basename(str(path))}"}
+                for path in result.get("outputs") or []
+                if str(path).lower().endswith((".png", ".jpg", ".jpeg", ".svg"))
+            )
+        missing_figure_paths: list[str] = []
+        invalid_figure_content: list[str] = []
+        invalid_figures = 0
+        for raw_figure in raw_figures:
+            if not isinstance(raw_figure, Mapping):
+                invalid_figures += 1
+                continue
+            figure = dict(raw_figure)
+            path = str(figure.get("path") or "").strip()
+            if not path or path.startswith(("http://", "https://")):
+                invalid_figures += 1
+                continue
+            if not os.path.isfile(path):
+                missing_figure_paths.append(path)
+                continue
+            if not _is_renderable_local_image(path):
+                invalid_figure_content.append(path)
+                continue
+            evidence_ids = [
+                str(value).strip()
+                for value in figure.get("evidence_ids") or []
+                if str(value).strip()
+            ]
+            if evidence_ids:
+                markers = "、".join(f"[{value}]" for value in evidence_ids)
+                description = str(figure.get("description") or "图像").strip()
                 if markers not in description:
                     figure["description"] = f"{description}（关系证据：{markers}）"
-
-        section = {
-            "title": title,
-            "text": res.get("text_output", ""),
-            "tables": res.get("tables", []),
-            "figures": figures,
-            "citations": res.get("citations", []),
-            "notes": res.get("notes", ""),
-        }
-        sections.append(section)
-    return sections
-
-def _downgrade_headings(content: str) -> str:
-    """
-    Downgrade all markdown headings by one level.
-    # Title -> ## Title
-    ## Title -> ### Title
-    """
-    lines = content.split('\n')
-    new_lines = []
-    in_code_block = False
-    
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_code_block = not in_code_block
-            new_lines.append(line)
+            figures.append(figure)
+        if invalid_figures or missing_figure_paths or invalid_figure_content or (
+            task.get("generate_figure") and not figures
+        ):
+            if missing_figure_paths:
+                code = "MISSING_FIGURE_FILE"
+                detail = "正式图形资产不存在：" + "、".join(missing_figure_paths)
+            elif invalid_figure_content:
+                code = "INVALID_FIGURE_CONTENT"
+                detail = "图形资产不是当前渲染器可解码的 PNG/JPEG：" + "、".join(
+                    invalid_figure_content
+                )
+            elif invalid_figures:
+                code = "INVALID_FIGURE_ASSET"
+                detail = "图形资产缺少本地可渲染路径或结构非法。"
+            else:
+                code = "MISSING_FIGURE_ASSET"
+                detail = "任务要求正式图形资产，但结果中没有可渲染图形。"
+            missing.append(
+                {
+                    "task_id": task_id,
+                    "task_name": task.get("task_name") or task_id,
+                    "status": BLOCKED,
+                    "issues": [
+                        {
+                            "code": code,
+                            "description": detail,
+                        }
+                    ],
+                }
+            )
             continue
-            
-        if in_code_block:
-            new_lines.append(line)
-            continue
-            
-        # Check for headers: starts with # followed by space
-        match = re.match(r'^(\s*)(#+)(\s.*)', line)
-        if match:
-            indent = match.group(1)
-            hashes = match.group(2)
-            rest = match.group(3)
-            new_lines.append(f"{indent}#{hashes}{rest}")
-        else:
-            new_lines.append(line)
-            
-    return "\n".join(new_lines)
-
-def _generate_section_content(section: Dict[str, Any], config: RunnableConfig) -> str:
-    """
-    Use LLM to generate the markdown content for a single section.
-    """
-    model = get_llm(config)
-    prompt_template = _read_prompt("../prompts/summarizer_section_writer.md")
-    
-    if not prompt_template:
-        logger.warning("Prompt template not found. Using raw text.")
-        raw = f"## {section['title']}\n\n{section['text']}"
-        raw = append_missing_figures(raw, section.get("figures", []))
-        evidence_table = format_evidence_table(section.get("citations", []))
-        return f"{raw}\n\n{evidence_table}" if evidence_table else raw
-
-    # Prepare data for the prompt
-    section_title = section.get("title", "Section")
-    text_content = section.get("text", "")
-    
-    # Serialize figures and tables to JSON for the prompt
-    figures_json = json.dumps(section.get("figures", []), ensure_ascii=False, indent=2)
-    tables_json = json.dumps(section.get("tables", []), ensure_ascii=False, indent=2)
-    citations = section.get("citations", [])
-    citations_json = json.dumps(citations, ensure_ascii=False, indent=2)
-
-    def with_evidence(value: str) -> str:
-        value = append_missing_figures(value, section.get("figures", []))
-        table = format_evidence_table(citations)
-        return f"{value.rstrip()}\n\n{table}" if table else value
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", prompt_template),
-        ("human", "请根据以下信息对章节内容进行排版和图表嵌入（保持原文）：\n\n章节标题：{section_title}\n\n文本素材：\n{text_content}\n\n可用图片资源：\n{figures_list}\n\n可用表格资源：\n{tables_list}\n\n引用证据（不得删除或改写证据编号）：\n{citations_list}")
-    ])
-    
-    try:
-        messages = prompt.format_messages(
-            section_title=section_title,
-            text_content=text_content,
-            figures_list=figures_json,
-            tables_list=tables_json,
-            citations_list=citations_json,
+        sections.append(
+            {
+                "task_id": task_id,
+                "title": str(task.get("task_name") or task_id),
+                "text": str(result.get("text_output") or result.get("content") or ""),
+                "tables": [
+                    dict(table) for table in valid_tables
+                ],
+                "figures": figures,
+                "citations": list(result.get("citations") or []),
+            }
         )
-        resp = model.invoke(messages, config=config)
-        content = str(getattr(resp, "content", "")).strip()
-        
-        # Remove potential markdown code block wrappers
-        if content.startswith("```markdown") and content.endswith("```"):
-            content = content[11:-3]
-        elif content.startswith("```") and content.endswith("```"):
-            # 检查第一行是否仅为 ``` (无语言标识)
-            # 只有当第一行纯粹是 ``` 时才认为是 wrapper，防止误删 ```python ... ```
-            lines = content.split('\n', 1)
-            if lines and lines[0].strip() == "```":
-                content = content[3:-3]
-            
-        content = content.strip()
-        
-        # 检查 LLM 输出是否已经包含标题 (H1 或 H2)
-        if content.startswith("# "):
-            # 如果内容以一级标题开头，说明 LLM 生成了错误的层级结构
-            # 此时需要将全文所有标题降级 (H1->H2, H2->H3...)
-            return with_evidence(_downgrade_headings(content))
-            
-        elif content.startswith("## "):
-            # 已有 H2，直接返回
-            return with_evidence(content)
-            
+    return sections, missing
+
+
+def _blocking_sections(state: State) -> list[dict[str, Any]]:
+    statuses = state.get("section_status") or {}
+    blocking: list[dict[str, Any]] = []
+    for task in state.get("tasks", []) or []:
+        if not isinstance(task, dict) or task.get("task_id") is None:
+            continue
+        task_id = str(task["task_id"])
+        entry = statuses.get(task_id)
+        if is_admitted_section_entry(entry):
+            continue
+        if isinstance(entry, Mapping):
+            status = str(entry.get("status") or BLOCKED)
+            issues = list(entry.get("issues") or [])
         else:
-            # 没有标题，手动添加
-            return with_evidence(f"## {section_title}\n\n{content}")
-    except Exception as e:
-        logger.error(f"LLM generation failed for section {section_title}: {e}")
-        # Fallback: 如果原始内容以 H1 开头，也进行降级处理
-        stripped_text = text_content.strip()
-        if stripped_text.startswith("# "):
-            return with_evidence(_downgrade_headings(text_content) + "\n\n(LLM Generation Failed)")
-        return with_evidence(f"## {section_title}\n\n{text_content}\n\n(LLM Generation Failed)")
+            status = BLOCKED
+            issues = [
+                {
+                    "code": "MISSING_SECTION_STATUS",
+                    "description": "章节没有可审计的验收状态。",
+                }
+            ]
+        blocking.append(
+            {
+                "task_id": task_id,
+                "task_name": task.get("task_name") or task_id,
+                "status": status,
+                "issues": issues,
+            }
+        )
+    return blocking
 
-def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str:
-    """
-    Generate a brief evaluation of the report using LLM.
-    """
-    try:
-        model = get_llm(config)
-        sys_prompt = _read_prompt("../prompts/summarizer_eval.md")
-        if not sys_prompt:
-             sys_prompt = "你是一位专业的报告评价专家。阅读报告全文，按结构/完整性/专业性/总体评价四个维度，用约200字输出自然语言评价。"
-             
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", sys_prompt),
-            ("human", "{report}")
-        ])
-        
-        # Truncate report if too long to avoid token limits (simple truncation)
-        # Assuming 1 char ~= 1 token roughly for safety, keep last 10000 chars or first+last?
-        # Usually summary needs full context, but if too large, we might just take the first 20000 chars.
-        truncated_report = report_text[:30000] 
-        
-        messages = prompt.format_messages(report=truncated_report)
-        resp = model.invoke(messages, config=config)
-        return str(getattr(resp, "content", "")).strip()
-    except Exception as e:
-        logger.error(f"Failed to generate report evaluation: {e}")
-        return "报告生成完成。评价生成失败。"
 
-def summarizer(state: State, config: RunnableConfig, **kwargs):
-    logger.info("Starting summarizer_v2...")
-    
-    # 1. Reorganize content from tasks
-    sections = _content_reorganizer(state)
-    
-    # 2. Generate Markdown content for each section using LLM
-    full_markdown_content = []
-    
-    # Add Main Title
-    report_title = find_title(state)
-    full_markdown_content.append(f"# {report_title}\n")
-    
-    for section in sections:
-        section_md = _generate_section_content(section, config)
-        full_markdown_content.append(section_md)
-        
-    final_markdown = "\n".join(full_markdown_content)
-    
-    # 3. Save to session folder
-    session_cache_dir = get_session_cache_dir(state, config)
-    report_dir = os.path.join(session_cache_dir, "report")
-    os.makedirs(report_dir, exist_ok=True)
-    
-    md_path = os.path.abspath(os.path.join(report_dir, "report.md"))
-    rewritten_md_path = os.path.abspath(os.path.join(report_dir, "report_rewritten.md"))
-    pdf_path = os.path.abspath(os.path.join(report_dir, "report.pdf"))
-    docx_path = os.path.abspath(os.path.join(report_dir, "report.docx"))
-    
-    try:
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(final_markdown)
-        logger.info(f"Markdown report saved to {md_path}")
-    except Exception as e:
-        logger.error(f"Failed to write markdown file: {e}")
-        
-    # 4. Convert to PDF, DOCX and Rewrite Markdown
-    # Note: These utils might need to be imported or adjusted if they are not in the path or expect specific args
-    
-    # Generate Rewritten Markdown
-    try:
-        rewritten_content = md_rewrite.rewrite_markdown(final_markdown)
-        with open(rewritten_md_path, "w", encoding="utf-8") as f:
-            f.write(rewritten_content)
-        logger.info(f"Rewritten Markdown report saved to {rewritten_md_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate rewritten markdown: {e}")
-    
-    # Generate PDF
-    try:
-        math_img_dir = os.path.join(session_cache_dir, "math_imgs")
-        md_to_pdf.md_to_pdf(final_markdown, pdf_path, math_img_dir=math_img_dir)
-        logger.info(f"PDF report saved to {pdf_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate PDF: {e}")
-        
-    # Generate DOCX
-    try:
-        md_to_docx.md_to_docx(final_markdown, docx_path)
-        logger.info(f"DOCX report saved to {docx_path}")
-    except Exception as e:
-        logger.error(f"Failed to generate DOCX: {e}")
-
-    # 5. Return result
-    # We return the paths to the generated files.
-    
-    # Generate Evaluation
-    eval_text = _generate_report_evaluation(final_markdown, config)
-    
+def _blocked_update(blocking_sections: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     final_result = {
-        "summary": "Report generated in Markdown, PDF, and DOCX formats.",
-        "evaluation": eval_text,
-        "attachments": [md_path, rewritten_md_path, pdf_path, docx_path],
-        "path": docx_path, # Default to DOCX for compatibility
+        "summary": "报告未满足正式交付准入条件。",
+        "evaluation": "请先处理阻塞章节，或明确接受相应缺口后生成带风险草稿。",
+        "report_status": BLOCKED,
+        "blocking_sections": list(blocking_sections),
+        "attachments": [],
+        "path": None,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
-    
-    # We can also add a message to the conversation history
-    msg_content = f"{eval_text}"
-    msg = AIMessage(content=msg_content)
-    
-    return {"messages": [msg], "final_result": final_result}
+    return {
+        "messages": [AIMessage(content=final_result["evaluation"])],
+        "final_result": final_result,
+        "report_status": BLOCKED,
+    }
+
+
+def _draft_warning(state: State) -> str:
+    statuses = state.get("section_status") or {}
+    task_names = {
+        str(task.get("task_id")): str(task.get("task_name") or task.get("task_id"))
+        for task in state.get("tasks", []) or []
+        if isinstance(task, dict) and task.get("task_id") is not None
+    }
+    lines = [
+        "> **未完成草稿：已接受的证据缺口或内容风险**",
+        ">",
+        "> 以下章节由用户明确接受缺口后纳入，本文件不得作为无保留正式报告使用：",
+    ]
+    for task_id, entry in statuses.items():
+        if not isinstance(entry, Mapping) or entry.get("status") not in {
+            USER_ACCEPTED_GAP,
+            USER_ACCEPTED_WARNING,
+        }:
+            continue
+        descriptions = [
+            str(issue.get("description") or issue.get("code") or "未说明的缺口")
+            for issue in entry.get("issues") or []
+            if isinstance(issue, Mapping)
+        ]
+        detail = "；".join(descriptions) or "用户接受该章节当前缺口"
+        lines.append(f"> - {task_names.get(str(task_id), str(task_id))}：{detail}")
+    return "\n".join(lines)
+
+
+def _deduplicate_citations(sections: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for section in sections:
+        for citation in section.get("citations") or []:
+            if not isinstance(citation, Mapping):
+                continue
+            evidence_id = str(citation.get("evidence_id") or "").strip()
+            task_id = str(section.get("task_id") or "").strip()
+            key = (
+                f"{task_id}:{evidence_id}"
+                if evidence_id
+                else f"{task_id}:" + json.dumps(
+                    dict(citation), ensure_ascii=False, sort_keys=True
+                )
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            citations.append(
+                {
+                    **dict(citation),
+                    "section_title": str(section.get("title") or task_id),
+                }
+            )
+    return citations
+
+
+def _assemble_markdown(
+    state: State,
+    sections: Sequence[Mapping[str, Any]],
+    report_status: str,
+) -> str:
+    blocks = [f"# {find_title(state)}"]
+    if report_status == DRAFT_WITH_GAPS:
+        blocks.append(_draft_warning(state))
+    for section in sections:
+        body = _strip_duplicate_leading_heading(
+            str(section.get("text") or ""), str(section.get("title") or "章节")
+        )
+        section_markdown = f"## {section.get('title') or '章节'}\n\n{body}".rstrip()
+        section_markdown = _append_missing_tables(
+            section_markdown, section.get("tables") or []
+        )
+        section_markdown = append_missing_figures(
+            section_markdown, section.get("figures") or []
+        )
+        blocks.append(section_markdown)
+    evidence = format_evidence_table(
+        _deduplicate_citations(sections),
+        heading_level=2,
+        include_section=True,
+    )
+    if evidence:
+        blocks.append(evidence)
+    return "\n\n".join(block for block in blocks if block).rstrip() + "\n"
+
+
+def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
+    """Generate only report artifacts admitted by deterministic acceptance state."""
+
+    tasks = state.get("tasks") or []
+    statuses = state.get("section_status") or {}
+    report_status = derive_report_status(tasks, statuses)
+    if report_status == BLOCKED:
+        return _blocked_update(_blocking_sections(state))
+
+    admitted = eligible_task_ids(tasks, statuses, report_status)
+    sections, missing = _ordered_sections(state, admitted)
+    if missing:
+        return _blocked_update(missing)
+
+    final_markdown = _assemble_markdown(state, sections, report_status)
+    report_dir = os.path.join(get_session_cache_dir(state, config), "report")
+    os.makedirs(report_dir, exist_ok=True)
+    stem = "report_draft_with_gaps" if report_status == DRAFT_WITH_GAPS else "report"
+    md_path = os.path.abspath(os.path.join(report_dir, f"{stem}.md"))
+    pdf_path = os.path.abspath(os.path.join(report_dir, f"{stem}.pdf"))
+    docx_path = os.path.abspath(os.path.join(report_dir, f"{stem}.docx"))
+
+    attachments: list[str] = []
+    artifact_errors: list[dict[str, str]] = []
+    try:
+        with open(md_path, "w", encoding="utf-8") as report_file:
+            report_file.write(final_markdown)
+        attachments.append(md_path)
+    except OSError as exc:
+        logger.error("Failed to write Markdown report: %s", exc)
+        artifact_errors.append({"format": "markdown", "error": str(exc)})
+
+    try:
+        math_img_dir = os.path.join(get_session_cache_dir(state, config), "math_imgs")
+        md_to_pdf.md_to_pdf(final_markdown, pdf_path, math_img_dir=math_img_dir)
+        if os.path.exists(pdf_path):
+            attachments.append(pdf_path)
+    except Exception as exc:
+        logger.error("Failed to generate PDF: %s", exc)
+        artifact_errors.append({"format": "pdf", "error": str(exc)})
+
+    try:
+        md_to_docx.md_to_docx(final_markdown, docx_path)
+        if os.path.exists(docx_path):
+            attachments.append(docx_path)
+    except Exception as exc:
+        logger.error("Failed to generate DOCX: %s", exc)
+        artifact_errors.append({"format": "docx", "error": str(exc)})
+
+    delivery_status = (
+        "COMPLETE" if len(attachments) == 3 else "PARTIAL" if attachments else "FAILED"
+    )
+    if delivery_status == "COMPLETE":
+        summary = (
+            "已生成带证据缺口说明的草稿。"
+            if report_status == DRAFT_WITH_GAPS
+            else "已生成通过验收的正式报告。"
+        )
+    elif delivery_status == "PARTIAL":
+        summary = "报告内容已完成验收，但仅成功生成部分交付文件。"
+    else:
+        summary = "报告内容已完成验收，但交付文件生成失败。"
+    preferred_path = next(
+        (
+            path
+            for path in (docx_path, pdf_path, md_path)
+            if path in attachments
+        ),
+        None,
+    )
+    final_result = {
+        "summary": summary,
+        "evaluation": summary,
+        "report_status": report_status,
+        "delivery_status": delivery_status,
+        "artifact_errors": artifact_errors,
+        "blocking_sections": [],
+        "attachments": attachments,
+        "path": preferred_path,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    return {
+        "messages": [AIMessage(content=summary)],
+        "final_result": final_result,
+        "report_status": report_status,
+    }

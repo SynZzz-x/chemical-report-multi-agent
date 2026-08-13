@@ -5,7 +5,7 @@ from typing import Any
 
 
 def _escape_cell(value: Any) -> str:
-    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
 
 
 def append_missing_figures(markdown: str, figures: Sequence[Mapping[str, Any]]) -> str:
@@ -24,25 +24,54 @@ def append_missing_figures(markdown: str, figures: Sequence[Mapping[str, Any]]) 
     return f"{markdown.rstrip()}\n\n" + "\n\n".join(blocks)
 
 
-def format_evidence_table(citations: Sequence[Mapping[str, Any]]) -> str:
+def format_evidence_table(
+    citations: Sequence[Mapping[str, Any]],
+    *,
+    heading_level: int = 3,
+    include_section: bool = False,
+) -> str:
     if not citations:
         return ""
-    lines = [
-        "### 证据来源",
-        "",
-        "| 证据编号 | 来源类型 | 标题 | 定位或链接 | 支持内容 |",
-        "| --- | --- | --- | --- | --- |",
-    ]
+    lines = [f"{'#' * max(1, min(int(heading_level), 6))} 证据来源", ""]
+    if include_section:
+        lines.extend(
+            [
+                "| 所属章节 | 证据编号 | 来源 | 定位或链接 | 支持内容 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "| 证据编号 | 来源类型 | 标题 | 定位或链接 | 支持内容 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
     for citation in citations:
         evidence_id = _escape_cell(citation.get("evidence_id"))
         locator = citation.get("locator") or citation.get("url") or citation.get("file_path")
-        lines.append(
-            "| [{evidence_id}] | {source_type} | {title} | {locator} | {supporting_text} |".format(
-                evidence_id=evidence_id,
-                source_type=_escape_cell(citation.get("source_type")),
-                title=_escape_cell(citation.get("title")),
-                locator=_escape_cell(locator),
-                supporting_text=_escape_cell(citation.get("supporting_text"))[:240],
+        values = {
+            "evidence_id": evidence_id,
+            "source_type": _escape_cell(citation.get("source_type")),
+            "title": _escape_cell(citation.get("title")),
+            "locator": _escape_cell(locator),
+            "supporting_text": _escape_cell(citation.get("supporting_text"))[:240],
+            "section_title": _escape_cell(citation.get("section_title")),
+        }
+        if include_section:
+            source = " / ".join(
+                value for value in (values["source_type"], values["title"]) if value
             )
-        )
+            lines.append(
+                "| {section_title} | [{evidence_id}] | {source} | {locator} | {supporting_text} |".format(
+                    source=source,
+                    **values,
+                )
+            )
+        else:
+            lines.append(
+                "| [{evidence_id}] | {source_type} | {title} | {locator} | {supporting_text} |".format(
+                    **values,
+                )
+            )
     return "\n".join(lines)
