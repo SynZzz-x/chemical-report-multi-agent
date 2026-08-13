@@ -24,6 +24,7 @@ from ..report_acceptance import (
     eligible_task_ids,
     is_admitted_section_entry,
 )
+from ..report_outline import content_container_paths
 from ..state import State
 from ..utils import md_to_docx, md_to_pdf
 from ..utils.path_manager import get_session_cache_dir
@@ -40,6 +41,31 @@ def find_title(state: State) -> str:
         if content.get("from") == "Intake" and content.get("to") == "Planner":
             return str(content.get("title") or "自动生成报告")
     return "自动生成报告"
+
+
+def _intake_sections(state: State) -> list[str]:
+    for message in reversed(state.get("messages", []) or []):
+        raw_content = (
+            message.get("content")
+            if isinstance(message, Mapping)
+            else getattr(message, "content", None)
+        )
+        try:
+            content = (
+                json.loads(raw_content)
+                if isinstance(raw_content, str)
+                else raw_content
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(content, Mapping):
+            continue
+        if content.get("from") != "Intake" or content.get("to") != "Planner":
+            continue
+        sections = content.get("sections")
+        if isinstance(sections, list):
+            return [str(section).strip() for section in sections if str(section).strip()]
+    return []
 
 
 def _normalize_title(value: str) -> str:
@@ -64,7 +90,7 @@ def _strip_duplicate_leading_heading(text: str, task_name: str) -> str:
     first_content = next((index for index, line in enumerate(lines) if line.strip()), None)
     if first_content is None:
         return ""
-    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", lines[first_content])
+    match = re.match(r"^\s{0,3}#{1,2}\s+(.+?)\s*$", lines[first_content])
     if not match or not _titles_match(match.group(1), task_name):
         return str(text or "").strip()
     del lines[first_content]
@@ -154,6 +180,7 @@ def _ordered_sections(
         if isinstance(result, dict) and result.get("task_id") is not None
     }
     statuses = state.get("section_status") or {}
+    container_path_by_section = content_container_paths(_intake_sections(state))
     sections: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
     for task_id in admitted_task_ids:
@@ -307,6 +334,15 @@ def _ordered_sections(
                 ],
                 "figures": figures,
                 "citations": list(result.get("citations") or []),
+                "covers_sections": list(task.get("covers_sections") or []),
+                "container_path": next(
+                    (
+                        list(container_path_by_section[covered])
+                        for covered in task.get("covers_sections") or []
+                        if covered in container_path_by_section
+                    ),
+                    [],
+                ),
             }
         )
     return sections, missing
@@ -425,11 +461,32 @@ def _assemble_markdown(
     blocks = [f"# {find_title(state)}"]
     if report_status == DRAFT_WITH_GAPS:
         blocks.append(_draft_warning(state))
+    active_container_path: tuple[str, ...] = ()
     for section in sections:
         body = _strip_duplicate_leading_heading(
             str(section.get("text") or ""), str(section.get("title") or "章节")
         )
-        section_markdown = f"## {section.get('title') or '章节'}\n\n{body}".rstrip()
+        container_path = tuple(section.get("container_path") or [])
+        if container_path:
+            common_length = 0
+            for current, previous in zip(container_path, active_container_path):
+                if current != previous:
+                    break
+                common_length += 1
+            for depth, container_title in enumerate(
+                container_path[common_length:],
+                start=common_length,
+            ):
+                heading_level = min(depth + 2, 6)
+                blocks.append(f"{'#' * heading_level} {container_title}")
+            active_container_path = container_path
+            section_markdown = body.rstrip()
+        elif section.get("covers_sections"):
+            active_container_path = ()
+            section_markdown = body.rstrip()
+        else:
+            active_container_path = ()
+            section_markdown = f"## {section.get('title') or '章节'}\n\n{body}".rstrip()
         section_markdown = _append_missing_tables(
             section_markdown, section.get("tables") or []
         )

@@ -11,6 +11,7 @@ from ....report_validation import (
     extract_markdown_tables,
     remove_mermaid_blocks,
 )
+from ....report_outline import section_markdown_level
 from ....utils.path_manager import get_session_cache_dir
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -166,6 +167,7 @@ class Task(TypedDict):
     query: Optional[str]
     tool_requirements: Optional[List[str]]
     visualization: Optional[Dict[str, Any]]
+    covers_sections: List[str]
     priority: int = 1
     knowledge_base_loaded: bool = False
 
@@ -2052,6 +2054,22 @@ class AutonomousToolNode:
         """构建任务提示词"""
         task_desc = task.get("task_description", "")
         query = task.get("query", "")
+        covered_sections = task.get("covers_sections") or []
+        covered_sections_section = ""
+        if covered_sections:
+            headings = "\n".join(
+                (
+                    f"- H{section_markdown_level(section)} "
+                    f"({'#' * section_markdown_level(section)}) {section}"
+                )
+                for section in covered_sections
+            )
+            covered_sections_section = (
+                "本执行任务覆盖以下正文章节：\n"
+                f"{headings}\n"
+                "正文必须按上述顺序保留每个章节的原始标题，并使用指定的 "
+                "Markdown 层级；不得合并、改名或遗漏。"
+            )
         
         # 构建查询部分
         query_section = ""
@@ -2086,6 +2104,7 @@ class AutonomousToolNode:
         
         messages = prompt_template.format_messages(
             task_description=task_desc,
+            covered_sections_section=covered_sections_section,
             query_section=query_section,
             data_files_section=data_files_section,
             max_charts=max_charts

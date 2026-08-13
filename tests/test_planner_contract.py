@@ -15,9 +15,10 @@ from src.nodes import verifier_manual as verifier_manual_module
 
 
 def _task(**overrides):
+    task_name = overrides.get("task_name", "工艺概述")
     task = {
         "task_id": "T1",
-        "task_name": "工艺概述",
+        "task_name": task_name,
         "task_description": "基于知识库梳理聚乙烯生产工艺并注明来源。",
         "task_type": "analysis",
         "use_rag": True,
@@ -27,6 +28,7 @@ def _task(**overrides):
         "generate_figure": False,
         "generate_table": False,
         "visualization": None,
+        "covers_sections": [task_name],
     }
     task.update(overrides)
     return task
@@ -931,17 +933,213 @@ def test_negative_global_knowledge_constraint_does_not_require_rag(
     ) == [task]
 
 
-def test_initial_planner_follows_intake_sections_one_to_one(monkeypatch):
+def test_initial_planner_groups_leaf_sections_without_executing_containers(monkeypatch):
     tasks = [
-        _task(task_id="T1", task_name="引言"),
-        _task(task_id="T2", task_name="结论"),
+        _task(
+            task_id="T1",
+            task_name="引言",
+            covers_sections=["1.1 报告目的", "1.2 编制依据"],
+        ),
+        _task(
+            task_id="T2",
+            task_name="工艺参数分析",
+            covers_sections=["2.1 温度", "2.2 压力"],
+        ),
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    planned = planner_module._build_tasks_with_llm(
+        _intake_summary(
+            sections=[
+                "1. 引言",
+                "1.1 报告目的",
+                "1.2 编制依据",
+                "2. 工艺参数分析",
+                "2.1 温度",
+                "2.2 压力",
+                "参考文献与知识库引用",
+            ]
+        ),
+        {},
+    )
+
+    assert planned == tasks
+
+
+def test_initial_planner_groups_chinese_numbered_outline(monkeypatch):
+    tasks = [
+        _task(
+            task_name="引言",
+            covers_sections=["（一）报告目的", "（二）编制依据"],
+        )
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    planned = planner_module._build_tasks_with_llm(
+        _intake_summary(
+            sections=["一、引言", "（一）报告目的", "（二）编制依据"]
+        ),
+        {},
+    )
+
+    assert planned == tasks
+
+
+def test_initial_planner_keeps_reference_review_as_content(monkeypatch):
+    task = _task(
+        task_name="参考文献综述",
+        covers_sections=["2. 参考文献综述"],
+    )
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": [task]}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(sections=["2. 参考文献综述"]),
+        {},
+    ) == [task]
+
+
+def test_initial_planner_requires_coverage_when_outline_is_empty(monkeypatch):
+    task = _task(covers_sections=[])
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="covers_sections"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(sections=[]),
+            {},
+        )
+
+
+def test_initial_planner_rejects_mechanical_one_leaf_per_task_plan(monkeypatch):
+    sections = ["1. 参数分析", *[f"1.{index} 参数 {index}" for index in range(1, 14)]]
+    tasks = [
+        _task(
+            task_id=f"T{index}",
+            task_name=f"参数 {index}",
+            covers_sections=[f"1.{index} 参数 {index}"],
+        )
+        for index in range(1, 14)
     ]
     encoded = json.dumps({"tasks": tasks}, ensure_ascii=False)
     _patch_model(monkeypatch, [encoded, encoded])
 
-    with pytest.raises(ValueError, match="sections"):
+    with pytest.raises(ValueError, match="over-granular|merge"):
         planner_module._build_tasks_with_llm(
-            _intake_summary(sections=["引言", "工艺参数", "结论"]),
+            _intake_summary(sections=sections),
+            {},
+        )
+
+
+def test_initial_planner_task_target_is_not_a_hard_twelve_task_limit(monkeypatch):
+    sections = ["1. 参数分析", *[f"1.{index} 参数 {index}" for index in range(1, 27)]]
+    groups = [
+        [index, index + 1]
+        for index in range(1, 27, 2)
+    ]
+    tasks = [
+        _task(
+            task_id=f"T{task_index}",
+            task_name=f"参数组 {task_index}",
+            covers_sections=[f"1.{index} 参数 {index}" for index in group],
+        )
+        for task_index, group in enumerate(groups, start=1)
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(sections=sections),
+        {},
+    ) == tasks
+
+
+def test_initial_planner_allows_many_tasks_with_distinct_execution_strategies(
+    monkeypatch,
+):
+    sections = ["1. 参数分析", *[f"1.{index} 参数 {index}" for index in range(1, 14)]]
+    tasks = [
+        _task(
+            task_id=f"T{index}",
+            task_name=f"参数 {index}",
+            covers_sections=[f"1.{index} 参数 {index}"],
+            generate_table=index % 2 == 0,
+            task_type="summary" if index % 3 == 0 else "analysis",
+        )
+        for index in range(1, 14)
+    ]
+    _patch_model(
+        monkeypatch,
+        [json.dumps({"tasks": tasks}, ensure_ascii=False)],
+    )
+
+    assert planner_module._build_tasks_with_llm(
+        _intake_summary(sections=sections),
+        {},
+    ) == tasks
+
+
+def test_initial_planner_rejects_task_spanning_multiple_containers(monkeypatch):
+    task = _task(
+        task_name="跨章任务",
+        covers_sections=["1.1 报告目的", "2.1 工艺路线"],
+    )
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match="multiple containers"):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(
+                sections=[
+                    "1. 引言",
+                    "1.1 报告目的",
+                    "2. 工艺概述",
+                    "2.1 工艺路线",
+                ]
+            ),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    ("covers_sections", "match"),
+    [
+        (["1. 引言", "1.1 报告目的", "1.2 编制依据"], "container"),
+        (["1.1 报告目的", "1.1 报告目的"], "exactly once"),
+        (["1.2 编制依据", "1.1 报告目的"], "outline order"),
+        (["1.1 报告目的"], "missing"),
+        (["1.1 报告目的", "参考文献与知识库引用"], "system-generated"),
+    ],
+)
+def test_initial_planner_rejects_invalid_outline_coverage(
+    monkeypatch,
+    covers_sections,
+    match,
+):
+    task = _task(task_name="引言", covers_sections=covers_sections)
+    encoded = json.dumps({"tasks": [task]}, ensure_ascii=False)
+    _patch_model(monkeypatch, [encoded, encoded])
+
+    with pytest.raises(ValueError, match=match):
+        planner_module._build_tasks_with_llm(
+            _intake_summary(
+                sections=[
+                    "1. 引言",
+                    "1.1 报告目的",
+                    "1.2 编制依据",
+                    "参考文献与知识库引用",
+                ]
+            ),
             {},
         )
 
@@ -966,8 +1164,8 @@ def test_initial_planner_ignores_abstract_when_matching_sections(
     abstract_section,
 ):
     tasks = [
-        _task(task_id="T1", task_name="引言"),
-        _task(task_id="T2", task_name="结论"),
+        _task(task_id="T1", task_name="引言", covers_sections=["引言"]),
+        _task(task_id="T2", task_name="结论", covers_sections=["结论"]),
     ]
     _patch_model(
         monkeypatch,
@@ -1398,8 +1596,9 @@ def test_initial_planner_prompt_matches_deterministic_contract():
         encoding="utf-8"
     )
 
-    assert "6 至 10" not in prompt
-    assert "一一对应" in prompt
+    assert "约 6～12" in prompt
+    assert "不是任务列表" in prompt
+    assert "covers_sections" in prompt
     assert "use_rag=false" in prompt
     assert "query" in prompt
     assert "causal" in prompt

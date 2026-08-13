@@ -166,6 +166,18 @@ def test_move_patch_rejects_task_marked_completed_without_results():
     assert state == before
 
 
+def test_move_patch_cannot_reorder_report_section_coverage():
+    state = patch_state(cursor=0, accepted_ids=[])
+    for index, planned_task in enumerate(state["tasks"], start=1):
+        planned_task["covers_sections"] = [f"{index}. Section {index}"]
+
+    with pytest.raises(PatchValidationError, match="section coverage order"):
+        validate_plan_patch(
+            state,
+            move_before_patch(task_id="T4", before_task_id="T3"),
+        )
+
+
 def test_patch_rejects_stale_base_revision_without_partial_write():
     state = patch_state(plan_revision=2)
     before = deepcopy(state)

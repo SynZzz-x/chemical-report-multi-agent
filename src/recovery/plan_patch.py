@@ -54,6 +54,7 @@ _ALLOWED_INSERTED_TASK_FIELDS = _REQUIRED_INSERTED_TASK_FIELDS | {
     "allow_web_fallback",
     "tool_requirements",
     "visualization",
+    "covers_sections",
 }
 _COMPLETED_TASK_STATUSES = {"ACCEPTED", "COMPLETED", "DONE", "PASS", "PASSED"}
 
@@ -276,6 +277,16 @@ def _validate_task_fields(
     elif required:
         raise PatchValidationError("insert_before.task missing use_resources")
 
+    if "covers_sections" in task:
+        covered = task["covers_sections"]
+        if not isinstance(covered, list) or any(
+            not isinstance(section, str) or not section.strip()
+            for section in covered
+        ):
+            raise PatchValidationError(
+                "covers_sections must be a list of non-empty strings"
+            )
+
     if "tool_requirements" in task:
         task["tool_requirements"] = _normalise_tool_requirements(
             task["tool_requirements"]
@@ -443,6 +454,19 @@ def _apply_operations(tasks: List[Dict[str, Any]], operations: Sequence[Mapping[
             tasks.insert(before_index, deepcopy(dict(operation["task"])))
 
 
+def _section_coverage_sequence(tasks: Sequence[Mapping[str, Any]]) -> List[str]:
+    sequence: List[str] = []
+    for task in tasks:
+        covered = task.get("covers_sections")
+        if isinstance(covered, list):
+            sequence.extend(
+                section.strip()
+                for section in covered
+                if isinstance(section, str) and section.strip()
+            )
+    return sequence
+
+
 def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(patch, Mapping):
         raise PatchValidationError("patch must be an object")
@@ -510,6 +534,14 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     _apply_operations(simulated_tasks, operation_copies)
     for task in simulated_tasks:
         _validate_task_consistency(task)
+    original_coverage = _section_coverage_sequence(tasks)
+    if (
+        original_coverage
+        and _section_coverage_sequence(simulated_tasks) != original_coverage
+    ):
+        raise PatchValidationError(
+            "local plan patches must preserve report section coverage order"
+        )
 
     affected_task_ids = _affected_task_ids(patch, known_ids)
     affected_set = set(affected_task_ids)

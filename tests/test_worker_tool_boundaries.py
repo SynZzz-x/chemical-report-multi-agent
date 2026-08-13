@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -856,3 +857,40 @@ def test_worker_fallback_removes_unknown_ids_from_original_content():
 
     assert revised == "原文包含伪引用。"
     assert "E404" not in revised
+
+
+def test_worker_task_prompt_preserves_all_covered_section_headings(monkeypatch):
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_CHARTS_PER_TASK=6)
+
+    class Prompt:
+        def format_messages(self, **values):
+            return [SimpleNamespace(content=values["covered_sections_section"])]
+
+    monkeypatch.setattr(
+        worker_graph_module.ChatPromptTemplate,
+        "from_template",
+        lambda _template: Prompt(),
+    )
+
+    prompt = node._build_task_prompt(
+        {
+            "task_description": "分析温度与压力对产品质量的影响。",
+            "query": "聚乙烯 温度 压力 质量",
+            "use_resources": [],
+            "covers_sections": ["3.1 聚合反应温度", "3.2 聚合压力"],
+        }
+    )
+
+    assert "3.1 聚合反应温度" in prompt
+    assert "3.2 聚合压力" in prompt
+    assert "H3 (###)" in prompt
+    assert "必须按上述顺序保留" in prompt
+
+    template = (
+        Path(worker_graph_module.__file__).parents[3]
+        / "prompts"
+        / "worker_task_template.md"
+    ).read_text(encoding="utf-8")
+    assert "任务主标题使用二级标题" in template
+    assert "覆盖章节标题使用“章节覆盖要求”中指定的 Markdown 层级" in template

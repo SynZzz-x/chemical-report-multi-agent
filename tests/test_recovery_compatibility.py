@@ -70,6 +70,7 @@ def _replacement_task(task_id="T3", task_name="新任务", **overrides):
         "query": "",
         "use_resources": [],
         "visualization": None,
+        "covers_sections": [task_name],
         **overrides,
     }
 

@@ -11,6 +11,7 @@ from typing import Dict, Any, List
 from ..state import State, merge_docs
 from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
+from ..report_outline import planner_outline, validate_task_coverage
 from ..rag.catalog import load_active_catalog
 from ..task_contract import task_allows_web
 from ..tool_names import canonical_tool_name
@@ -35,6 +36,7 @@ _GENERATED_TASK_REQUIRED_FIELDS = {
     "generate_figure",
     "generate_table",
     "visualization",
+    "covers_sections",
 }
 _GENERATED_TASK_BOOLEAN_FIELDS = {
     "use_rag",
@@ -164,6 +166,7 @@ _REPLACEMENT_TASK_FIELDS = {
     "use_resources",
     "tool_requirements",
     "visualization",
+    "covers_sections",
 }
 
 
@@ -248,6 +251,9 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
         if not isinstance(task["query"], str):
             raise ValueError("query must be a string")
         _validate_string_list(task["use_resources"], "use_resources")
+        _validate_string_list(task["covers_sections"], "covers_sections")
+        if not task["covers_sections"]:
+            raise ValueError("covers_sections must contain at least one section")
 
         visualization = task["visualization"]
         if visualization is None:
@@ -279,7 +285,7 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
             raise ValueError("task_type must be analysis, summary, or inference")
         if "query" in task and not isinstance(task["query"], str):
             raise ValueError("query must be a string")
-        for field in ("use_resources", "tool_requirements"):
+        for field in ("use_resources", "tool_requirements", "covers_sections"):
             if field in task:
                 _validate_string_list(task[field], field)
         if "visualization" in task and task["visualization"] is not None:
@@ -638,31 +644,11 @@ def _validate_generated_task_semantics(
                 f"task {task.get('task_id')} requires explicit web authorization"
             )
 
-def _is_abstract_section(section: Any) -> bool:
-    value = str(section or "").strip()
-    normalized = re.sub(r"[\s:：_-]+", "", value).casefold()
-    return normalized.startswith(("摘要", "abstract")) or normalized.endswith(
-        ("摘要", "abstract")
-    )
-
-
 def _validate_initial_section_coverage(
     tasks: List[Dict[str, Any]],
     sections: List[Any] | None,
 ) -> None:
-    expected = [
-        str(section).strip()
-        for section in sections or []
-        if str(section or "").strip() and not _is_abstract_section(section)
-    ]
-    if not expected:
-        return
-    actual = [str(task.get("task_name") or "").strip() for task in tasks]
-    if actual != expected:
-        raise ValueError(
-            "initial plan tasks must match Intake sections one-to-one and in order: "
-            f"expected={expected}, actual={actual}"
-        )
+    validate_task_coverage(tasks, sections)
 
 
 def _parse_generated_plan_payload(
@@ -886,7 +872,7 @@ def _build_tasks_with_llm(intake_obj, config):
             "task_type": task_type,
             "constraints": constraints,
             "doc_length": doc_length,
-            "sections": sections,
+            "sections": planner_outline(sections),
             "resources": resources,
             "knowledge_catalog": knowledge_catalog,
             "core_content": intake_obj.get("core_content") or [],
@@ -986,6 +972,7 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
                 "resources": _normalize_resources(resource_objs),
                 "knowledge_catalog": knowledge_catalog,
                 "core_content": intake_data.get("core_content") or [],
+                "sections": planner_outline(intake_data.get("sections") or []),
                 "style": intake_data.get("style"),
                 "output_format": intake_data.get("output_format"),
                 "web_authorized": policy_context["web_authorized"],
@@ -993,6 +980,7 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
             resources=resource_objs,
             policy_context=policy_context,
             failure_label="replacement plan generation failed",
+            expected_sections=intake_data.get("sections") or [],
         )
     except Exception as exc:
         # A full replan must never silently clone the active plan.  Planner
@@ -1087,6 +1075,7 @@ def _refine_tasks(
                 "constraints": intake_data.get("constraints") or [],
                 "user_feedback": user_feedback,
                 "core_content": intake_data.get("core_content") or [],
+                "sections": planner_outline(intake_data.get("sections") or []),
                 "style": intake_data.get("style"),
                 "output_format": intake_data.get("output_format"),
                 "web_authorized": policy_context["web_authorized"],
@@ -1094,6 +1083,7 @@ def _refine_tasks(
             resources=all_resources,
             policy_context=policy_context,
             failure_label="replacement plan refinement failed",
+            expected_sections=intake_data.get("sections") or [],
         )
     except Exception as exc:
         logger.exception("Failed to refine tasks: %s", exc)

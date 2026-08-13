@@ -159,6 +159,141 @@ def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_pa
     assert "LLM Generation Failed" not in markdown
 
 
+def test_report_assembly_restores_container_heading_for_grouped_tasks(
+    monkeypatch,
+    tmp_path,
+):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status("VERIFIED_PASS"),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {
+            "task_id": "T1",
+            "task_name": "背景与范围",
+            "covers_sections": ["1.1 报告目的"],
+        },
+        {
+            "task_id": "T2",
+            "task_name": "编制依据",
+            "covers_sections": ["1.2 编制依据"],
+        },
+    ]
+    state["results"] = [
+        {
+            "task_id": "T1",
+            "text_output": "### 1.1 报告目的\n\n目的正文。",
+            "plan_revision": 1,
+            "task_revision": 1,
+        },
+        {
+            "task_id": "T2",
+            "text_output": "### 1.2 编制依据\n\n依据正文。",
+            "plan_revision": 1,
+            "task_revision": 1,
+        },
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": [
+                        "1. 引言",
+                        "1.1 报告目的",
+                        "1.2 编制依据",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.count("## 1. 引言") == 1
+    assert "## 背景与范围" not in markdown
+    assert "## 编制依据" not in markdown
+    assert markdown.index("### 1.1 报告目的") < markdown.index("### 1.2 编制依据")
+
+
+def test_report_assembly_restores_full_nested_container_path(monkeypatch, tmp_path):
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")})
+    state["tasks"] = [
+        {
+            "task_id": "T1",
+            "task_name": "温度机理",
+            "covers_sections": ["1.1.1 温度影响"],
+        }
+    ]
+    state["results"] = [
+        {
+            "task_id": "T1",
+            "text_output": "#### 1.1.1 温度影响\n\n正文。",
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": [
+                        "1. 参数分析",
+                        "1.1 反应条件",
+                        "1.1.1 温度影响",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.index("## 1. 参数分析") < markdown.index("### 1.1 反应条件")
+    assert markdown.index("### 1.1 反应条件") < markdown.index("#### 1.1.1 温度影响")
+
+
+def test_report_assembly_uses_top_level_content_heading_not_task_name(
+    monkeypatch,
+    tmp_path,
+):
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")})
+    state["tasks"] = [
+        {
+            "task_id": "T1",
+            "task_name": "背景执行单元",
+            "covers_sections": ["1. 引言"],
+        }
+    ]
+    state["results"] = [
+        {
+            "task_id": "T1",
+            "text_output": "## 1. 引言\n\n正文。",
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.count("## 1. 引言") == 1
+    assert "## 背景执行单元" not in markdown
+
+
 def test_user_accepted_gap_generates_named_draft_with_visible_warning(
     monkeypatch, tmp_path
 ):

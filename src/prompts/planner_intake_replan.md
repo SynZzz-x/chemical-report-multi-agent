@@ -6,6 +6,7 @@
 - 用户意图：{user_intent}
 - 任务类型：{task_type}
 - 核心内容：{core_content}
+- 建议章节：{sections}
 - 约束条件：{constraints}
 - 文档长度：{doc_length}
 - 写作风格：{style}
@@ -27,7 +28,7 @@
 5. 没有具备可用文件路径的真实 CSV 资源时，不得增加相关系数、回归、时间序列、热力图、R²、转化率或能耗的定量计算、普通数据图或虚构定量分析；定性机理分析不受此限制。
 6. 只有“公开网络授权”为 true 时才可设置任何 Web 字段；概念图继续遵守原始授权。
 7. 不创建摘要或 Abstract 任务。
-8. 每个任务必须且只能包含 11 个 Task Contract 字段，不得增加或省略字段。
+8. 每个任务必须且只能包含 12 个 Task Contract 字段，不得增加或省略字段。建议章节非空时，`covers_sections` 必须逐字引用其中 `kind=content` 的 section；container 不创建任务，system_generated 不进入 Worker，所有 content 章节必须按原顺序恰好覆盖一次。建议章节为空时可以自行设计章节并写入 `covers_sections`。可合并同一 container 下连续且策略一致的章节，不得跨 container 合并。
 9. 临时候选任务 ID 必须从 T1 开始连续编号；提交候选计划时由系统重新分配不冲突的稳定 ID。
 10. `use_rag=false` 时 query 必须为空字符串；`use_rag=true` 时 query 必须非空。
 11. `generate_figure=false` 时 visualization 必须为 null；普通数据图可使用 `generate_figure=true` 和 `visualization=null`，但必须有真实数据资源。
@@ -52,7 +53,8 @@
       "use_resources": [],
       "generate_figure": false,
       "generate_table": false,
-      "visualization": null
+      "visualization": null,
+      "covers_sections": ["2.1 章节名称"]
     }}
   ]
 }}

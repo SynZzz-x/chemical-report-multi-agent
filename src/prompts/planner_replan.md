@@ -6,6 +6,7 @@
 - 用户意图：{user_intent}
 - 任务类型：{task_type}
 - 核心内容：{core_content}
+- 建议章节：{sections}
 - 约束条件：{constraints}
 - 文档长度：{doc_length}
 - 写作风格：{style}
@@ -22,12 +23,12 @@
 # Rules
 1. 新计划必须保持原始标题、研究对象、用户意图、核心内容和约束，除非用户明确要求改变它们。
 2. 只修复阻塞原因，不得因为局部问题替换为无关项目或丢失已声明的证据策略。
-3. 任务数量由用户目标与明确章节结构决定；任务列表不得为空，也不得为凑数量擅自增加章节。
+3. 建议章节是报告目录，不是任务列表。非空时，container 不创建任务，system_generated 不进入 Worker；所有 content 章节必须通过 `covers_sections` 按顺序恰好覆盖一次。为空时可以自行设计章节并写入 `covers_sections`。允许合并同一 container 下连续、语义和工具策略相近的 content 章节，不得跨 container 合并；通常以约 6～12 个适中粒度任务为软目标，不得截断章节。
 4. 不创建摘要或 Abstract 任务。
 5. 判断 `use_rag` 的唯一语义标准是“当前任务是否需要新增知识库证据”。需要从知识库获取新事实、专业依据、案例、参数、文件内容或来源证据时设置 `use_rag=true` 并提供非空 query；只说明报告背景、目的、结构、整体知识库依据，或总结已生成并验证的前文时设置 `use_rag=false` 且 query 为 `""`。
 6. 没有具备可用文件路径的真实 CSV 资源时，不得规划相关系数、回归、时间序列、热力图、R²、定量操作窗口、转化率或能耗的定量计算，以及普通数据图；定性机理分析不受此限制。
 7. 只有“公开网络授权”为 true 时才可设置任何 Web 字段；资源名称和概念关系图必须遵守原始授权和已有任务字段约束。
-8. 每个任务必须且只能包含 11 个 Task Contract 字段，不得增加或省略字段。
+8. 每个任务必须且只能包含 12 个 Task Contract 字段，不得增加或省略字段；`covers_sections` 必须逐字引用建议章节中 `kind=content` 的 section。
 9. 临时候选任务 ID 必须从 T1 开始连续编号；提交候选计划时由系统重新分配不冲突的稳定 ID。
 10. `use_rag=false` 时 query 必须为空字符串；`use_rag=true` 时 query 必须非空。
 11. `generate_figure=false` 时 visualization 必须为 null；普通数据图可使用 `generate_figure=true` 和 `visualization=null`，但必须有真实数据资源。
@@ -52,7 +53,8 @@
       "use_resources": [],
       "generate_figure": false,
       "generate_table": false,
-      "visualization": null
+      "visualization": null,
+      "covers_sections": ["2.1 章节名称"]
     }}
   ]
 }}
