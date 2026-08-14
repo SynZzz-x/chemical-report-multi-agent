@@ -67,6 +67,36 @@ def test_build_context_only_uses_admitted_prior_sections_and_citations():
     assert context["known_gaps"] == []
 
 
+def test_build_context_keeps_user_accepted_draft_out_of_synthesis_fact_pool():
+    state = _state()
+    state["tasks"].insert(1, _task("T_gap", task_name="证据不足章节"))
+    state["cursor"] = 2
+    state["task_revisions"]["T_gap"] = 1
+    state["results"].append(
+        {
+            "task_id": "T_gap",
+            "text_output": "任务要求通过RAG检索，但当前证据不足。",
+            "citations": [{"evidence_id": "E9", "file_name": "草稿.pdf"}],
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    )
+    state["section_status"]["T_gap"] = {
+        "status": "USER_ACCEPTED_WARNING",
+        "accepted_by": "user",
+        "issues": [{"code": "TOO_LONG", "description": "用户接受超长草稿"}],
+        "plan_revision": 1,
+        "task_revision": 1,
+    }
+
+    context = synthesis_module.build_synthesis_context(state)
+
+    assert [section["task_id"] for section in context["verified_sections"]] == ["T1"]
+    assert [section["task_id"] for section in context["warning_sections"]] == ["T_gap"]
+    assert [section["task_id"] for section in context["accepted_sections"]] == ["T1"]
+    assert "E9" not in context["accepted_evidence_ids"]
+
+
 def test_build_context_excludes_unaccepted_and_revision_mismatched_results():
     state = _state()
     state["section_status"]["T1"]["task_revision"] = 2
@@ -191,7 +221,7 @@ def test_consistency_gate_allows_exact_user_accepted_gap_description():
     assert issues == []
 
 
-def test_synthesis_retries_once_then_returns_safe_extractive_fallback(monkeypatch):
+def test_synthesis_retries_once_then_fails_closed(monkeypatch):
     class Model:
         def __init__(self):
             self.calls = 0
@@ -214,16 +244,15 @@ def test_synthesis_retries_once_then_returns_safe_extractive_fallback(monkeypatc
     result = update["current_result"]
     assert model.calls == 2
     assert modes == [False]
-    assert result["synthesis_audit"]["fallback_used"] is True
-    assert "pH" not in result["text_output"]
-    assert "3%" not in result["text_output"]
-    assert "[E9]" not in result["text_output"]
-    assert "氢气比例" in result["text_output"]
-    assert result["citations"][0]["evidence_id"] == "E1"
+    assert result["synthesis_audit"]["fallback_used"] is False
+    assert result["status"] == "FAILED"
+    assert result["error"] == "SYNTHESIS_CONSISTENCY_FAILED"
+    assert result["text_output"] == ""
+    assert result["citations"] == []
     assert result["tool_calls"] == []
 
 
-def test_synthesis_model_failure_uses_safe_extractive_fallback(monkeypatch):
+def test_synthesis_model_failure_fails_closed(monkeypatch):
     class Model:
         def invoke(self, _messages, **_kwargs):
             raise RuntimeError("provider unavailable")
@@ -236,9 +265,10 @@ def test_synthesis_model_failure_uses_safe_extractive_fallback(monkeypatch):
 
     result = synthesis_module.synthesis(_state(), {})["current_result"]
 
-    assert result["synthesis_audit"]["fallback_used"] is True
+    assert result["synthesis_audit"]["fallback_used"] is False
     assert result["synthesis_audit"]["model_error"] == "provider unavailable"
-    assert "氢气比例" in result["text_output"]
+    assert result["status"] == "FAILED"
+    assert result["text_output"] == ""
 
 
 def test_synthesis_accepts_second_grounded_attempt(monkeypatch):

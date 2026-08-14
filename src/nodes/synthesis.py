@@ -13,6 +13,11 @@ from langchain_core.runnables import RunnableConfig
 
 from ..llm import get_llm
 from ..report_acceptance import is_admitted_section_entry
+from ..report_acceptance import (
+    USER_ACCEPTED_GAP,
+    USER_ACCEPTED_WARNING,
+    VERIFIED_PASS,
+)
 from ..report_validation import count_report_length
 from ..state import State
 
@@ -85,7 +90,9 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(result, Mapping) and result.get("task_id") is not None
     }
     statuses = state.get("section_status") or {}
-    accepted_sections: list[dict[str, Any]] = []
+    verified_sections: list[dict[str, Any]] = []
+    accepted_gap_sections: list[dict[str, Any]] = []
+    warning_sections: list[dict[str, Any]] = []
     accepted_citations: list[dict[str, Any]] = []
     known_gaps: list[dict[str, Any]] = []
 
@@ -108,20 +115,25 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         text = str(result.get("content") or result.get("text_output") or "").strip()
         if not text:
             continue
-        accepted_sections.append(
-            {
-                "task_id": task_id,
-                "title": str(task.get("task_name") or task_id),
-                "covers_sections": list(task.get("covers_sections") or []),
-                "status": str(status.get("status") or ""),
-                "content": text,
-            }
-        )
-        accepted_citations.extend(
-            dict(citation)
-            for citation in (result.get("citations") or [])
-            if isinstance(citation, Mapping) and _citation_id(citation)
-        )
+        section = {
+            "task_id": task_id,
+            "title": str(task.get("task_name") or task_id),
+            "covers_sections": list(task.get("covers_sections") or []),
+            "status": str(status.get("status") or ""),
+            "content": text,
+        }
+        section_status = str(status.get("status") or "")
+        if section_status == VERIFIED_PASS:
+            verified_sections.append(section)
+            accepted_citations.extend(
+                dict(citation)
+                for citation in (result.get("citations") or [])
+                if isinstance(citation, Mapping) and _citation_id(citation)
+            )
+        elif section_status == USER_ACCEPTED_GAP:
+            accepted_gap_sections.append(section)
+        elif section_status == USER_ACCEPTED_WARNING:
+            warning_sections.append(section)
         for issue in status.get("issues") or []:
             if isinstance(issue, Mapping) and "EVIDENCE" in str(issue.get("code") or "").upper():
                 known_gaps.append({"task_id": task_id, **dict(issue)})
@@ -155,7 +167,11 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             seen_gaps.add(signature)
             unique_gaps.append(gap)
     return {
-        "accepted_sections": accepted_sections,
+        # Compatibility name now deliberately means verified factual inputs only.
+        "accepted_sections": verified_sections,
+        "verified_sections": verified_sections,
+        "accepted_gap_sections": accepted_gap_sections,
+        "warning_sections": warning_sections,
         "accepted_citations": accepted_citations,
         "accepted_evidence_ids": evidence_ids,
         "known_gaps": unique_gaps,
@@ -321,6 +337,7 @@ def _prompt_messages(
     previous_issues: list[dict[str, str]],
 ) -> list[Any]:
     system = """你是报告结论抽取器，不是普通写作 Worker。你只能从 accepted_sections 中逐句完整复制原文，允许删除整句和调整完整句子的顺序，不得截断、改写或添加任何句子；known_gaps 也只能完整复制输入中已有的描述。
+accepted_gap_sections 与 warning_sections 仅供风险审计，不得从其中抽取事实或正文；证据缺口只能使用 known_gaps。
 禁止新增或改写参数、质量指标、数字、因果方向、实验、统计分析、操作建议、控制策略、数据来源或工具调用；禁止声称执行检索、计算、试验或现场验证。只能保留原句已有且属于 accepted_evidence_ids 的 [E编号]。遵守任务描述，只输出抽取后的结论正文，不输出标题、JSON、代码块或解释。"""
     payload = {
         "task": {
@@ -336,29 +353,6 @@ def _prompt_messages(
         SystemMessage(content=system),
         HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
     ]
-
-
-def _extractive_fallback(context: Mapping[str, Any]) -> str:
-    blocks: list[str] = []
-    for section in context.get("accepted_sections") or []:
-        if not isinstance(section, Mapping):
-            continue
-        content = str(section.get("content") or "").strip()
-        sentences = [
-            sentence for sentence in _sentences(content)
-            if not sentence.lstrip().startswith("#")
-        ]
-        if sentences:
-            blocks.append(" ".join(sentences[:2]))
-    blocks.extend(
-        str(gap.get("description") or gap.get("suggestion") or "").strip()
-        for gap in context.get("known_gaps") or []
-        if isinstance(gap, Mapping)
-        and str(gap.get("description") or gap.get("suggestion") or "").strip()
-    )
-    if not blocks:
-        return ""
-    return "\n\n".join(blocks)
 
 
 def synthesis(
@@ -414,10 +408,9 @@ def synthesis(
                 attempts,
                 [finding["code"] for finding in findings],
             )
-    fallback_used = not content or bool(findings)
-    if fallback_used:
-        content = _extractive_fallback(context)
-        findings = check_synthesis_consistency(content, context)
+    generation_failed = not content or bool(findings) or bool(model_error)
+    if generation_failed:
+        content = ""
 
     cited_ids = {value.upper() for value in _EVIDENCE_ID.findall(content)}
     citations = [
@@ -459,12 +452,20 @@ def synthesis(
                 section["task_id"] for section in context["accepted_sections"]
             ],
             "attempts": attempts,
-            "fallback_used": fallback_used,
+            "fallback_used": False,
             "model_error": model_error,
             "generation_findings": finding_history,
             "final_consistency_issues": findings,
         },
-        "error": None if content and context["accepted_sections"] else "NO_ACCEPTED_SECTIONS",
+        "error": (
+            None
+            if content and context["accepted_sections"]
+            else (
+                "NO_ACCEPTED_SECTIONS"
+                if not context["accepted_sections"]
+                else "SYNTHESIS_CONSISTENCY_FAILED"
+            )
+        ),
     }
     return {
         "current_task": task,

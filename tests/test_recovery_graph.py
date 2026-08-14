@@ -110,7 +110,7 @@ def test_t2_evidence_gap_never_routes_to_planner_or_resets_cursor(caplog):
     ) in caplog.messages
 
 
-def test_rework_policy_creates_structured_execution_feedback():
+def test_length_policy_creates_structured_execution_feedback():
     assessment = {
         "status": "FAILED",
         "issues": [
@@ -128,9 +128,10 @@ def test_rework_policy_creates_structured_execution_feedback():
     update = decision_policy(state, {})
 
     feedback = update["worker_state"]["execution_feedback"]
-    assert feedback["mode"] == "rework"
+    assert feedback["mode"] == "length_rewrite"
     assert feedback["issues"] == assessment["issues"]
     assert "Add mechanism detail" in feedback["instructions"]
+    assert feedback["source_result"] == state["current_result"]
     assert update["worker_state"]["retained"] is True
 
 
@@ -475,6 +476,8 @@ def test_needs_user_input_interrupt_payload_and_incremental_resume(monkeypatch):
     assert captured["type"] == "needs_user_input"
     assert captured["category"] == "EXTERNAL_BLOCKER"
     assert captured["affected_task"] == "T2"
+    assert captured["blocker_status"] == "ACTIVE"
+    assert captured["blocker_id"]
     assert captured["accepted_choices"]
     assert update["workflow_action"] == "REWORK"
     assert update["docs"] == [resumed_doc]
@@ -567,7 +570,7 @@ def test_accepting_evidence_gap_reworks_remaining_content_defect(monkeypatch):
 
     update = needs_user_input(state, {})
 
-    assert update["workflow_action"] == "REWORK"
+    assert update["workflow_action"] == "LENGTH_REWRITE"
     assert "results" not in update
     assert update["task_retry_count"] == {"T2": 1}
     feedback = update["worker_state"]["execution_feedback"]
@@ -577,6 +580,30 @@ def test_accepting_evidence_gap_reworks_remaining_content_defect(monkeypatch):
     assert waiver["task_revision"] == 1
     assert [issue["code"] for issue in waiver["issues"]] == ["EVIDENCE_GAP"]
     assert update["section_status"]["T2"]["status"] == "BLOCKED"
+
+
+def test_length_rewrite_feedback_is_tool_free_and_preserves_source_result():
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "TOO_LONG",
+                    "category": "CONTENT_DEFECT",
+                    "description": "正文超过最高字数要求",
+                    "suggestion": "压缩正文",
+                    "severity": "major",
+                }
+            ],
+        }
+    )
+
+    update = recovery_module.decision_policy(state, {})
+
+    assert update["workflow_action"] == "LENGTH_REWRITE"
+    feedback = update["worker_state"]["execution_feedback"]
+    assert feedback["mode"] == "length_rewrite"
+    assert feedback["source_result"] == state["current_result"]
 
 
 def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch, caplog):
@@ -609,7 +636,7 @@ def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch, caplog
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
     assert update["section_status"]["T2"]["status"] == "USER_ACCEPTED_WARNING"
     assert (
-        "User blocker decision: task=T2 category=CONTENT_DEFECT "
+        "User blocker decision: blocker=T2:p1:legacy task=T2 category=CONTENT_DEFECT "
         "choice=ACCEPT_AS_DRAFT action=NEXT uploaded_files=false"
     ) in caplog.messages
 

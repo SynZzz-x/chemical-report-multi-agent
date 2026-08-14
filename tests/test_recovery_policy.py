@@ -55,6 +55,8 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     second = decide_recovery_action(second_state, assessment)
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
     assert second["pending_user_action"]["category"] == "EVIDENCE_GAP"
+    assert second["pending_user_action"]["blocker_status"] == "ACTIVE"
+    assert second["pending_user_action"]["blocker_id"].startswith("T2:p")
     assert second["pending_user_action"]["accepted_choices"] == [
         "UPLOAD_RESOURCES",
         "AUTHORIZE_WEB",
@@ -64,6 +66,21 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     assert "上传" in second["pending_user_action"]["guidance"]
     assert "页面" in second["pending_user_action"]["guidance"]
     assert "直接回复" not in second["pending_user_action"]["guidance"]
+
+
+def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "src.recovery.policy.public_web_runtime_available",
+        lambda: False,
+    )
+    state = recovery_state(task_id="T2", evidence_recovery_count={"T2": 1})
+
+    decision = decide_recovery_action(
+        state, assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP")
+    )
+
+    assert "AUTHORIZE_WEB" not in decision["pending_user_action"]["accepted_choices"]
+    assert "当前服务器未提供可用的公开网络检索工具" in decision["pending_user_action"]["guidance"]
 
 
 def test_nonwaivable_source_failure_does_not_offer_gap_acceptance():
@@ -139,7 +156,7 @@ def test_classification_uses_priority_and_never_treats_evidence_as_plan_defect()
     )
 
 
-def test_actionable_content_defect_takes_precedence_over_verifier_contract_error():
+def test_actionable_length_defect_uses_dedicated_rewrite_despite_contract_error():
     state = recovery_state(task_id="T1")
     assessment = {
         "status": "FAILED",
@@ -156,9 +173,23 @@ def test_actionable_content_defect_takes_precedence_over_verifier_contract_error
 
     decision = decide_recovery_action(state, assessment)
 
-    assert decision["workflow_action"] == WorkflowAction.REWORK
+    assert decision["workflow_action"] == WorkflowAction.LENGTH_REWRITE
     assert decision["task_retry_count"] == {"T1": 1}
     assert decision["verifier_retry_count"] == {}
+
+
+def test_synthesis_content_or_evidence_failure_uses_synthesis_rewrite():
+    state = recovery_state(task_id="T2")
+    state["tasks"][0]["task_type"] = "synthesis"
+
+    for code, category in (
+        ("CONTENT_DEFECT", "CONTENT_DEFECT"),
+        ("EVIDENCE_GAP", "EVIDENCE_GAP"),
+    ):
+        decision = decide_recovery_action(
+            state, assessment_with(code, category)
+        )
+        assert decision["workflow_action"] == WorkflowAction.SYNTHESIS_REWRITE
 
 
 def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
@@ -169,14 +200,17 @@ def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.REWORK
+    assert decision["workflow_action"] == WorkflowAction.LENGTH_REWRITE
     assert decision["task_retry_count"] == {"T2": 2}
 
 
 @pytest.mark.parametrize(
     ("assessment", "expected_action"),
     [
-        (assessment_with("TOO_SHORT", "CONTENT_DEFECT"), WorkflowAction.REWORK),
+        (
+            assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+            WorkflowAction.LENGTH_REWRITE,
+        ),
         (
             assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP"),
             WorkflowAction.EVIDENCE_RECOVERY,

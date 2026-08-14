@@ -578,7 +578,12 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
 
     if payload_type == "needs_user_input":
         guidance = blocker_guidance(payload) or "需要你的输入后才能继续当前任务。"
-        _append_ui_message("assistant", guidance)
+        blocker_id = str(payload.get("blocker_id") or "").strip()
+        _append_ui_message(
+            "assistant",
+            guidance,
+            message_id=(f"blocker_{blocker_id}" if blocker_id else None),
+        )
         with st.chat_message("assistant"):
             st.write(guidance)
         return True

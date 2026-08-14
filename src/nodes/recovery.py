@@ -36,6 +36,7 @@ from src.report_acceptance import (
 )
 from src.state import State
 from src.task_contract import effective_web_allowed
+from src.tool_capabilities import public_web_runtime_available
 
 
 logger = logging.getLogger(__name__)
@@ -467,7 +468,26 @@ def decision_policy(
     assessment = state.get("assessment") or {}
     update = decide_recovery_action(state, assessment)
     action = str(update.get("workflow_action") or "")
-    if action == WorkflowAction.REWORK.value:
+    if action == WorkflowAction.LENGTH_REWRITE.value:
+        issues = list(assessment.get("issues") or [])
+        target = parse_length_target(
+            str(_current_task(state).get("task_description") or "")
+        )
+        limits = (
+            f"目标字数范围：{target.get('min') or 0}～{target.get('max') or '不限'}字。"
+            if target is not None
+            else "严格修复确定性字数缺陷。"
+        )
+        update["worker_state"] = _worker_state_with_feedback(
+            state,
+            {
+                "mode": "length_rewrite",
+                "issues": issues,
+                "instructions": f"{limits}\n{_issue_instructions(issues)}".strip(),
+                "source_result": deepcopy(state.get("current_result") or {}),
+            },
+        )
+    elif action == WorkflowAction.REWORK.value:
         issues = list(assessment.get("issues") or [])
         recovery_state = {**state, **update}
         update["worker_state"] = _worker_state_with_feedback(
@@ -658,6 +678,10 @@ def needs_user_input(
             else ["UPLOAD_RESOURCES", "REWORK", "EVIDENCE_RECOVERY", "NEXT", "DONE"]
         )
     )
+    if category == "EVIDENCE_GAP" and not public_web_runtime_available():
+        accepted_choices = [
+            choice for choice in accepted_choices if choice != "AUTHORIZE_WEB"
+        ]
     evidence_descriptions = [
         str(issue.get("description") or "").strip()
         for issue in issues
@@ -678,6 +702,10 @@ def needs_user_input(
             else "Provide the missing resource or concrete guidance for the affected task."
         )
     )
+    blocker_id = str(
+        pending.get("blocker_id")
+        or f"{task_id}:p{int(state.get('plan_revision', 1) or 1)}:legacy"
+    )
     payload = {
         "type": "needs_user_input",
         "guidance_text": guidance,
@@ -686,6 +714,8 @@ def needs_user_input(
         "affected_task": task_id,
         "issues": issues,
         "accepted_choices": accepted_choices,
+        "blocker_id": blocker_id,
+        "blocker_status": "ACTIVE",
     }
     resumed = interrupt(payload)
     if isinstance(resumed, dict):
@@ -791,6 +821,13 @@ def needs_user_input(
         "workflow_action": action,
         "pending_user_action": policy_update.get("pending_user_action", {}),
         "docs": resumed_docs,
+        "blocker_resolution": {
+            "blocker_id": blocker_id,
+            "blocker_status": "RESOLVED",
+            "action": action,
+            "choice": requested_choice or "UNSPECIFIED",
+            "task_id": task_id,
+        },
     }
     if special_choice_accepted and requested_choice == "ACCEPT_EVIDENCE_GAP":
         update["accepted_evidence_gaps"] = accepted_evidence_gaps
@@ -894,15 +931,29 @@ def needs_user_input(
         update["report_status"] = derive_report_status(
             state.get("tasks") or [], statuses
         )
-    if action == WorkflowAction.REWORK.value and "worker_state" not in update:
+    if (
+        action in {WorkflowAction.REWORK.value, WorkflowAction.LENGTH_REWRITE.value}
+        and "worker_state" not in update
+    ):
+        feedback_mode = (
+            "length_rewrite"
+            if action == WorkflowAction.LENGTH_REWRITE.value
+            else "user_resume"
+        )
         update["worker_state"] = _worker_state_with_feedback(
             state,
             {
-                "mode": "user_resume",
+                "mode": feedback_mode,
                 "issues": issues,
                 "instructions": text or _issue_instructions(issues) or guidance,
-                "recovery_plan": _build_recovery_plan(
-                    {**state, **update}, issues, mode="rework"
+                **(
+                    {"source_result": deepcopy(state.get("current_result") or {})}
+                    if feedback_mode == "length_rewrite"
+                    else {
+                        "recovery_plan": _build_recovery_plan(
+                            {**state, **update}, issues, mode="rework"
+                        )
+                    }
                 ),
             },
         )
@@ -911,7 +962,8 @@ def needs_user_input(
         update["messages"] = [message]
         update["decision"] = action
     logger.info(
-        "User blocker decision: task=%s category=%s choice=%s action=%s uploaded_files=%s",
+        "User blocker decision: blocker=%s task=%s category=%s choice=%s action=%s uploaded_files=%s",
+        blocker_id,
         task_id,
         category,
         requested_choice or "UNSPECIFIED",

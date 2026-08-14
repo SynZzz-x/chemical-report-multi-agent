@@ -31,7 +31,7 @@ generate_figure, generate_table, visualization, covers_sections
 3. “建议章节”非空时，一个任务可以通过 `covers_sections` 覆盖同一 container 下多个连续、语义紧密且工具/证据策略一致的 content 章节，但不得跨 container 合并。所有 content 章节必须按原顺序被覆盖且只能覆盖一次；不得机械地为每个父标题和子标题分别创建任务。“建议章节”为空时，可以自行设计执行章节，并把设计出的章节名称写入对应任务的 `covers_sections`。
 4. 通常将一份报告规划为约 6～12 个适中粒度的执行任务，但这只是软目标。简单且依赖相邻内容的小节应合并；独立主题或需要不同工具、证据策略的内容应拆分；不得截断章节来满足数量目标。
 5. 不为摘要或 Abstract 创建独立任务，摘要由后续汇总节点生成。
-6. 每个任务负责一个清晰执行单元，并在 `task_description` 中按 `covers_sections` 顺序要求 Worker 保留对应 Markdown 子标题，同时写明分析重点、证据要求、交付形式和字数要求。
+6. 每个任务负责一个清晰执行单元，并在 `task_description` 中按 `covers_sections` 顺序要求 Worker 保留对应 Markdown 子标题，同时写明分析重点、证据要求、交付形式和字数要求。`task_type="synthesis"` 例外：只生成正文，不得要求输出 Markdown 章节标题，标题由最终报告组装器根据 Outline 添加。
 7. 判断 `use_rag` 的唯一语义标准是“当前任务是否需要新增知识库证据”。需要从知识库提取新事实、参数、案例、文件内容或来源证据时设置 `use_rag=true`；只介绍报告背景、目的、范围、章节结构、全文采用知识库作为依据，或者只总结已经生成并验证过的前文章节时设置 `use_rag=false`。
 8. 结论、总结等只允许归纳已验收前文章节的任务必须设置 `task_type="synthesis"`。此类任务必须同时满足：`use_rag=false`、`use_web=false`、`query=""`、`use_resources=[]`、`generate_figure=false`、`generate_table=false`、`visualization=null`；任务描述必须明确禁止新增事实、数字、因果关系、实验、统计分析、操作建议、控制策略和不存在的检索行为。引言、背景等普通概述不得误标为 `synthesis`。
 9. `use_rag=true` 时必须提供能够支持当前任务的非空检索词，不得虚构文件名、引用或检索结果。`use_rag=false` 时 `query` 必须严格为 `""`，任务描述中可以出现“知识库”“引用”“依据”等背景性表述。

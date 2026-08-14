@@ -154,6 +154,63 @@ def test_tool_manager_accepts_only_supported_exact_spider_aliases(requirement):
     assert initialized == ["spider_tool"]
 
 
+def test_tool_manager_excludes_tool_that_failed_runtime_initialization():
+    class UnavailableSpider:
+        def __init__(self, _config):
+            self.name = "spider_tool"
+
+        def is_available(self):
+            return False
+
+        def validate_task(self, _task):
+            return True
+
+    @dataclass
+    class Config:
+        ENABLED_TOOLS: tuple[str, ...] = ("SpiderTool",)
+
+    manager = ToolManager.__new__(ToolManager)
+    manager.config = Config()
+    manager.tool_classes = {"SpiderTool": UnavailableSpider}
+
+    assert manager.get_available_tools_for_task(
+        {"use_web": True, "tool_requirements": ["spider_tool"]}
+    ) == []
+
+
+def test_length_rewrite_execution_disables_tools_and_carries_original_result():
+    source_result = {
+        "task_id": "T1",
+        "text_output": "需要压缩的原正文。[E1]",
+        "citations": [{"evidence_id": "E1"}],
+        "tables": [{"title": "参数表"}],
+    }
+
+    execution_task, instructions, _ = AutonomousToolNode._prepare_execution_task(
+        {
+            "task_id": "T1",
+            "use_rag": True,
+            "use_web": True,
+            "query": "原查询",
+            "tool_requirements": ["chemical_knowledge_base_tool", "spider_tool"],
+        },
+        {
+            "execution_feedback": {
+                "mode": "length_rewrite",
+                "instructions": "压缩到 500 字以内。",
+                "source_result": source_result,
+            }
+        },
+    )
+
+    assert execution_task["use_rag"] is False
+    assert execution_task["use_web"] is False
+    assert execution_task["query"] == ""
+    assert execution_task["tool_requirements"] == []
+    assert execution_task["_length_rewrite_source_result"] == source_result
+    assert "不得新增事实" in instructions
+
+
 @pytest.mark.parametrize(
     "task",
     [

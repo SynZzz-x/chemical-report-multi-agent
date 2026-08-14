@@ -19,6 +19,7 @@ from src.report_acceptance import (
     derive_report_status,
     record_section_status,
 )
+from src.tool_capabilities import public_web_runtime_available
 
 
 class WorkflowAction(str, Enum):
@@ -31,6 +32,8 @@ class WorkflowAction(str, Enum):
     NEEDS_USER_INPUT = "NEEDS_USER_INPUT"
     ACCEPT_WITH_WARNING = "ACCEPT_WITH_WARNING"
     RETRY_VERIFIER = "RETRY_VERIFIER"
+    LENGTH_REWRITE = "LENGTH_REWRITE"
+    SYNTHESIS_REWRITE = "SYNTHESIS_REWRITE"
 
 
 class IssueCategory(str, Enum):
@@ -304,10 +307,24 @@ def _pending_user_action(
     state: Dict[str, Any],
     assessment: Dict[str, Any],
 ) -> Dict[str, Any]:
+    task_id = _current_task_id(state)
+    task_revision = int((state.get("task_revisions") or {}).get(task_id, 1) or 1)
+    plan_revision = int(state.get("plan_revision", 1) or 1)
+    blocker_sequence = max(
+        int((state.get("task_retry_count") or {}).get(task_id, 0) or 0),
+        int((state.get("evidence_recovery_count") or {}).get(task_id, 0) or 0),
+        int((state.get("verifier_retry_count") or {}).get(task_id, 0) or 0),
+        1,
+    )
     pending = {
         "category": category.value,
-        "task_id": _current_task_id(state),
+        "task_id": task_id,
         "issues": list(assessment.get("issues") or []),
+        "blocker_id": (
+            f"{task_id}:p{plan_revision}:t{task_revision}:"
+            f"{category.value}:{blocker_sequence}"
+        ),
+        "blocker_status": "ACTIVE",
     }
     if category is IssueCategory.EVIDENCE_GAP:
         evidence_issues = [
@@ -317,6 +334,11 @@ def _pending_user_action(
             and classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
         ]
         accepted_choices = list(_EVIDENCE_USER_CHOICES[:-1])
+        web_available = public_web_runtime_available()
+        if not web_available:
+            accepted_choices = [
+                choice for choice in accepted_choices if choice != "AUTHORIZE_WEB"
+            ]
         if any(is_waivable_evidence_gap(issue) for issue in evidence_issues):
             accepted_choices.append("ACCEPT_EVIDENCE_GAP")
         descriptions = [
@@ -325,11 +347,18 @@ def _pending_user_action(
             if str(issue.get("description") or "").strip()
         ]
         gap_list = "\n".join(f"- {description}" for description in descriptions)
-        choice_guidance = (
-            "上传补充资料、授权公开网络检索、调整任务要求，"
-            "或接受仅报告现有证据及缺口。"
-            if "ACCEPT_EVIDENCE_GAP" in accepted_choices
-            else "上传补充资料、授权公开网络检索，或调整任务要求。"
+        choices_for_guidance = ["上传补充资料"]
+        if "AUTHORIZE_WEB" in accepted_choices:
+            choices_for_guidance.append("授权公开网络检索")
+        choices_for_guidance.append("调整任务要求")
+        if "ACCEPT_EVIDENCE_GAP" in accepted_choices:
+            choices_for_guidance.append("接受仅报告现有证据及缺口")
+        choice_guidance = "、".join(choices_for_guidance) + "。"
+        runtime_guidance = (
+            "\n当前服务器未提供可用的公开网络检索工具；请先安装并初始化该能力，"
+            "或选择上传资料/调整要求。"
+            if not web_available
+            else ""
         )
         pending.update(
             {
@@ -338,6 +367,7 @@ def _pending_user_action(
                     "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
                     f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
                     f"请在页面的阻塞处理区选择：{choice_guidance}"
+                    f"{runtime_guidance}"
                 ),
             }
         )
@@ -409,6 +439,14 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         return update
 
     category = classify_assessment(assessment, state)
+    task = _current_task(state)
+    is_synthesis = str(task.get("task_type") or "") == "synthesis"
+    issue_codes = {
+        str(issue.get("code") or "").strip().upper()
+        for issue in assessment.get("issues") or []
+        if isinstance(issue, dict)
+        and str(issue.get("code") or "").strip().upper() not in _VERIFIER_CODES
+    }
     in_progress_statuses = record_section_status(
         state,
         BLOCKED,
@@ -426,11 +464,27 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
             return update
 
+    if is_synthesis and category in {
+        IssueCategory.CONTENT_DEFECT,
+        IssueCategory.EVIDENCE_GAP,
+    }:
+        retries = task_retry_count.get(task_id, 0)
+        if retries < MAX_CONTENT_RETRIES:
+            task_retry_count[task_id] = retries + 1
+            update["workflow_action"] = WorkflowAction.SYNTHESIS_REWRITE.value
+            return update
+        # Synthesis never falls through into ordinary evidence recovery.
+        category = IssueCategory.CONTENT_DEFECT
+
     if category is IssueCategory.CONTENT_DEFECT:
         retries = task_retry_count.get(task_id, 0)
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
-            update["workflow_action"] = WorkflowAction.REWORK.value
+            update["workflow_action"] = (
+                WorkflowAction.LENGTH_REWRITE.value
+                if issue_codes and issue_codes <= {"TOO_SHORT", "TOO_LONG"}
+                else WorkflowAction.REWORK.value
+            )
             return update
 
         warning = _content_retry_warning(

@@ -103,6 +103,7 @@ class State(TypedDict, total=False):
     task_patch_count: Dict[str, int]
     job_patch_count: int
     pending_user_action: Dict[str, Any]
+    blocker_resolution: Dict[str, Any]
     plan_patch_history: List[Dict[str, Any]]
     verification_warnings: List[Dict[str, Any]]
     accepted_evidence_gaps: Dict[str, Dict[str, Any]]

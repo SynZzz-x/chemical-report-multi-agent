@@ -58,6 +58,8 @@ def route_planner_confirm(state: State):
 
 def route_workflow_policy(state: State) -> str:
     route = route_policy(state)
+    if route == "SYNTHESIS_REWRITE":
+        return "SYNTHESIS_REWORK"
     if (
         route in {"REWORK", "EVIDENCE_RECOVERY"}
         and _execution_node(state) == "Synthesis"
@@ -68,6 +70,8 @@ def route_workflow_policy(state: State) -> str:
 
 def route_after_execution_blocker(state: State) -> str:
     route = route_after_blocker(state)
+    if route == "SYNTHESIS_REWRITE":
+        return "SYNTHESIS_REWORK"
     if (
         route in {"REWORK", "EVIDENCE_RECOVERY"}
         and _execution_node(state) == "Synthesis"
@@ -150,6 +154,7 @@ class WorkFlowBase(StateGraph):
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
                     "REWORK": "Worker",
+                    "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
@@ -167,6 +172,7 @@ class WorkFlowBase(StateGraph):
                 route_after_execution_blocker,
                 {
                     "REWORK": "Worker",
+                    "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
                 },
@@ -178,6 +184,7 @@ class WorkFlowBase(StateGraph):
                 route_after_execution_blocker,
                 {
                     "REWORK": "Worker",
+                    "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "NEXT": "Planner",

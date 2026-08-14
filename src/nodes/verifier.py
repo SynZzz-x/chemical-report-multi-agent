@@ -500,6 +500,7 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     if not _assessment_elements_are_valid(assessment):
         return _contract_error_assessment(assessment, tasks, cursor)
     current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
+    is_synthesis = str(current_task.get("task_type") or "") == "synthesis"
     description = str(current_task.get("task_description") or "")
     requires_table = bool(current_task.get("generate_table")) or any(
         marker in description for marker in ("表格", "数据表", "生成表")
@@ -519,6 +520,21 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
     for raw_issue in assessment["issues"]:
         issue = dict(raw_issue)
         code = str(issue.get("code") or "UNSPECIFIED_ISSUE").strip().upper()
+        issue_text = " ".join(
+            (
+                str(issue.get("description") or ""),
+                str(issue.get("suggestion") or ""),
+            )
+        ).casefold()
+        if (
+            is_synthesis
+            and code == "CONTENT_DEFECT"
+            and any(
+                marker in issue_text
+                for marker in ("markdown章节标题", "markdown标题")
+            )
+        ):
+            continue
         if code == "MISSING_TABLE" and not requires_table:
             continue
         if code in {"MISSING_IMAGE", "MISSING_FIGURE"} and not requires_image:

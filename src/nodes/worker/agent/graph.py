@@ -265,6 +265,10 @@ class BaseWorkerTool(ABC):
             return False
         return True
 
+    def is_available(self) -> bool:
+        """Return whether the tool finished runtime initialization successfully."""
+        return True
+
     def get_tool_info(self) -> Dict[str, Any]:
         """获取工具信息"""
         return {
@@ -600,6 +604,13 @@ class SpiderTool(BaseWorkerTool):
 
     def get_tool_name(self) -> str:
         return "spider_tool"
+
+    def is_available(self) -> bool:
+        return (
+            bool(getattr(self.config, "SPIDER_ENABLED", True))
+            and self._initialized
+            and self.scraper is not None
+        )
 
     def get_tool_description(self) -> str:
         return f"""根据任务描述提取化工领域关键词并进行网页爬取，获取最新的网络信息供参考。每个任务最多爬取 {self.config.MAX_SPIDER_RESULTS} 个网页。"""
@@ -1330,6 +1341,10 @@ class ToolManager:
             except Exception as exc:
                 print(f"⚠️ 实例化工具 {tool_name} 失败: {exc}")
                 continue
+            availability = getattr(tool_instance, "is_available", None)
+            if callable(availability) and not availability():
+                print(f"⚠️ 工具 {tool_instance.name} 运行时不可用，已从模型工具列表移除")
+                continue
             if tool_instance.name in {tool.name for tool in available_tools}:
                 continue
             if tool_instance.validate_task(task):
@@ -1389,6 +1404,22 @@ class AutonomousToolNode:
         if not isinstance(feedback, dict):
             return execution_task, "", cleaned_worker_state
 
+        feedback_mode = str(feedback.get("mode") or "").strip()
+        if feedback_mode == "length_rewrite":
+            source_result = feedback.get("source_result")
+            execution_task["use_rag"] = False
+            execution_task["use_web"] = False
+            execution_task["allow_web_fallback"] = False
+            execution_task["query"] = ""
+            execution_task["use_resources"] = []
+            execution_task["tool_requirements"] = []
+            execution_task["generate_figure"] = False
+            execution_task["generate_table"] = False
+            execution_task["visualization"] = None
+            execution_task["_length_rewrite_source_result"] = (
+                deepcopy(source_result) if isinstance(source_result, dict) else {}
+            )
+
         recovery_plan = feedback.get("recovery_plan")
         if isinstance(recovery_plan, dict):
             context = execution_context or {}
@@ -1415,6 +1446,19 @@ class AutonomousToolNode:
             ]
 
         instructions = str(feedback.get("instructions") or "").strip()
+        if feedback_mode == "length_rewrite":
+            source_text = str(
+                (execution_task.get("_length_rewrite_source_result") or {}).get(
+                    "text_output"
+                )
+                or ""
+            ).strip()
+            instructions = (
+                f"{instructions}\n"
+                "这是专用篇幅改写：只能压缩、删减或在篇幅不足时基于原句补齐；"
+                "不得新增事实、数字、来源、引用编号或因果关系；不得调用任何工具。"
+                f"\n原正文：\n{source_text}"
+            ).strip()
         if isinstance(recovery_plan, dict):
             serialized_plan = json.dumps(recovery_plan, ensure_ascii=False)
             instructions = (
@@ -1642,6 +1686,29 @@ class AutonomousToolNode:
                 graph_result=graph_result,
                 evidence_coverage=coverage,
             )
+
+            source_result = current_task.get("_length_rewrite_source_result")
+            if isinstance(source_result, dict) and source_result:
+                for field in (
+                    "tables",
+                    "figures",
+                    "sources_used",
+                    "citations",
+                    "tool_calls",
+                    "tool_usage_stats",
+                    "graph_spec",
+                    "evidence_coverage",
+                ):
+                    task_result[field] = deepcopy(
+                        source_result.get(field) or task_result.get(field)
+                    )
+                task_result["figures_generated"] = len(task_result.get("figures") or [])
+                task_result["knowledge_base_used"] = bool(
+                    source_result.get("knowledge_base_used")
+                )
+                task_result["spider_results_used"] = bool(
+                    source_result.get("spider_results_used")
+                )
 
             all_results = state.get("all_results", []).copy()
             all_results.append(task_result)

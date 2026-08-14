@@ -550,6 +550,37 @@ def test_sanitizer_keeps_malformed_failed_assessment_from_becoming_pass():
     assert sanitized["issues"][0]["code"] == "ASSESSMENT_CONTRACT_ERROR"
 
 
+def test_synthesis_verifier_ignores_markdown_heading_requirement():
+    state = _state()
+    state["tasks"][0].update(
+        {
+            "task_type": "synthesis",
+            "task_name": "结论",
+            "task_description": "总结前文，不输出标题。",
+        }
+    )
+    assessment = {
+        "status": "FAILED",
+        "current_section": "结论",
+        "issues": [
+            {
+                "code": "CONTENT_DEFECT",
+                "category": "CONTENT_DEFECT",
+                "description": "缺少任务要求的Markdown章节标题‘## 结论’。",
+                "suggestion": "补充Markdown标题。",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": [],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    assert sanitized["status"] == "PASS"
+    assert sanitized["issues"] == []
+
+
 @pytest.mark.parametrize("code", ["LLM_ERROR", "LLM_NOT_ENABLED"])
 def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     monkeypatch, code
