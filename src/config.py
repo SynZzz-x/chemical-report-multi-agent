@@ -37,6 +37,7 @@ DEFAULT_CONCEPT_GRAPH_MAX_EDGES = 40
 DEFAULT_EVIDENCE_RAG_MAX_QUERIES = 3
 DEFAULT_EVIDENCE_RAG_ADAPTIVE_RESERVE = 1
 DEFAULT_EVIDENCE_WEB_MAX_QUERIES = 3
+DEFAULT_LENGTH_REWRITE_SAFETY_RATIO = 0.92
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class AppConfig:
     deepseek_api_key: str | None = field(repr=False)
     deepseek_base_url: str
     deepseek_model: str
+    length_rewrite_safety_ratio: float
     rag_settings: RAGSettings
     concept_graph_settings: ConceptGraphSettings
 
@@ -168,6 +170,13 @@ def _positive_float_from_env(name: str, default: float) -> float:
     return parsed
 
 
+def _bounded_ratio_from_env(name: str, default: float) -> float:
+    parsed = _positive_float_from_env(name, default)
+    if not 0.8 <= parsed <= 1.0:
+        raise ValueError(f"{name} must be between 0.8 and 1.0.")
+    return parsed
+
+
 def _bool_from_env(name: str, default: bool) -> bool:
     value = (get_env(name, "true" if default else "false") or "").strip().lower()
     if value in {"1", "true", "yes", "on"}:
@@ -216,6 +225,9 @@ def get_app_config() -> AppConfig:
         deepseek_model=(
             get_env("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
             or DEFAULT_DEEPSEEK_MODEL
+        ),
+        length_rewrite_safety_ratio=_bounded_ratio_from_env(
+            "LENGTH_REWRITE_SAFETY_RATIO", DEFAULT_LENGTH_REWRITE_SAFETY_RATIO
         ),
         rag_settings=RAGSettings(
             embedding_base_url=(

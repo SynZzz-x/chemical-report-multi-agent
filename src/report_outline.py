@@ -144,10 +144,10 @@ def planner_outline(sections: Sequence[Any] | None) -> list[dict[str, str]]:
     ]
 
 
-def content_container_paths(
+def section_container_paths(
     sections: Sequence[Any] | None,
 ) -> dict[str, tuple[str, ...]]:
-    """Map content sections to their ordered ancestor container headings."""
+    """Map content and system sections to ordered ancestor containers."""
 
     paths: dict[str, tuple[str, ...]] = {}
     stack: list[OutlineSection] = []
@@ -159,11 +159,26 @@ def content_container_paths(
                 stack[-1].level is None or stack[-1].level >= item.level
             ):
                 stack.pop()
-        if item.kind == "content" and stack:
+        if item.kind in {"content", "system_generated"} and stack:
             paths[item.raw] = tuple(container.raw for container in stack)
         if item.kind == "container":
             stack.append(item)
     return paths
+
+
+def content_container_paths(
+    sections: Sequence[Any] | None,
+) -> dict[str, tuple[str, ...]]:
+    """Map content sections to their ordered ancestor container headings."""
+
+    content_names = {
+        item.raw for item in classify_outline(sections) if item.kind == "content"
+    }
+    return {
+        section: path
+        for section, path in section_container_paths(sections).items()
+        if section in content_names
+    }
 
 
 def content_parent_map(sections: Sequence[Any] | None) -> dict[str, str]:

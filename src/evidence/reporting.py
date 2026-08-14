@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import os
 from typing import Any
 
 
@@ -40,8 +41,8 @@ def format_evidence_table(
     if include_section:
         lines.extend(
             [
-                "| 所属章节 | 证据编号 | 来源 | 定位或链接 | 支持内容 |",
-                "| --- | --- | --- | --- | --- |",
+                "| 证据编号 | 来源与支撑章节 | 定位 | 摘要 |",
+                "| --- | --- | --- | --- |",
             ]
         )
     else:
@@ -53,7 +54,11 @@ def format_evidence_table(
         )
     for citation in citations:
         evidence_id = _escape_cell(citation.get("evidence_id"))
-        locator = citation.get("locator") or citation.get("url") or citation.get("file_path")
+        locator = citation.get("locator") or citation.get("url")
+        if not locator:
+            locator = citation.get("file_name") or os.path.basename(
+                str(citation.get("file_path") or "")
+            )
         values = {
             "evidence_id": evidence_id,
             "source_type": _escape_cell(citation.get("source_type")),
@@ -66,8 +71,10 @@ def format_evidence_table(
             source = " / ".join(
                 value for value in (values["source_type"], values["title"]) if value
             )
+            if values["section_title"]:
+                source = f"{source or '未命名来源'}（支撑章节：{values['section_title']}）"
             lines.append(
-                "| {section_title} | [{evidence_id}] | {source} | {locator} | {supporting_text} |".format(
+                "| [{evidence_id}] | {source} | {locator} | {supporting_text} |".format(
                     source=source,
                     **values,
                 )

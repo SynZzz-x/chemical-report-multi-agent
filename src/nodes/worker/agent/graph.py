@@ -1460,7 +1460,9 @@ class AutonomousToolNode:
             safety_target = ""
             if length_target and length_target.get("max") is not None:
                 hard_max = int(length_target["max"])
-                target_max = int(hard_max * 0.92)
+                target_max = int(
+                    hard_max * get_app_config().length_rewrite_safety_ratio
+                )
                 if length_target.get("min") is not None:
                     target_max = max(target_max, int(length_target["min"]))
                 safety_target = (

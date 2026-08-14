@@ -2,35 +2,39 @@ from pathlib import Path
 
 from docx import Document
 
+from src.evidence.reporting import format_evidence_table
 from src.utils.md_to_docx import md_to_docx
 from src.utils.md_to_pdf import md_to_pdf
 
 
 def test_long_four_column_evidence_appendix_renders_to_pdf(tmp_path):
-    rows = "\n".join(
-        "| [E{index}] | {source} | {locator} | {summary} |".format(
-            index=index,
-            source=(
+    citations = [
+        {
+            "evidence_id": f"E{index}",
+            "title": "聚乙烯生产工艺与质量控制概述",
+            "file_path": (
                 "/home/zsy/my_project/agent_project/chemical-report-multi-agent/"
                 "document/聚乙烯生产工艺与质量控制概述.docx"
             ),
-            locator=f"第{index}章/反应条件与质量指标/详细定位",
-            summary="温度、压力和催化剂对产品质量的证据摘要。" * 12,
-        )
+            "locator": f"第{index}章/反应条件与质量指标/详细定位",
+            "supporting_text": "温度、压力和催化剂对产品质量的证据摘要。" * 12,
+            "section_title": f"第{index}节",
+        }
         for index in range(1, 35)
+    ]
+    evidence = format_evidence_table(
+        citations,
+        heading_level=2,
+        include_section=True,
     )
-    markdown = (
-        "# 报告\n\n## 证据来源\n\n"
-        "| 证据编号 | 来源 | 定位 | 摘要 |\n"
-        "| --- | --- | --- | --- |\n"
-        f"{rows}\n"
-    )
+    markdown = f"# 报告\n\n{evidence}\n"
     output = tmp_path / "evidence.pdf"
 
     md_to_pdf(markdown, str(output))
 
     assert output.exists()
     assert output.stat().st_size > 0
+    assert "/home/zsy" not in evidence
 
 
 def test_docx_heading_number_never_starts_with_zero_when_parent_is_missing(tmp_path):

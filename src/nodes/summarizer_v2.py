@@ -29,6 +29,7 @@ from ..report_outline import (
     classify_outline,
     content_container_paths,
     is_reference_section,
+    section_container_paths,
     section_markdown_level,
 )
 from ..state import State
@@ -494,8 +495,28 @@ def _assemble_markdown(
         include_section=True,
         heading_title=(reference_item.raw if reference_item else "证据来源"),
     )
+    all_container_paths = section_container_paths(_intake_sections(state))
+    reference_container_path = tuple(
+        all_container_paths.get(reference_item.raw, ()) if reference_item else ()
+    )
     reference_inserted = False
     active_container_path: tuple[str, ...] = ()
+
+    def append_container_headings(container_path: tuple[str, ...]) -> None:
+        nonlocal active_container_path
+        common_length = 0
+        for current, previous in zip(container_path, active_container_path):
+            if current != previous:
+                break
+            common_length += 1
+        for depth, container_title in enumerate(
+            container_path[common_length:],
+            start=common_length,
+        ):
+            heading_level = min(depth + 2, 6)
+            blocks.append(f"{'#' * heading_level} {container_title}")
+        active_container_path = container_path
+
     for section in sections:
         covered_ordinals = [
             outline_ordinals[covered]
@@ -509,6 +530,7 @@ def _assemble_markdown(
             and covered_ordinals
             and reference_item.ordinal < min(covered_ordinals)
         ):
+            append_container_headings(reference_container_path)
             blocks.append(reference_markdown)
             reference_inserted = True
         body = _strip_duplicate_leading_heading(
@@ -516,18 +538,7 @@ def _assemble_markdown(
         )
         container_path = tuple(section.get("container_path") or [])
         if container_path:
-            common_length = 0
-            for current, previous in zip(container_path, active_container_path):
-                if current != previous:
-                    break
-                common_length += 1
-            for depth, container_title in enumerate(
-                container_path[common_length:],
-                start=common_length,
-            ):
-                heading_level = min(depth + 2, 6)
-                blocks.append(f"{'#' * heading_level} {container_title}")
-            active_container_path = container_path
+            append_container_headings(container_path)
             section_markdown = body.rstrip()
         elif section.get("covers_sections"):
             active_container_path = ()
@@ -552,6 +563,7 @@ def _assemble_markdown(
         )
         blocks.append(section_markdown)
     if reference_markdown and not reference_inserted:
+        append_container_headings(reference_container_path)
         blocks.append(reference_markdown)
     return "\n\n".join(block for block in blocks if block).rstrip() + "\n"
 

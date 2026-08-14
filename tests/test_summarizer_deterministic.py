@@ -154,8 +154,8 @@ def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_pa
     assert "### 背景" in markdown
     assert "### 分析方法" in markdown
     assert markdown.count("## 证据来源") == 1
-    assert "| 引言 | [E1]" in markdown
-    assert "| 工艺分析 | [E2]" in markdown
+    assert "| [E1] | 质量指南（支撑章节：引言）" in markdown
+    assert "| [E2] | 工艺手册（支撑章节：工艺分析）" in markdown
     assert "工艺分析正文 [E2]" in markdown
     assert "LLM Generation Failed" not in markdown
 
@@ -202,6 +202,44 @@ def test_reference_section_is_projected_from_citations_at_outline_position(
     assert "质量指南" in markdown
     assert "工艺手册" in markdown
     assert "清单为空" not in markdown
+
+
+def test_nested_reference_projection_restores_parent_container(monkeypatch, tmp_path):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status("VERIFIED_PASS"),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {**state["tasks"][0], "covers_sections": ["1. 引言"]},
+        {**state["tasks"][1], "covers_sections": ["2. 工艺分析"]},
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": [
+                        "1. 引言",
+                        "2. 工艺分析",
+                        "5. 附录",
+                        "5.1 证据来源",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.count("## 5. 附录") == 1
+    assert markdown.count("### 5.1 证据来源") == 1
+    assert markdown.index("## 5. 附录") < markdown.index("### 5.1 证据来源")
 
 
 def test_report_assembly_restores_container_heading_for_grouped_tasks(

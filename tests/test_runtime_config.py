@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.limits import MAX_PLAN_TASKS
 from src.recovery.policy import (
     MAX_CONTENT_RETRIES,
@@ -49,3 +51,17 @@ def test_app_and_cli_use_shared_execution_config_consumer():
         source = (root / relative_path).read_text(encoding="utf-8")
         assert "from src.runtime_config import execution_config" in source
         assert "execution_config(" in source
+
+
+def test_length_rewrite_safety_ratio_is_loaded_and_bounded(monkeypatch):
+    from src import config as config_module
+
+    monkeypatch.setenv("LENGTH_REWRITE_SAFETY_RATIO", "0.9")
+    config_module.get_app_config.cache_clear()
+    assert config_module.get_app_config().length_rewrite_safety_ratio == 0.9
+
+    monkeypatch.setenv("LENGTH_REWRITE_SAFETY_RATIO", "0.5")
+    config_module.get_app_config.cache_clear()
+    with pytest.raises(ValueError, match="between 0.8 and 1.0"):
+        config_module.get_app_config()
+    config_module.get_app_config.cache_clear()

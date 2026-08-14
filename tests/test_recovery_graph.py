@@ -675,6 +675,7 @@ def test_terminal_task_accept_as_draft_commits_once_and_finishes(monkeypatch, ca
     assert [result["task_id"] for result in update["results"]] == ["T1", "T2", "T3"]
     assert update["section_status"]["T3"]["status"] == "USER_ACCEPTED_WARNING"
     assert update["report_status"] == "DRAFT_WITH_GAPS"
+    assert route_after_blocker({**state, **update}) == "DONE"
     assert (
         "User blocker decision: blocker=T3:p1:legacy task=T3 category=CONTENT_DEFECT "
         "choice=ACCEPT_AS_DRAFT action=DONE uploaded_files=false"

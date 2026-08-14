@@ -63,10 +63,19 @@ def _rewrite_nested(value: Any, local_display: Mapping[str, str]) -> Any:
     if isinstance(value, tuple):
         return tuple(_rewrite_nested(item, local_display) for item in value)
     if isinstance(value, Mapping):
-        return {
-            key: _rewrite_nested(item, local_display)
-            for key, item in value.items()
-        }
+        rewritten: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).strip().casefold()
+            if normalized_key == "evidence_id" and isinstance(item, str):
+                rewritten[key] = local_display.get(item.upper(), item.upper())
+            elif normalized_key == "evidence_ids" and isinstance(item, (list, tuple)):
+                rewritten[key] = [
+                    local_display.get(str(evidence_id).upper(), str(evidence_id).upper())
+                    for evidence_id in item
+                ]
+            else:
+                rewritten[key] = _rewrite_nested(item, local_display)
+        return rewritten
     return value
 
 

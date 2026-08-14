@@ -77,6 +77,26 @@ def test_evidence_table_contains_document_locator_and_web_url():
     assert "https://example.org/source" in table
 
 
+def test_report_reference_projection_is_four_columns_and_hides_absolute_paths():
+    table = format_evidence_table(
+        [
+            {
+                "evidence_id": "E1",
+                "title": "聚乙烯工艺说明",
+                "file_path": "/home/zsy/private/docs/process.docx",
+                "supporting_text": "温度影响熔融指数。",
+                "section_title": "工艺分析",
+            }
+        ],
+        heading_level=2,
+        include_section=True,
+    )
+
+    assert "| 证据编号 | 来源与支撑章节 | 定位 | 摘要 |" in table
+    assert "[E1] | 聚乙烯工艺说明（支撑章节：工艺分析） | process.docx |" in table
+    assert "/home/zsy" not in table
+
+
 def test_missing_concept_figure_is_appended_deterministically():
     markdown = append_missing_figures(
         "## 反应条件\n\n正文",
@@ -105,6 +125,16 @@ def test_cross_task_local_ids_receive_distinct_deterministic_display_ids():
             "text": "压力结论 [E1]。",
             "citations": [{"evidence_id": "E1", "title": "压力资料"}],
             "figures": [{"path": "/tmp/b.png", "evidence_ids": ["E1"]}],
+            "tables": [
+                {
+                    "title": "压力表",
+                    "evidence_id": "E1",
+                    "metadata": {"evidence_ids": ["E1"]},
+                }
+            ],
+            "graph_spec": {
+                "edges": [{"source": "压力", "target": "密度", "evidence_ids": ["E1"]}]
+            },
         },
     ]
 
@@ -117,3 +147,6 @@ def test_cross_task_local_ids_receive_distinct_deterministic_display_ids():
     assert normalized[1]["text"] == "压力结论 [E2]。"
     assert normalized[0]["figures"][0]["evidence_ids"] == ["E1"]
     assert normalized[1]["figures"][0]["evidence_ids"] == ["E2"]
+    assert normalized[1]["tables"][0]["evidence_id"] == "E2"
+    assert normalized[1]["tables"][0]["metadata"]["evidence_ids"] == ["E2"]
+    assert normalized[1]["graph_spec"]["edges"][0]["evidence_ids"] == ["E2"]
