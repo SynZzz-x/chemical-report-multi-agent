@@ -641,6 +641,46 @@ def test_user_can_explicitly_accept_content_warning_as_draft(monkeypatch, caplog
     ) in caplog.messages
 
 
+def test_terminal_task_accept_as_draft_commits_once_and_finishes(monkeypatch, caplog):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "ACCEPT_AS_DRAFT", "text": "", "docs": []},
+    )
+    caplog.set_level("INFO", logger="src.nodes.recovery")
+    state = graph_state(
+        cursor=2,
+        accepted_ids=("T1", "T2"),
+        pending_user_action={
+            "category": "CONTENT_DEFECT",
+            "task_id": "T3",
+            "issues": [{"code": "CONTENT_DEFECT", "description": "结论存在缺口"}],
+            "accepted_choices": ["REWORK", "ACCEPT_AS_DRAFT", "DONE"],
+        },
+    )
+    state["section_status"] = {
+        task_id: {
+            "status": "VERIFIED_PASS",
+            "accepted_by": "verifier",
+            "issues": [],
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+        for task_id in ("T1", "T2")
+    }
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "DONE"
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2", "T3"]
+    assert update["section_status"]["T3"]["status"] == "USER_ACCEPTED_WARNING"
+    assert update["report_status"] == "DRAFT_WITH_GAPS"
+    assert (
+        "User blocker decision: blocker=T3:p1:legacy task=T3 category=CONTENT_DEFECT "
+        "choice=ACCEPT_AS_DRAFT action=DONE uploaded_files=false"
+    ) in caplog.messages
+
+
 def test_authorize_web_is_execution_only_and_explicit(monkeypatch):
     monkeypatch.setattr(
         recovery_module,

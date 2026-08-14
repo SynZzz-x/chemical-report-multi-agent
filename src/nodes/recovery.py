@@ -23,6 +23,7 @@ from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
 from src.recovery.policy import (
     IssueCategory,
     WorkflowAction,
+    _continuation_action,
     classify_issue,
     commit_current_result,
     decide_recovery_action,
@@ -743,9 +744,9 @@ def needs_user_input(
         elif requested_choice in {"AUTHORIZE_WEB", "ADJUST_REQUIREMENT"}:
             requested_action = WorkflowAction.REWORK.value
         elif requested_choice == "ACCEPT_EVIDENCE_GAP":
-            requested_action = WorkflowAction.NEXT.value
+            requested_action = _continuation_action(state).value
         elif requested_choice == "ACCEPT_AS_DRAFT":
-            requested_action = WorkflowAction.NEXT.value
+            requested_action = _continuation_action(state).value
     elif requested_choice in _SPECIAL_RESUME_CHOICES:
         requested_action = None
 
@@ -910,7 +911,12 @@ def needs_user_input(
                 "instructions": adjusted_text,
             },
         )
-    if action == WorkflowAction.NEXT.value:
+    accepted_current_result = action == WorkflowAction.NEXT.value or (
+        action == WorkflowAction.DONE.value
+        and special_choice_accepted
+        and requested_choice in {"ACCEPT_EVIDENCE_GAP", "ACCEPT_AS_DRAFT"}
+    )
+    if accepted_current_result:
         update["results"] = commit_current_result(state)
         acceptance_status = (
             USER_ACCEPTED_GAP
