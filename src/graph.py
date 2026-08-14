@@ -16,15 +16,26 @@ from .nodes.recovery import (
     route_policy,
 )
 from .nodes.summarizer_v2 import summarizer
+from .nodes.synthesis import synthesis
 from .nodes.exiting import exiting
 # from .nodes.worker.agent.graph import router_node, execute_task_node, generate_result_node, route_decision
 from .nodes.worker.agent.graph import create_worker_workflow
 
 
+def _execution_node(state: State) -> str:
+    tasks = state.get("tasks") or []
+    cursor = int(state.get("cursor", 0) or 0)
+    if 0 <= cursor < len(tasks):
+        task = tasks[cursor]
+        if isinstance(task, dict) and task.get("task_type") == "synthesis":
+            return "Synthesis"
+    return "Worker"
+
+
 def route_planner(state: State):
     action = state.get("planner_action")
     if action == "PROCEED":
-        return "Worker"
+        return _execution_node(state)
     return "Planner_Confirm"
 
 
@@ -42,11 +53,39 @@ def route_planner_confirm(state: State):
         "FULL_REPLAN_ERROR",
     }:
         return "Planner_Confirm"
-    return "Worker"
+    return _execution_node(state)
+
+
+def route_workflow_policy(state: State) -> str:
+    route = route_policy(state)
+    if (
+        route in {"REWORK", "EVIDENCE_RECOVERY"}
+        and _execution_node(state) == "Synthesis"
+    ):
+        return "SYNTHESIS_REWORK"
+    return route
+
+
+def route_after_execution_blocker(state: State) -> str:
+    route = route_after_blocker(state)
+    if (
+        route in {"REWORK", "EVIDENCE_RECOVERY"}
+        and _execution_node(state) == "Synthesis"
+    ):
+        return "SYNTHESIS_REWORK"
+    return route
+
+
+def route_manual_verifier(state: State) -> str:
+    route = decision(state)
+    if route == "RETRY_WORKER" and _execution_node(state) == "Synthesis":
+        return "RETRY_SYNTHESIS"
+    return route
 
 
 _MANUAL_VERIFIER_ROUTES = {
     "RETRY_WORKER": "Worker",
+    "RETRY_SYNTHESIS": "Synthesis",
     "FULL_REPLAN": "Planner",
     "NEXT": "Planner",
     "DONE": "Summarizer",
@@ -88,6 +127,7 @@ class WorkFlowBase(StateGraph):
                 "Planner": "Planner",
                 "Planner_Confirm": "Planner_Confirm",
                 "Worker": "Worker",
+                "Synthesis": "Synthesis",
                 "Exit": "Exit",
             },
         )
@@ -96,6 +136,8 @@ class WorkFlowBase(StateGraph):
         worker = create_worker_workflow()
         self.add_node("Worker", worker)
         self.add_edge("Worker", "Verifier")
+        self.add_node("Synthesis", synthesis)
+        self.add_edge("Synthesis", "Verifier")
 
         if self.use_auto_verifier:
             self.add_node("Verifier", verifier_auto, metadata={"type":"auto"})
@@ -103,11 +145,12 @@ class WorkFlowBase(StateGraph):
             self.add_edge("Verifier", "DecisionPolicy")
             self.add_conditional_edges(
                 "DecisionPolicy",
-                route_policy,
+                route_workflow_policy,
                 {
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
                     "REWORK": "Worker",
+                    "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "PLAN_PATCH": "PlanPatcher",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
@@ -121,9 +164,10 @@ class WorkFlowBase(StateGraph):
             self.add_node("PlanPatcher", plan_patcher)
             self.add_conditional_edges(
                 "PlanPatcher",
-                route_after_blocker,
+                route_after_execution_blocker,
                 {
                     "REWORK": "Worker",
+                    "SYNTHESIS_REWORK": "Synthesis",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
                 },
             )
@@ -131,9 +175,10 @@ class WorkFlowBase(StateGraph):
             self.add_node("NeedsUserInput", needs_user_input)
             self.add_conditional_edges(
                 "NeedsUserInput",
-                route_after_blocker,
+                route_after_execution_blocker,
                 {
                     "REWORK": "Worker",
+                    "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
@@ -143,7 +188,7 @@ class WorkFlowBase(StateGraph):
             self.add_node("Verifier", verifier_manual, metadata={"type":"manual"})
             self.add_conditional_edges(
                 "Verifier",
-                decision,
+                route_manual_verifier,
                 _MANUAL_VERIFIER_ROUTES,
             )
 

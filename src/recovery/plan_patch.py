@@ -7,7 +7,7 @@ from os.path import basename
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.limits import MAX_PLAN_TASKS
-from src.task_contract import task_allows_web
+from src.task_contract import synthesis_semantic_error, task_allows_web
 from src.tool_names import canonical_tool_name
 
 from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
@@ -29,9 +29,10 @@ _UPDATE_FIELDS = {
     "use_resources",
     "tool_requirements",
     "visualization",
+    "task_type",
 }
 _OPERATION_NAMES = {"update_task", "move_before", "insert_before"}
-_TASK_TYPES = {"analysis", "summary", "inference"}
+_TASK_TYPES = {"analysis", "summary", "inference", "synthesis"}
 _BOOLEAN_TASK_FIELDS = {
     "use_rag",
     "use_web",
@@ -249,7 +250,9 @@ def _validate_task_fields(
 
     if "task_type" in task:
         if task["task_type"] not in _TASK_TYPES:
-            raise PatchValidationError("task_type must be analysis, summary, or inference")
+            raise PatchValidationError(
+                "task_type must be analysis, summary, inference, or synthesis"
+            )
     elif required:
         raise PatchValidationError("insert_before.task missing task_type")
 
@@ -303,7 +306,31 @@ def _validate_task_fields(
             )
 
 
-def _validate_task_consistency(task: Mapping[str, Any]) -> None:
+def _validate_task_consistency(
+    task: Mapping[str, Any], *, has_prior_task: bool
+) -> None:
+    if task.get("task_type") == "synthesis":
+        forbidden = []
+        for field in ("use_rag", "use_web", "generate_table", "generate_figure"):
+            if task.get(field) is True:
+                forbidden.append(field)
+        for field in ("query", "use_resources", "tool_requirements"):
+            if task.get(field):
+                forbidden.append(field)
+        if task.get("visualization") is not None:
+            forbidden.append("visualization")
+        if forbidden:
+            raise PatchValidationError(
+                "synthesis tasks must be tool-free; forbidden="
+                + ", ".join(forbidden)
+            )
+
+    synthesis_error = synthesis_semantic_error(
+        task, has_prior_task=has_prior_task
+    )
+    if synthesis_error:
+        raise PatchValidationError(synthesis_error)
+
     raw_requirements = task.get("tool_requirements")
     if raw_requirements is None:
         return
@@ -532,8 +559,8 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
 
     simulated_tasks = deepcopy(tasks)
     _apply_operations(simulated_tasks, operation_copies)
-    for task in simulated_tasks:
-        _validate_task_consistency(task)
+    for task_index, task in enumerate(simulated_tasks):
+        _validate_task_consistency(task, has_prior_task=task_index > 0)
     original_coverage = _section_coverage_sequence(tasks)
     if (
         original_coverage

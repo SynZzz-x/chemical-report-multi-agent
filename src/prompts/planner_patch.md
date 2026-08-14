@@ -30,8 +30,13 @@ Return one JSON object with exactly this top-level schema:
 ```
 
 For `update_task`, `changes` may contain only:
-task_name, task_description, query, use_rag, use_web, allow_web_fallback, generate_table,
+task_name, task_description, task_type, query, use_rag, use_web, allow_web_fallback, generate_table,
 generate_figure, use_resources, tool_requirements, visualization.
+
+Conclusion/summary aggregate tasks must use `task_type="synthesis"`. A synthesis task
+must set `use_rag=false`, `use_web=false`, `query=""`, `use_resources=[]`,
+`generate_table=false`, `generate_figure=false`, and `visualization=null`. Never label
+a task that requires new retrieval or analysis as synthesis.
 
 Use only task IDs and resources present in the supplied state. Never update, move,
 delete, cross, or insert before a completed or accepted task. Do not touch undeclared

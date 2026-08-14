@@ -36,6 +36,7 @@
 13. 除非用户明确要求，否则不得自行创建“知识库依据与说明”“知识库文件及引用说明”等章节。
 14. “知识目录”只用于判断 `use_rag/query`，其中的条目不能填写到 `use_resources`；`use_resources` 只能引用“可用资源”中的真实 Job 附件。
 15. 不得把主题相关自动升级为“必然存在细粒度因果关系、具体控制范围或定量依据”。当用户没有明确要求必须取得确定结论，而目录又未明确显示相应证据能力时，应把任务写成调查目标：找到证据则形成结论，未找到则准确报告可追溯的证据缺口；不得虚构结论。用户明确要求必须由证据支持的硬性结论时，应保留该硬性要求，不能用缺口披露替代。
+16. 结论、总结等只聚合已验收前文章节的任务必须设置 `task_type="synthesis"`，并同时满足 `use_rag=false`、`use_web=false`、`query=""`、`use_resources=[]`、`generate_figure=false`、`generate_table=false`、`visualization=null`。不得把需要新增检索或分析的普通章节标为 synthesis。
 
 # Output Contract
 只输出一个 JSON Object，顶层只能包含 `tasks`，不使用 Markdown 代码块或解释文字。

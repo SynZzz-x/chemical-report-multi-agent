@@ -6,14 +6,14 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.types import interrupt
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 from ..state import State, merge_docs
 from ..llm import get_llm
 from ..limits import MAX_PLAN_TASKS
 from ..report_outline import planner_outline, validate_task_coverage
 from ..rag.catalog import load_active_catalog
-from ..task_contract import task_allows_web
+from ..task_contract import synthesis_semantic_error, task_allows_web
 from ..tool_names import canonical_tool_name
 from .intake import web_authorization_directive
 
@@ -144,7 +144,7 @@ def _next_task_number(task_ids: List[str]) -> int:
     return max(numbers, default=0) + 1
 
 
-_REPLACEMENT_TASK_TYPES = {"analysis", "summary", "inference"}
+_REPLACEMENT_TASK_TYPES = {"analysis", "summary", "inference", "synthesis"}
 _REPLACEMENT_BOOLEAN_FIELDS = {
     "generate_figure",
     "generate_table",
@@ -220,6 +220,27 @@ def _validate_visualization_contract(visualization: Any) -> None:
         raise ValueError("visualization.allow_web_fallback must be a boolean")
 
 
+def _validate_synthesis_task(task: Dict[str, Any]) -> None:
+    if task.get("task_type") != "synthesis":
+        return
+    forbidden = []
+    for field in ("use_rag", "use_web", "generate_figure", "generate_table"):
+        if task.get(field) is True:
+            forbidden.append(field)
+    if str(task.get("query") or "").strip():
+        forbidden.append("query")
+    if task.get("use_resources"):
+        forbidden.append("use_resources")
+    if task.get("tool_requirements"):
+        forbidden.append("tool_requirements")
+    if task.get("visualization") is not None:
+        forbidden.append("visualization")
+    if forbidden:
+        raise ValueError(
+            "synthesis tasks must be tool-free; forbidden=" + ", ".join(forbidden)
+        )
+
+
 def _validate_generated_task_schema(candidate_tasks: Any) -> None:
     """Validate the exact model-facing task contract without legacy fields."""
     if not isinstance(candidate_tasks, list) or not candidate_tasks:
@@ -244,7 +265,9 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
             not isinstance(task["task_type"], str)
             or task["task_type"] not in _REPLACEMENT_TASK_TYPES
         ):
-            raise ValueError("task_type must be analysis, summary, or inference")
+            raise ValueError(
+                "task_type must be analysis, summary, inference, or synthesis"
+            )
         for field in _GENERATED_TASK_BOOLEAN_FIELDS:
             if not isinstance(task[field], bool):
                 raise ValueError(f"{field} must be a boolean")
@@ -254,6 +277,8 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
         _validate_string_list(task["covers_sections"], "covers_sections")
         if not task["covers_sections"]:
             raise ValueError("covers_sections must contain at least one section")
+
+        _validate_synthesis_task(task)
 
         visualization = task["visualization"]
         if visualization is None:
@@ -282,7 +307,9 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
             if field in task and not isinstance(task[field], bool):
                 raise ValueError(f"{field} must be a boolean")
         if "task_type" in task and task["task_type"] not in _REPLACEMENT_TASK_TYPES:
-            raise ValueError("task_type must be analysis, summary, or inference")
+            raise ValueError(
+                "task_type must be analysis, summary, inference, or synthesis"
+            )
         if "query" in task and not isinstance(task["query"], str):
             raise ValueError("query must be a string")
         for field in ("use_resources", "tool_requirements", "covers_sections"):
@@ -302,6 +329,7 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
                     )
             else:
                 _validate_visualization_contract(visualization)
+        _validate_synthesis_task(task)
 
 
 def _normalize_replacement_tasks(
@@ -590,7 +618,7 @@ def _validate_generated_task_semantics(
 ) -> None:
     web_authorized = policy_context.get("web_authorized") is True
 
-    for task in tasks:
+    for task_index, task in enumerate(tasks):
         task_text = " ".join(
             str(task.get(field) or "")
             for field in ("task_name", "task_description", "query")
@@ -604,6 +632,11 @@ def _validate_generated_task_semantics(
             raise ValueError(
                 f"task {task.get('task_id')} sets use_rag=false but query is not empty"
             )
+        synthesis_error = synthesis_semantic_error(
+            task, has_prior_task=task_index > 0
+        )
+        if synthesis_error:
+            raise ValueError(synthesis_error)
 
         assigned_resources = _resolve_assigned_resources(task, resources)
         requires_data = _requires_data_resource(normalized)

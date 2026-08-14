@@ -79,6 +79,7 @@ langgraph.types = _install_module("langgraph.types")
 langgraph.types.interrupt = lambda payload: None
 langgraph.graph = _install_module("langgraph.graph")
 langgraph.graph.StateGraph = object
+langgraph.graph.START = "__start__"
 langgraph.graph.END = "__end__"
 langgraph.graph.message = _install_module("langgraph.graph.message")
 langgraph.graph.message.BaseMessage = _Message

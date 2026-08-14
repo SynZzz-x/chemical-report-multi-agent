@@ -334,6 +334,38 @@ def test_insert_rejects_unknown_and_internal_task_fields():
         validate_plan_patch(patch_state(), patch)
 
 
+def test_insert_rejects_conclusion_that_would_enter_ordinary_worker():
+    patch = insert_before_patch()
+    inserted = patch["operations"][0]["task"]
+    inserted.update(
+        {
+            "task_name": "结论与建议",
+            "task_type": "analysis",
+            "covers_sections": ["结论与建议"],
+        }
+    )
+
+    with pytest.raises(PatchValidationError, match="must use task_type=synthesis"):
+        validate_plan_patch(patch_state(), patch)
+
+
+def test_insert_rejects_synthesis_for_non_aggregate_section():
+    patch = insert_before_patch()
+    inserted = patch["operations"][0]["task"]
+    inserted.update(
+        {
+            "task_name": "异常案例总结与原因检索",
+            "task_type": "synthesis",
+            "use_rag": False,
+            "query": "",
+            "covers_sections": ["异常案例总结与原因检索"],
+        }
+    )
+
+    with pytest.raises(PatchValidationError, match="reserved for conclusion"):
+        validate_plan_patch(patch_state(), patch)
+
+
 def test_insert_rejects_spider_tool_without_explicit_web_permission():
     patch = insert_before_patch()
     patch["operations"][0]["task"]["tool_requirements"] = ["SpiderTool"]

@@ -34,6 +34,104 @@ def _task(**overrides):
     return task
 
 
+def test_generated_contract_accepts_tool_free_synthesis_task():
+    planner_module._validate_generated_task_schema(
+        [
+            _task(
+                task_name="结论",
+                task_type="synthesis",
+                task_description="仅总结已经验收的前文章节，不新增事实。",
+                use_rag=False,
+                query="",
+                covers_sections=["结论"],
+            )
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("use_rag", True),
+        ("use_web", True),
+        ("query", "新检索"),
+        ("use_resources", ["data.csv"]),
+        ("generate_table", True),
+        ("generate_figure", True),
+    ],
+)
+def test_generated_contract_rejects_tool_capabilities_for_synthesis(field, value):
+    task = _task(
+        task_name="结论",
+        task_type="synthesis",
+        task_description="仅总结已经验收的前文章节。",
+        use_rag=False,
+        query="",
+        covers_sections=["结论"],
+    )
+    task[field] = value
+
+    with pytest.raises(ValueError, match="synthesis"):
+        planner_module._validate_generated_task_schema([task])
+
+
+def test_plan_semantics_requires_synthesis_type_for_conclusion_section():
+    tasks = [
+        _task(task_id="T1", task_name="正文", covers_sections=["正文"]),
+        _task(
+            task_id="T2",
+            task_name="结论",
+            task_type="summary",
+            use_rag=False,
+            query="",
+            covers_sections=["结论"],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="must use task_type=synthesis"):
+        planner_module._validate_generated_task_semantics(tasks, [], {})
+
+
+def test_plan_semantics_rejects_synthesis_without_prior_sections():
+    tasks = [
+        _task(
+            task_name="结论",
+            task_type="synthesis",
+            use_rag=False,
+            query="",
+            covers_sections=["结论"],
+        )
+    ]
+
+    with pytest.raises(ValueError, match="requires at least one prior task"):
+        planner_module._validate_generated_task_semantics(tasks, [], {})
+
+
+def test_plan_semantics_rejects_synthesis_for_non_aggregate_section():
+    tasks = [
+        _task(task_id="T1", task_name="正文", covers_sections=["正文"]),
+        _task(
+            task_id="T2",
+            task_name="异常案例总结与原因检索",
+            task_type="synthesis",
+            use_rag=False,
+            query="",
+            covers_sections=["异常案例总结与原因检索"],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="reserved for conclusion"):
+        planner_module._validate_generated_task_semantics(tasks, [], {})
+
+
+def test_replan_prompts_describe_synthesis_contract():
+    prompt_dir = Path(planner_module.__file__).resolve().parents[1] / "prompts"
+    for name in ("planner_replan.md", "planner_intake_replan.md"):
+        text = (prompt_dir / name).read_text(encoding="utf-8")
+        assert 'task_type="synthesis"' in text
+        assert "use_resources=[]" in text
+
+
 class _SequenceModel:
     def __init__(self, responses):
         self.responses = iter(responses)
@@ -866,6 +964,7 @@ def test_global_knowledge_constraint_requires_some_rag_not_every_task(monkeypatc
             task_id="T2",
             task_name="结论",
             task_description="归纳前述任务已形成的结论。",
+            task_type="synthesis",
             use_rag=False,
             query="",
         ),
@@ -1165,7 +1264,15 @@ def test_initial_planner_ignores_abstract_when_matching_sections(
 ):
     tasks = [
         _task(task_id="T1", task_name="引言", covers_sections=["引言"]),
-        _task(task_id="T2", task_name="结论", covers_sections=["结论"]),
+        _task(
+            task_id="T2",
+            task_name="结论",
+            task_type="synthesis",
+            task_description="仅归纳已验收前文，不新增事实。",
+            use_rag=False,
+            query="",
+            covers_sections=["结论"],
+        ),
     ]
     _patch_model(
         monkeypatch,

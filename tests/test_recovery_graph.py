@@ -449,7 +449,7 @@ def test_plan_patcher_prompt_contains_each_task2_operation_schema():
     assert '"op": "insert_before"' in prompt
     assert '"before_task_id"' in prompt
     assert '"task_type": "analysis"' in prompt
-    assert "task_name, task_description, query, use_rag, use_web" in prompt
+    assert "task_name, task_description, task_type, query, use_rag, use_web" in prompt
     assert "completed or accepted task" in prompt
 
 
