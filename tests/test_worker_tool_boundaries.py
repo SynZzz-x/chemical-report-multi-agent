@@ -211,6 +211,25 @@ def test_length_rewrite_execution_disables_tools_and_carries_original_result():
     assert "不得新增事实" in instructions
 
 
+def test_length_rewrite_targets_safety_margin_below_hard_maximum():
+    _, instructions, _ = AutonomousToolNode._prepare_execution_task(
+        {
+            "task_id": "T1",
+            "task_description": "撰写工艺分析，字数：2000-2500字。",
+        },
+        {
+            "execution_feedback": {
+                "mode": "length_rewrite",
+                "instructions": "压缩到要求范围内。",
+                "source_result": {"task_id": "T1", "text_output": "原正文"},
+            }
+        },
+    )
+
+    assert "目标有效字数不超过 2300 字" in instructions
+    assert "硬上限 2500 字" in instructions
+
+
 @pytest.mark.parametrize(
     "task",
     [

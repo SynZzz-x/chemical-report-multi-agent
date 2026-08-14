@@ -9,6 +9,7 @@ from ....tool_names import canonical_tool_name
 from ....report_validation import (
     count_report_length,
     extract_markdown_tables,
+    parse_length_target,
     remove_mermaid_blocks,
 )
 from ....report_outline import section_markdown_level
@@ -1453,10 +1454,24 @@ class AutonomousToolNode:
                 )
                 or ""
             ).strip()
+            length_target = parse_length_target(
+                str(execution_task.get("task_description") or "")
+            )
+            safety_target = ""
+            if length_target and length_target.get("max") is not None:
+                hard_max = int(length_target["max"])
+                target_max = int(hard_max * 0.92)
+                if length_target.get("min") is not None:
+                    target_max = max(target_max, int(length_target["min"]))
+                safety_target = (
+                    f"\n目标有效字数不超过 {target_max} 字"
+                    f"（硬上限 {hard_max} 字，已保留安全余量）。"
+                )
             instructions = (
                 f"{instructions}\n"
                 "这是专用篇幅改写：只能压缩、删减或在篇幅不足时基于原句补齐；"
                 "不得新增事实、数字、来源、引用编号或因果关系；不得调用任何工具。"
+                f"{safety_target}"
                 f"\n原正文：\n{source_text}"
             ).strip()
         if isinstance(recovery_plan, dict):
