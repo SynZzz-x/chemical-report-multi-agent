@@ -581,6 +581,71 @@ def test_synthesis_verifier_ignores_markdown_heading_requirement():
     assert sanitized["issues"] == []
 
 
+def test_synthesis_verification_context_contains_accepted_claim_lineage():
+    state = _state()
+    state.update(
+        {
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "task_name": "工艺分析",
+                    "task_type": "analysis",
+                },
+                {
+                    "task_id": "T2",
+                    "task_name": "结论",
+                    "task_type": "synthesis",
+                },
+            ],
+            "cursor": 1,
+            "results": [
+                {
+                    "task_id": "T1",
+                    "text_output": "氢气比例影响熔融指数。[E1]",
+                    "citations": [{"evidence_id": "E1", "title": "工艺手册"}],
+                    "plan_revision": 1,
+                    "task_revision": 1,
+                }
+            ],
+            "section_status": {
+                "T1": {
+                    "status": "VERIFIED_PASS",
+                    "accepted_by": "verifier",
+                    "issues": [],
+                    "plan_revision": 1,
+                    "task_revision": 1,
+                }
+            },
+            "plan_revision": 1,
+            "task_revisions": {"T1": 1, "T2": 1},
+            "accepted_evidence_gaps": {},
+            "current_result": {
+                "task_id": "T2",
+                "text_output": "氢气比例影响熔融指数。[E1]",
+                "citations": [
+                    {
+                        "evidence_id": "E1",
+                        "evidence_key": "T1:E1",
+                        "title": "工艺手册",
+                    }
+                ],
+                "synthesis_audit": {
+                    "accepted_task_ids": ["T1"],
+                    "final_consistency_issues": [],
+                },
+            },
+        }
+    )
+
+    context = auto_verifier_module._synthesis_verification_context(state)
+
+    assert context["accepted_sections"][0]["task_id"] == "T1"
+    assert context["accepted_sections"][0]["content"].endswith("[E1]")
+    assert context["accepted_evidence_ids"] == ["E1"]
+    assert context["evidence_display_map"] == {"T1:E1": "E1"}
+    assert context["synthesis_audit"]["accepted_task_ids"] == ["T1"]
+
+
 @pytest.mark.parametrize("code", ["LLM_ERROR", "LLM_NOT_ENABLED"])
 def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     monkeypatch, code

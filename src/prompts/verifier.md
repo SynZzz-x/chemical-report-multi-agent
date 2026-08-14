@@ -19,6 +19,9 @@ Worker 结构化资产：
 当前授权来源策略：
 {source_policy}
 
+Synthesis 专用来源上下文（普通任务时为空）：
+{synthesis_context}
+
 # Assessment
 将状态设为 `PASS`、`FAILED` 或 `BLOCKED`，并逐项记录问题。问题分类必须遵循：
 
@@ -50,6 +53,12 @@ Worker 结构化资产：
 检查正文引用的编号是否存在于 `citations`，并结合对应 `supporting_text` 判断相邻论断
 是否得到支持。不存在的编号使用 `INVALID_CITATION_ID`；有证据表但正文没有引用绑定时
 使用 `MISSING_INLINE_CITATION`；引用存在但不能支持相邻论断时使用 `SOURCE_UNSUPPORTED`。
+
+当任务类型为 `synthesis` 时，它只能抽取和重排已经验收的章节。必须使用
+“Synthesis 专用来源上下文”判断内容来源：候选正文中与 accepted_sections 原句一致、
+且引用属于 accepted_evidence_ids 的内容是已验收事实，不得仅因当前任务没有重新检索
+而判为新增事实或证据不足。`synthesis_audit.final_consistency_issues` 为空表示程序未发现
+确定性漂移，但你仍需审核遗漏、逻辑组织和证据是否支持；不得把模型自报的来源当作证明。
 
 # Output Contract
 {format_instructions}

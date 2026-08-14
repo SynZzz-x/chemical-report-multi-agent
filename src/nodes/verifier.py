@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from src.config import get_app_config
 from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm
+from src.nodes.synthesis import build_synthesis_context
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
 from src.task_contract import effective_web_allowed
@@ -110,6 +111,25 @@ def _clean_json_fences(content: str) -> str:
     return cleaned
 
 
+def _synthesis_verification_context(state: State) -> dict[str, Any]:
+    """Expose deterministic accepted-claim lineage only for synthesis review."""
+
+    tasks = state.get("tasks") or []
+    cursor = int(state.get("cursor", 0) or 0)
+    current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
+    if str(current_task.get("task_type") or "") != "synthesis":
+        return {}
+    context = build_synthesis_context(state)
+    current_result = state.get("current_result") or {}
+    return {
+        "accepted_sections": context.get("accepted_sections") or [],
+        "accepted_evidence_ids": context.get("accepted_evidence_ids") or [],
+        "evidence_display_map": context.get("evidence_display_map") or {},
+        "known_gaps": context.get("known_gaps") or [],
+        "synthesis_audit": current_result.get("synthesis_audit") or {},
+    }
+
+
 def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     """Return only a sanitized assessment of the current Worker result."""
     current_result = state.get("current_result", {}) or {}
@@ -143,9 +163,11 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "evidence_coverage": current_result.get("evidence_coverage", {}),
                     "actual_length": actual_length,
                     "length_target": length_target,
+                    "synthesis_audit": current_result.get("synthesis_audit", {}),
                 },
                 ensure_ascii=False,
             )
+            synthesis_context = _synthesis_verification_context(state)
             prompt_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "verifier.md"
             )
@@ -183,6 +205,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     ),
                     "source_policy": json.dumps(
                         source_policy, ensure_ascii=False
+                    ),
+                    "synthesis_context": json.dumps(
+                        synthesis_context, ensure_ascii=False, default=str
                     ),
                     "format_instructions": format_instructions,
                 }
