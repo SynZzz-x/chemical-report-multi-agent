@@ -160,6 +160,50 @@ def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_pa
     assert "LLM Generation Failed" not in markdown
 
 
+def test_reference_section_is_projected_from_citations_at_outline_position(
+    monkeypatch, tmp_path
+):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status("VERIFIED_PASS"),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {**state["tasks"][0], "covers_sections": ["1. 引言"]},
+        {**state["tasks"][1], "covers_sections": ["3. 工艺分析"]},
+    ]
+    state["results"][0]["text_output"] = "## 工艺分析\n\n### 分析方法\n\n工艺分析正文 [E1]。"
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": [
+                        "1. 引言",
+                        "2. 知识库依据与参考文件说明",
+                        "3. 工艺分析",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    reference_heading = "## 2. 知识库依据与参考文件说明"
+    assert reference_heading in markdown
+    assert markdown.index("引言正文") < markdown.index(reference_heading)
+    assert markdown.index(reference_heading) < markdown.index("工艺分析正文")
+    assert "质量指南" in markdown
+    assert "工艺手册" in markdown
+    assert "清单为空" not in markdown
+
+
 def test_report_assembly_restores_container_heading_for_grouped_tasks(
     monkeypatch,
     tmp_path,

@@ -25,7 +25,12 @@ from ..report_acceptance import (
     eligible_task_ids,
     is_admitted_section_entry,
 )
-from ..report_outline import content_container_paths
+from ..report_outline import (
+    classify_outline,
+    content_container_paths,
+    is_reference_section,
+    section_markdown_level,
+)
 from ..state import State
 from ..utils import md_to_docx, md_to_pdf
 from ..utils.path_manager import get_session_cache_dir
@@ -462,8 +467,41 @@ def _assemble_markdown(
     blocks = [f"# {find_title(state)}"]
     if report_status == DRAFT_WITH_GAPS:
         blocks.append(_draft_warning(state))
+    outline = classify_outline(_intake_sections(state))
+    outline_ordinals = {item.raw: item.ordinal for item in outline}
+    reference_item = next(
+        (
+            item
+            for item in outline
+            if item.kind == "system_generated" and is_reference_section(item.title)
+        ),
+        None,
+    )
+    reference_markdown = format_evidence_table(
+        _deduplicate_citations(sections),
+        heading_level=(
+            section_markdown_level(reference_item.raw) if reference_item else 2
+        ),
+        include_section=True,
+        heading_title=(reference_item.raw if reference_item else "证据来源"),
+    )
+    reference_inserted = False
     active_container_path: tuple[str, ...] = ()
     for section in sections:
+        covered_ordinals = [
+            outline_ordinals[covered]
+            for covered in section.get("covers_sections") or []
+            if covered in outline_ordinals
+        ]
+        if (
+            reference_markdown
+            and reference_item is not None
+            and not reference_inserted
+            and covered_ordinals
+            and reference_item.ordinal < min(covered_ordinals)
+        ):
+            blocks.append(reference_markdown)
+            reference_inserted = True
         body = _strip_duplicate_leading_heading(
             str(section.get("text") or ""), str(section.get("title") or "章节")
         )
@@ -495,13 +533,8 @@ def _assemble_markdown(
             section_markdown, section.get("figures") or []
         )
         blocks.append(section_markdown)
-    evidence = format_evidence_table(
-        _deduplicate_citations(sections),
-        heading_level=2,
-        include_section=True,
-    )
-    if evidence:
-        blocks.append(evidence)
+    if reference_markdown and not reference_inserted:
+        blocks.append(reference_markdown)
     return "\n\n".join(block for block in blocks if block).rstrip() + "\n"
 
 

@@ -28,7 +28,11 @@ _SYSTEM_SECTION_TITLES = {
     "证据来源",
     "引用来源",
     "证据来源附录",
+    "知识库依据与参考文件说明",
+    "知识库文件来源与说明",
+    "参考文件与证据来源",
 }
+_REFERENCE_SECTION_TITLES = _SYSTEM_SECTION_TITLES - {"目录"}
 _MERGEABLE_SINGLETON_RUN = 5
 
 
@@ -81,6 +85,16 @@ def _is_system_generated(title: str) -> bool:
     return normalized in {
         re.sub(r"[\s:：_-]+", "", marker).casefold()
         for marker in _SYSTEM_SECTION_TITLES
+    }
+
+
+def is_reference_section(title: str) -> bool:
+    """Return whether one outline title is a deterministic source projection."""
+
+    normalized = re.sub(r"[\s:：_-]+", "", str(title or "")).casefold()
+    return normalized in {
+        re.sub(r"[\s:：_-]+", "", marker).casefold()
+        for marker in _REFERENCE_SECTION_TITLES
     }
 
 

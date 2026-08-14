@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage
 from src.nodes import intake as intake_module
 from src.nodes import planner as planner_module
 from src.nodes import verifier_manual as verifier_manual_module
+from src.report_outline import classify_outline
 
 
 def _task(**overrides):
@@ -1104,6 +1105,20 @@ def test_initial_planner_keeps_reference_review_as_content(monkeypatch):
         _intake_summary(sections=["2. 参考文献综述"]),
         {},
     ) == [task]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "5. 知识库依据与参考文件说明",
+        "5. 知识库文件来源与说明",
+        "5. 参考文件与证据来源",
+    ],
+)
+def test_reference_source_sections_are_system_generated(title):
+    [section] = classify_outline([title])
+
+    assert section.kind == "system_generated"
 
 
 def test_initial_planner_requires_coverage_when_outline_is_empty(monkeypatch):

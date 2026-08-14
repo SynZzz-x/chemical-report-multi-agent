@@ -29,10 +29,14 @@ def format_evidence_table(
     *,
     heading_level: int = 3,
     include_section: bool = False,
+    heading_title: str = "证据来源",
 ) -> str:
     if not citations:
         return ""
-    lines = [f"{'#' * max(1, min(int(heading_level), 6))} 证据来源", ""]
+    lines = [
+        f"{'#' * max(1, min(int(heading_level), 6))} {str(heading_title).strip() or '证据来源'}",
+        "",
+    ]
     if include_section:
         lines.extend(
             [
