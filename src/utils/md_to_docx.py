@@ -511,6 +511,8 @@ def md_to_docx(content: str, output_path: str) -> str:
             # Level 3 -> Index 1
             while len(heading_stack) <= 1:
                 heading_stack.append(0)
+            if heading_stack[0] == 0:
+                heading_stack[0] = 1
             heading_stack[1] += 1
             heading_stack = heading_stack[:2]
             
@@ -521,6 +523,10 @@ def md_to_docx(content: str, output_path: str) -> str:
             # Level 4 -> Index 2
             while len(heading_stack) <= 2:
                 heading_stack.append(0)
+            if heading_stack[0] == 0:
+                heading_stack[0] = 1
+            if heading_stack[1] == 0:
+                heading_stack[1] = 1
             heading_stack[2] += 1
             heading_stack = heading_stack[:3]
             

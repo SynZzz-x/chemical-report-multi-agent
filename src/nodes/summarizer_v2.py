@@ -105,6 +105,15 @@ def _strip_duplicate_leading_heading(text: str, task_name: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _starts_with_matching_heading(text: str, title: str) -> bool:
+    first = next(
+        (line.strip() for line in str(text or "").splitlines() if line.strip()),
+        "",
+    )
+    match = re.match(r"^#{1,6}\s+(.+?)\s*$", first)
+    return bool(match and _titles_match(match.group(1), title))
+
+
 def _escape_table_cell(value: Any) -> str:
     return str(value or "").replace("|", "｜").replace("\n", " ").strip()
 
@@ -522,7 +531,16 @@ def _assemble_markdown(
             section_markdown = body.rstrip()
         elif section.get("covers_sections"):
             active_container_path = ()
-            section_markdown = body.rstrip()
+            covered_sections = list(section.get("covers_sections") or [])
+            if len(covered_sections) == 1 and not _starts_with_matching_heading(
+                body, covered_sections[0]
+            ):
+                heading_level = section_markdown_level(covered_sections[0])
+                section_markdown = (
+                    f"{'#' * heading_level} {covered_sections[0]}\n\n{body}"
+                ).rstrip()
+            else:
+                section_markdown = body.rstrip()
         else:
             active_container_path = ()
             section_markdown = f"## {section.get('title') or '章节'}\n\n{body}".rstrip()

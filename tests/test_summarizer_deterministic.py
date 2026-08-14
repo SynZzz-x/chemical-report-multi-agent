@@ -267,6 +267,38 @@ def test_report_assembly_restores_container_heading_for_grouped_tasks(
     assert markdown.index("### 1.1 报告目的") < markdown.index("### 1.2 编制依据")
 
 
+def test_single_covered_top_level_section_keeps_outline_heading(monkeypatch, tmp_path):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status("VERIFIED_PASS"),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {**state["tasks"][0], "covers_sections": ["1. 引言"]},
+        {**state["tasks"][1], "covers_sections": ["2. 工艺分析"]},
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": ["1. 引言", "2. 工艺分析"],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.count("## 1. 引言") == 1
+    assert markdown.count("## 2. 工艺分析") == 1
+
+
 def test_report_assembly_restores_full_nested_container_path(monkeypatch, tmp_path):
     state = _state(statuses={"T1": _status("VERIFIED_PASS")})
     state["tasks"] = [

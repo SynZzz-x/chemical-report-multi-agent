@@ -620,25 +620,40 @@ def _flush_table(story, table_buffer, font_name, table_caption=None, caption_sty
     cell_style = ParagraphStyle(
         'CellStyle',
         fontName=font_name,
-        fontSize=10,
-        leading=12
+        fontSize=8.5,
+        leading=10.5
     )
     
     for row in table_buffer:
         processed_row = [Paragraph(cell, cell_style) for cell in row]
         data.append(processed_row)
         
-    t = Table(data)
+    column_count = max((len(row) for row in table_buffer), default=0)
+    available_width = A4[0] - 72 - 72
+    if column_count == 4:
+        proportions = (0.12, 0.25, 0.23, 0.40)
+    elif column_count == 5:
+        proportions = (0.15, 0.12, 0.20, 0.20, 0.33)
+    else:
+        proportions = tuple(
+            1.0 / column_count for _ in range(column_count)
+        ) if column_count else ()
+    column_widths = [available_width * value for value in proportions]
+    t = Table(data, colWidths=column_widths or None, repeatRows=1)
     
     # 表格样式
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('FONTNAME', (0, 0), (-1, 0), font_name), # 表头字体
-        ('FONTSIZE', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('LEFTPADDING', (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
         ('FONTNAME', (0, 0), (-1, -1), font_name), # 全局字体
