@@ -11,6 +11,7 @@ from typing import Any, Mapping, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..evidence.identity import normalize_sections_evidence
 from ..llm import get_llm
 from ..report_acceptance import is_admitted_section_entry
 from ..report_acceptance import (
@@ -121,15 +122,15 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             "covers_sections": list(task.get("covers_sections") or []),
             "status": str(status.get("status") or ""),
             "content": text,
+            "citations": [
+                dict(citation)
+                for citation in (result.get("citations") or [])
+                if isinstance(citation, Mapping) and _citation_id(citation)
+            ],
         }
         section_status = str(status.get("status") or "")
         if section_status == VERIFIED_PASS:
             verified_sections.append(section)
-            accepted_citations.extend(
-                dict(citation)
-                for citation in (result.get("citations") or [])
-                if isinstance(citation, Mapping) and _citation_id(citation)
-            )
         elif section_status == USER_ACCEPTED_GAP:
             accepted_gap_sections.append(section)
         elif section_status == USER_ACCEPTED_WARNING:
@@ -152,6 +153,15 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(issue, Mapping)
         )
 
+    verified_sections, evidence_display_map = normalize_sections_evidence(
+        verified_sections
+    )
+    accepted_citations = [
+        dict(citation)
+        for section in verified_sections
+        for citation in section.get("citations") or []
+        if isinstance(citation, Mapping) and _citation_id(citation)
+    ]
     evidence_ids = list(
         dict.fromkeys(
             evidence_id
@@ -174,6 +184,7 @@ def build_synthesis_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "warning_sections": warning_sections,
         "accepted_citations": accepted_citations,
         "accepted_evidence_ids": evidence_ids,
+        "evidence_display_map": evidence_display_map,
         "known_gaps": unique_gaps,
     }
 

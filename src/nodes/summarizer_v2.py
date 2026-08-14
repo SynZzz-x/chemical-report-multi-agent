@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from PIL import Image as PILImage
 
+from ..evidence.identity import normalize_sections_evidence
 from ..evidence.reporting import append_missing_figures, format_evidence_table
 from ..report_acceptance import (
     BLOCKED,
@@ -518,6 +519,7 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
     if missing:
         return _blocked_update(missing)
 
+    sections, evidence_display_map = normalize_sections_evidence(sections)
     final_markdown = _assemble_markdown(state, sections, report_status)
     report_dir = os.path.join(get_session_cache_dir(state, config), "report")
     os.makedirs(report_dir, exist_ok=True)
@@ -580,6 +582,7 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         "report_status": report_status,
         "delivery_status": delivery_status,
         "artifact_errors": artifact_errors,
+        "evidence_display_map": evidence_display_map,
         "blocking_sections": [],
         "attachments": attachments,
         "path": preferred_path,

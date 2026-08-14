@@ -67,6 +67,37 @@ def test_build_context_only_uses_admitted_prior_sections_and_citations():
     assert context["known_gaps"] == []
 
 
+def test_build_context_scopes_colliding_local_evidence_ids_across_tasks():
+    state = _state()
+    state["tasks"].insert(1, _task("T_extra", task_name="压力分析"))
+    state["cursor"] = 2
+    state["task_revisions"]["T_extra"] = 1
+    state["results"].append(
+        {
+            "task_id": "T_extra",
+            "text_output": "压力变化影响产品密度。[E1]",
+            "citations": [{"evidence_id": "E1", "file_name": "压力资料.pdf"}],
+            "plan_revision": 1,
+            "task_revision": 1,
+        }
+    )
+    state["section_status"]["T_extra"] = {
+        "status": "VERIFIED_PASS",
+        "accepted_by": "verifier",
+        "issues": [],
+        "plan_revision": 1,
+        "task_revision": 1,
+    }
+
+    context = synthesis_module.build_synthesis_context(state)
+
+    assert context["accepted_evidence_ids"] == ["E1", "E2"]
+    assert [
+        citation["evidence_key"] for citation in context["accepted_citations"]
+    ] == ["T1:E1", "T_extra:E1"]
+    assert context["accepted_sections"][1]["content"].endswith("[E2]")
+
+
 def test_build_context_keeps_user_accepted_draft_out_of_synthesis_fact_pool():
     state = _state()
     state["tasks"].insert(1, _task("T_gap", task_name="证据不足章节"))

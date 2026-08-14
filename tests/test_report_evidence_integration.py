@@ -1,4 +1,5 @@
 from src.evidence.models import EvidenceBundle, EvidenceRecord
+from src.evidence.identity import normalize_sections_evidence
 from src.evidence.reporting import append_missing_figures, format_evidence_table
 from src.nodes.worker.agent.graph import AutonomousToolNode
 
@@ -89,3 +90,30 @@ def test_missing_concept_figure_is_appended_deterministically():
 
     assert "![参数影响关系图](/srv/cache/charts/concept_T3.png)" in markdown
     assert "<description>参数影响关系图（关系证据：[E1]）</description>" in markdown
+
+
+def test_cross_task_local_ids_receive_distinct_deterministic_display_ids():
+    sections = [
+        {
+            "task_id": "T2",
+            "text": "温度结论 [E1]。",
+            "citations": [{"evidence_id": "E1", "title": "温度资料"}],
+            "figures": [{"path": "/tmp/a.png", "evidence_ids": ["E1"]}],
+        },
+        {
+            "task_id": "T3",
+            "text": "压力结论 [E1]。",
+            "citations": [{"evidence_id": "E1", "title": "压力资料"}],
+            "figures": [{"path": "/tmp/b.png", "evidence_ids": ["E1"]}],
+        },
+    ]
+
+    normalized, display_map = normalize_sections_evidence(sections)
+
+    assert display_map == {"T2:E1": "E1", "T3:E1": "E2"}
+    assert normalized[0]["citations"][0]["evidence_key"] == "T2:E1"
+    assert normalized[1]["citations"][0]["evidence_key"] == "T3:E1"
+    assert normalized[0]["text"] == "温度结论 [E1]。"
+    assert normalized[1]["text"] == "压力结论 [E2]。"
+    assert normalized[0]["figures"][0]["evidence_ids"] == ["E1"]
+    assert normalized[1]["figures"][0]["evidence_ids"] == ["E2"]

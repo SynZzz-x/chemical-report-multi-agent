@@ -155,7 +155,8 @@ def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_pa
     assert "### 分析方法" in markdown
     assert markdown.count("## 证据来源") == 1
     assert "| 引言 | [E1]" in markdown
-    assert "| 工艺分析 | [E1]" in markdown
+    assert "| 工艺分析 | [E2]" in markdown
+    assert "工艺分析正文 [E2]" in markdown
     assert "LLM Generation Failed" not in markdown
 
 
@@ -446,7 +447,7 @@ def test_figure_evidence_ids_are_visible_in_report(monkeypatch, tmp_path):
     result = summarizer_v2.summarizer(state, {})["final_result"]
     markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
 
-    assert "关系证据：[E1]" in markdown
+    assert "关系证据：[E2]" in markdown
 
 
 def test_corrupt_image_file_blocks_delivery(monkeypatch, tmp_path):
