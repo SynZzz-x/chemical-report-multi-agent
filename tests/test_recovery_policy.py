@@ -20,9 +20,17 @@ def recovery_state(
     verifier_retry_count=None,
     job_patch_count=0,
     results=None,
+    use_rag=True,
 ):
     return {
-        "tasks": [{"task_id": task_id, "use_resources": task_resources or []}],
+        "tasks": [
+            {
+                "task_id": task_id,
+                "use_rag": use_rag,
+                "use_web": False,
+                "use_resources": task_resources or [],
+            }
+        ],
         "cursor": 0,
         "docs": list(docs or []),
         "current_result": {"task_id": task_id, "text_output": "current result"},
@@ -66,6 +74,44 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     assert "上传" in second["pending_user_action"]["guidance"]
     assert "页面" in second["pending_user_action"]["guidance"]
     assert "直接回复" not in second["pending_user_action"]["guidance"]
+
+
+def test_evidence_gap_without_authorized_retrieval_requires_user_input_immediately():
+    state = recovery_state(task_id="T1", use_rag=False)
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with(
+            "EVIDENCE_GAP",
+            "EVIDENCE_GAP",
+            retrieval_query="聚乙烯 引言 知识库依据",
+        ),
+    )
+
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["evidence_recovery_count"] == {}
+    assert decision["pending_user_action"]["category"] == "EVIDENCE_GAP"
+    assert "未授权可执行的证据检索能力" in decision["pending_user_action"]["guidance"]
+
+
+def test_verifier_failure_blocker_never_offers_ambiguous_next_action():
+    state = recovery_state(
+        task_id="T1",
+        verifier_retry_count={"T1": 1},
+    )
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("LLM_ERROR", "VERIFIER_FAILURE"),
+    )
+
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["pending_user_action"]["accepted_choices"] == [
+        "REWORK",
+        "ACCEPT_AS_DRAFT",
+        "DONE",
+    ]
+    assert "NEXT" not in decision["pending_user_action"]["accepted_choices"]
 
 
 def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeypatch):

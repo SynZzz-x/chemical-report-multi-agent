@@ -797,6 +797,7 @@ def test_evidence_upload_is_ingested_and_assigned_before_recovery(monkeypatch):
 
     assert ingested == [uploaded]
     assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert update["tasks"][1]["use_rag"] is True
     assert update["tasks"][1]["use_resources"] == ["/tmp/standard.pdf"]
 
 

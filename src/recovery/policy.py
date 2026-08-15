@@ -20,6 +20,7 @@ from src.report_acceptance import (
     record_section_status,
 )
 from src.tool_capabilities import public_web_runtime_available
+from src.task_contract import effective_web_allowed
 
 
 class WorkflowAction(str, Enum):
@@ -118,6 +119,25 @@ _EXTERNAL_CODES = {
     "RESOURCE_UNAVAILABLE",
     "UNEXECUTABLE_TASK",
 }
+
+
+def _has_authorized_evidence_retrieval(state: Dict[str, Any]) -> bool:
+    task = _current_task(state)
+    if "use_rag" not in task and "use_web" not in task:
+        # Legacy checkpoints predate explicit source authorization fields and
+        # historically resumed through the configured knowledge base.
+        return True
+    if task.get("use_rag") is True:
+        return True
+    web_authorized = (
+        state.get("web_authorized")
+        if isinstance(state.get("web_authorized"), bool)
+        else None
+    )
+    return bool(
+        public_web_runtime_available()
+        and effective_web_allowed(task, web_authorized)
+    )
 
 
 def _current_task(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -360,14 +380,19 @@ def _pending_user_action(
             if not web_available
             else ""
         )
+        can_retrieve = _has_authorized_evidence_retrieval(state)
         pending.update(
             {
                 "accepted_choices": accepted_choices,
                 "guidance": (
-                    "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
-                    f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
-                    f"请在页面的阻塞处理区选择：{choice_guidance}"
-                    f"{runtime_guidance}"
+                    (
+                        "当前任务仍存在证据缺口，但未授权可执行的证据检索能力：\n"
+                        if not can_retrieve
+                        else "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
+                    )
+                    + f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
+                    + f"请在页面的阻塞处理区选择：{choice_guidance}"
+                    + f"{runtime_guidance}"
                 ),
             }
         )
@@ -378,6 +403,16 @@ def _pending_user_action(
                 "guidance": (
                     "当前任务已达到自动返工上限，但仍未通过验收。请在页面的阻塞处理区选择："
                     "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
+                ),
+            }
+        )
+    elif category is IssueCategory.VERIFIER_FAILURE:
+        pending.update(
+            {
+                "accepted_choices": ["REWORK", "ACCEPT_AS_DRAFT", "DONE"],
+                "guidance": (
+                    "自动校验未能完成。请在页面的阻塞处理区选择：重新生成后再校验、"
+                    "明确接受当前未验证内容为带风险草稿，或结束工作流。"
                 ),
             }
         )
@@ -517,7 +552,10 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
 
     if category is IssueCategory.EVIDENCE_GAP:
         recoveries = evidence_recovery_count.get(task_id, 0)
-        if recoveries < MAX_EVIDENCE_RECOVERIES:
+        if (
+            _has_authorized_evidence_retrieval(state)
+            and recoveries < MAX_EVIDENCE_RECOVERIES
+        ):
             evidence_recovery_count[task_id] = recoveries + 1
             update["workflow_action"] = WorkflowAction.EVIDENCE_RECOVERY.value
             return update

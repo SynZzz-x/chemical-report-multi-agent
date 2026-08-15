@@ -685,6 +685,27 @@ def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     assert state["results"] == original_results
 
 
+def test_verifier_service_error_keeps_debug_detail_out_of_user_issue(monkeypatch):
+    class InvalidJsonModel:
+        def invoke(self, payload):
+            return SimpleNamespace(content="not-json verifier output")
+
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *args, **kwargs: InvalidJsonModel(),
+    )
+
+    assessment = auto_verifier_module.verifier(
+        _state(), {"configurable": {"use_llm": True}}
+    )["assessment"]
+
+    issue = assessment["issues"][0]
+    assert issue["code"] == "LLM_ERROR"
+    assert issue["description"] == "自动校验服务未能返回可用的结构化结果。"
+    assert "Expecting value" not in issue["description"]
+
+
 def test_assessment_contract_error_never_consumes_worker_content_retries():
     state = _state()
     malformed = {
@@ -734,8 +755,8 @@ def test_malformed_assessment_collections_use_bounded_verifier_retry_only(
         {
             "code": "ASSESSMENT_CONTRACT_ERROR",
             "category": "VERIFIER_FAILURE",
-            "description": "Verifier returned malformed collection fields.",
-            "suggestion": "Retry automatic verification with a valid structured assessment.",
+            "description": "自动校验未能完成。",
+            "suggestion": "请重试自动校验，或明确接受当前内容为带风险草稿。",
             "severity": "error",
         }
     ]

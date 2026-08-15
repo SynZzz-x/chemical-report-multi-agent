@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import ntpath
 import os
 from typing import Any
 
 
 def _escape_cell(value: Any) -> str:
     return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+
+
+def _path_like(value: str) -> bool:
+    text = str(value or "").strip()
+    return "/" in text or "\\" in text or (len(text) > 1 and text[1] == ":")
+
+
+def _safe_source_name(citation: Mapping[str, Any]) -> str:
+    title = str(citation.get("title") or "").strip()
+    file_path = str(citation.get("file_path") or "").strip()
+    if title and not _path_like(title):
+        return title
+    candidate = title or file_path
+    return ntpath.basename(candidate.rstrip("/\\")) or "未命名知识库文件"
 
 
 def append_missing_figures(markdown: str, figures: Sequence[Mapping[str, Any]]) -> str:
@@ -62,7 +77,7 @@ def format_evidence_table(
         values = {
             "evidence_id": evidence_id,
             "source_type": _escape_cell(citation.get("source_type")),
-            "title": _escape_cell(citation.get("title")),
+            "title": _escape_cell(_safe_source_name(citation)),
             "locator": _escape_cell(locator),
             "supporting_text": _escape_cell(citation.get("supporting_text"))[:240],
             "section_title": _escape_cell(citation.get("section_title")),
@@ -83,6 +98,61 @@ def format_evidence_table(
             lines.append(
                 "| [{evidence_id}] | {source_type} | {title} | {locator} | {supporting_text} |".format(
                     **values,
+                )
+            )
+    return "\n".join(lines)
+
+
+def format_knowledge_base_file_table(
+    citations: Sequence[Mapping[str, Any]],
+    *,
+    heading_level: int = 3,
+    heading_title: str = "知识库文件清单",
+) -> str:
+    """Project accepted RAG citations into one deterministic file-level table."""
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for citation in citations:
+        source_type = str(citation.get("source_type") or "").strip()
+        if source_type.casefold() != "rag":
+            continue
+        file_path = str(citation.get("file_path") or "").strip()
+        title = str(citation.get("title") or "").strip()
+        file_name = _safe_source_name(citation)
+        key = (source_type.casefold(), file_path or file_name)
+        entry = grouped.setdefault(
+            key,
+            {
+                "file_name": file_name,
+                "source_type": source_type or "rag",
+                "sections": [],
+                "count": 0,
+            },
+        )
+        if title and not _path_like(title):
+            entry["file_name"] = title
+        section = str(citation.get("section_title") or "").strip()
+        if section and section not in entry["sections"]:
+            entry["sections"].append(section)
+        entry["count"] += 1
+
+    lines = [
+        f"{'#' * max(1, min(int(heading_level), 6))} {str(heading_title).strip() or '知识库文件清单'}",
+        "",
+        "| 文件名称 | 来源类型 | 支撑章节 | 证据条数 |",
+        "| --- | --- | --- | --- |",
+    ]
+    if not grouped:
+        lines.append("| 未记录可追溯的知识库文件 | rag | — | 0 |")
+    else:
+        for entry in grouped.values():
+            sections = "、".join(entry["sections"]) or "未绑定章节"
+            lines.append(
+                "| {file_name} | {source_type} | {sections} | {count} |".format(
+                    file_name=_escape_cell(entry["file_name"]),
+                    source_type=_escape_cell(entry["source_type"]),
+                    sections=_escape_cell(sections),
+                    count=int(entry["count"]),
                 )
             )
     return "\n".join(lines)

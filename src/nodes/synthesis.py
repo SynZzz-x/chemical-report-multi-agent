@@ -375,9 +375,11 @@ def synthesis(
     context = build_synthesis_context(state)
     task_id = str(task.get("task_id") or state.get("cursor", 0))
     logger.info(
-        "Synthesis context: task=%s accepted_sections=%d accepted_evidence_ids=%d known_gaps=%d",
+        "Synthesis context: task=%s accepted_sections=%d accepted_gap_sections=%d warning_sections=%d accepted_evidence_ids=%d known_gaps=%d",
         task_id,
         len(context["accepted_sections"]),
+        len(context["accepted_gap_sections"]),
+        len(context["warning_sections"]),
         len(context["accepted_evidence_ids"]),
         len(context["known_gaps"]),
     )

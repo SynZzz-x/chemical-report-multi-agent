@@ -204,6 +204,78 @@ def test_reference_section_is_projected_from_citations_at_outline_position(
     assert "清单为空" not in markdown
 
 
+def test_knowledge_base_file_list_is_deterministically_aggregated(monkeypatch, tmp_path):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status("VERIFIED_PASS"),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {**state["tasks"][0], "covers_sections": ["1. 引言"]},
+        {**state["tasks"][1], "covers_sections": ["2. 工艺分析"]},
+    ]
+    state["results"][0]["citations"] = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "聚乙烯生产工艺与质量控制概述",
+            "file_path": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
+            "locator": "第2章",
+            "supporting_text": "工艺说明",
+        },
+        {
+            "evidence_id": "E2",
+            "source_type": "rag",
+            "title": "聚乙烯生产工艺与质量控制概述",
+            "file_path": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
+            "locator": "第3章",
+            "supporting_text": "质量说明",
+        },
+    ]
+    state["results"][1]["citations"] = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
+            "file_path": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
+            "locator": "第1章",
+            "supporting_text": "背景说明",
+        }
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "聚乙烯质量报告",
+                    "sections": [
+                        "1. 引言",
+                        "2. 工艺分析",
+                        "3. 知识库文件清单",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert "## 3. 知识库文件清单" in markdown
+    assert "| 文件名称 | 来源类型 | 支撑章节 | 证据条数 |" in markdown
+    assert markdown.count("| 聚乙烯生产工艺与质量控制概述 | rag |") == 1
+    assert "引言、工艺分析" in markdown
+    assert "| 3 |" in markdown
+    assert "### 证据索引" in markdown
+    assert "| [E1] | rag / /srv/private" not in markdown
+    assert "| [E1] |" in markdown
+    assert "第1章" in markdown
+    assert "/srv/private" not in markdown
+
+
 def test_nested_reference_projection_restores_parent_container(monkeypatch, tmp_path):
     statuses = {
         "T1": _status("VERIFIED_PASS"),
@@ -434,6 +506,32 @@ def test_user_accepted_gap_generates_named_draft_with_visible_warning(
     assert "未完成草稿：已接受的证据缺口或内容风险" in markdown
     assert "工艺分析" in markdown
     assert "缺少装置级控制范围" in markdown
+
+
+def test_user_accepted_verifier_contract_error_hides_internal_schema_terms(
+    monkeypatch, tmp_path
+):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status(
+            "USER_ACCEPTED_WARNING",
+            [
+                {
+                    "code": "ASSESSMENT_CONTRACT_ERROR",
+                    "description": "自动校验未能完成。",
+                }
+            ],
+        ),
+    }
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(_state(statuses=statuses), {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert "自动校验未能完成" in markdown
+    assert "malformed" not in markdown.casefold()
+    assert "collection fields" not in markdown.casefold()
+    assert "json" not in markdown.casefold()
 
 
 def test_missing_admitted_result_blocks_instead_of_silently_omitting_section(

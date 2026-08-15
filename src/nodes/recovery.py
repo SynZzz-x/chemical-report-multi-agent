@@ -843,6 +843,8 @@ def needs_user_input(
         cursor = int(state.get("cursor", 0) or 0)
         if 0 <= cursor < len(tasks) and isinstance(tasks[cursor], dict):
             task = dict(tasks[cursor])
+            if special_choice_accepted and requested_choice == "UPLOAD_RESOURCES":
+                task["use_rag"] = True
             task["use_resources"] = list(
                 dict.fromkeys(list(task.get("use_resources") or []) + uploaded_paths)
             )

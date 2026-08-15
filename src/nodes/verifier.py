@@ -212,7 +212,9 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "format_instructions": format_instructions,
                 }
             )
-            assessment = json.loads(_clean_json_fences(str(response.content)))
+            raw_response = str(response.content)
+            llm_record["response_snippet"] = raw_response[:500]
+            assessment = json.loads(_clean_json_fences(raw_response))
             llm_record["response_snippet"] = str(assessment)[:500]
         except Exception as exc:
             assessment = _service_error_assessment(tasks, cursor, "LLM_ERROR", str(exc))
@@ -451,6 +453,11 @@ def _duplicates_deterministic_issue(
 def _service_error_assessment(
     tasks: list[dict[str, Any]], cursor: int, code: str, description: str
 ) -> dict[str, Any]:
+    user_description = (
+        "自动校验服务未能返回可用的结构化结果。"
+        if code == "LLM_ERROR"
+        else "自动校验服务当前不可用。"
+    )
     return {
         "status": "FAILED",
         "current_section": _task_name(tasks, cursor),
@@ -458,7 +465,7 @@ def _service_error_assessment(
             {
                 "code": code,
                 "category": "EXTERNAL_BLOCKER",
-                "description": description,
+                "description": user_description,
                 "suggestion": "Retry automatic verification after checking model configuration.",
                 "severity": "error",
             }
@@ -479,8 +486,8 @@ def _contract_error_assessment(
             {
                 "code": "ASSESSMENT_CONTRACT_ERROR",
                 "category": "VERIFIER_FAILURE",
-                "description": "Verifier returned malformed collection fields.",
-                "suggestion": "Retry automatic verification with a valid structured assessment.",
+                "description": "自动校验未能完成。",
+                "suggestion": "请重试自动校验，或明确接受当前内容为带风险草稿。",
                 "severity": "error",
             }
         ],
@@ -632,8 +639,8 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
                 {
                     "code": "ASSESSMENT_CONTRACT_ERROR",
                     "category": "VERIFIER_FAILURE",
-                    "description": "Verifier returned a failure without usable issue details.",
-                    "suggestion": "Retry automatic verification with a valid structured assessment.",
+                    "description": "自动校验未能完成。",
+                    "suggestion": "请重试自动校验，或明确接受当前内容为带风险草稿。",
                     "severity": "error",
                 }
             ]

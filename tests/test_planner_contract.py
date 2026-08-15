@@ -1112,6 +1112,7 @@ def test_initial_planner_keeps_reference_review_as_content(monkeypatch):
     [
         "5. 知识库依据与参考文件说明",
         "5. 知识库文件来源与说明",
+        "5. 知识库文件清单",
         "5. 参考文件与证据来源",
     ],
 )

@@ -14,7 +14,11 @@ from langchain_core.runnables import RunnableConfig
 from PIL import Image as PILImage
 
 from ..evidence.identity import normalize_sections_evidence
-from ..evidence.reporting import append_missing_figures, format_evidence_table
+from ..evidence.reporting import (
+    append_missing_figures,
+    format_evidence_table,
+    format_knowledge_base_file_table,
+)
 from ..report_acceptance import (
     BLOCKED,
     DRAFT_WITH_GAPS,
@@ -28,6 +32,7 @@ from ..report_acceptance import (
 from ..report_outline import (
     classify_outline,
     content_container_paths,
+    is_knowledge_base_file_list_section,
     is_reference_section,
     section_container_paths,
     section_markdown_level,
@@ -487,14 +492,32 @@ def _assemble_markdown(
         ),
         None,
     )
-    reference_markdown = format_evidence_table(
-        _deduplicate_citations(sections),
-        heading_level=(
-            section_markdown_level(reference_item.raw) if reference_item else 2
-        ),
-        include_section=True,
-        heading_title=(reference_item.raw if reference_item else "证据来源"),
+    reference_citations = _deduplicate_citations(sections)
+    reference_heading_level = (
+        section_markdown_level(reference_item.raw) if reference_item else 2
     )
+    if reference_item and is_knowledge_base_file_list_section(reference_item.title):
+        file_list_markdown = format_knowledge_base_file_table(
+            reference_citations,
+            heading_level=reference_heading_level,
+            heading_title=reference_item.raw,
+        )
+        evidence_index_markdown = format_evidence_table(
+            reference_citations,
+            heading_level=min(reference_heading_level + 1, 6),
+            include_section=True,
+            heading_title="证据索引",
+        )
+        reference_markdown = "\n\n".join(
+            block for block in (file_list_markdown, evidence_index_markdown) if block
+        )
+    else:
+        reference_markdown = format_evidence_table(
+            reference_citations,
+            heading_level=reference_heading_level,
+            include_section=True,
+            heading_title=(reference_item.raw if reference_item else "证据来源"),
+        )
     all_container_paths = section_container_paths(_intake_sections(state))
     reference_container_path = tuple(
         all_container_paths.get(reference_item.raw, ()) if reference_item else ()
