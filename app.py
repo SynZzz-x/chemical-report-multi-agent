@@ -35,6 +35,7 @@ from src.control_messages import (
     build_blocker_resume_payload,
     build_resume_payload,
     is_displayable_assistant_message,
+    is_displayable_ui_message,
     validate_blocker_submission,
 )
 from src.graph import WorkFlow, WorkFlowAuto
@@ -42,6 +43,7 @@ from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
 from src.report_acceptance import delivery_path_candidates
+from src.report_preview import first_markdown_path, read_markdown_preview
 from src.ui_projection import summarize_step as _summarize_step
 from src.utils.path_manager import get_session_cache_dir
 
@@ -380,6 +382,9 @@ def _render_ui_message(item: dict[str, Any]) -> None:
     content = item.get("content", "")
     payload = item.get("payload") or {}
 
+    if not is_displayable_ui_message(role, kind, content):
+        return
+
     with st.chat_message(role):
         if kind == "plan":
             _render_plan(payload)
@@ -714,6 +719,7 @@ def _report_paths_from_state() -> list[Path]:
         Path(path)
         for path in delivery_path_candidates(
             final_result,
+            state_report_status=values.get("report_status"),
             stored_paths=stored_paths,
             fallback_paths=fallback_paths,
         )
@@ -744,6 +750,22 @@ def _report_paths_from_state() -> list[Path]:
         if resolved.is_file():
             unique.append(resolved)
     return unique
+
+
+def _final_markdown_path() -> Path | None:
+    """Return the authoritative Markdown artifact admitted for this job."""
+
+    return first_markdown_path(_report_paths_from_state())
+
+
+def _render_report_preview() -> None:
+    """Render the final report from its admitted disk artifact, if available."""
+
+    content = read_markdown_preview(_final_markdown_path())
+    if content is None:
+        return
+    st.subheader("最终报告")
+    st.markdown(content)
 
 
 def _render_report_downloads() -> None:
@@ -890,6 +912,7 @@ st.title("化工行业多 Agent 报告系统")
 st.caption("Streamlit 只负责输入与渲染；LangGraph State 负责业务上下文。")
 
 _render_history()
+_render_report_preview()
 _render_report_downloads()
 pending_interrupt = st.session_state.get("pending_interrupt")
 has_blocker_actions = bool(blocker_choices(pending_interrupt))

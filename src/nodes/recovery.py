@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
+from src.control_messages import blocker_action_spec
 from src.evidence_waivers import (
     record_evidence_gap_acceptance,
     split_waivable_evidence_gaps,
@@ -22,11 +23,13 @@ from src.nodes.planner import planner as planner_node
 from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
 from src.recovery.policy import (
     IssueCategory,
+    NEXT_RESUME_ALIASES,
     WorkflowAction,
     _continuation_action,
     classify_issue,
     commit_current_result,
     decide_recovery_action,
+    sanitize_blocker_choices,
 )
 from src.report_validation import parse_length_target
 from src.report_acceptance import (
@@ -37,19 +40,13 @@ from src.report_acceptance import (
 )
 from src.state import State
 from src.task_contract import effective_web_allowed
-from src.tool_capabilities import public_web_runtime_available
 
 
 logger = logging.getLogger(__name__)
 
 
 _RESUME_ACTION_ALIASES = {
-    "NEXT": WorkflowAction.NEXT.value,
-    "CONTINUE": WorkflowAction.NEXT.value,
-    "继续": WorkflowAction.NEXT.value,
-    "带限制继续": WorkflowAction.NEXT.value,
-    "接受当前结果": WorkflowAction.NEXT.value,
-    "跳过": WorkflowAction.NEXT.value,
+    **{alias: WorkflowAction.NEXT.value for alias in NEXT_RESUME_ALIASES},
     "DONE": WorkflowAction.DONE.value,
     "完成": WorkflowAction.DONE.value,
     "结束": WorkflowAction.DONE.value,
@@ -670,30 +667,41 @@ def needs_user_input(
     pending = deepcopy(state.get("pending_user_action") or {})
     category = str(pending.get("category") or "EXTERNAL_BLOCKER")
     task_id = str(pending.get("task_id") or _current_task_id(state))
-    issues = list(pending.get("issues") or (state.get("assessment") or {}).get("issues") or [])
-    accepted_choices = list(
-        pending.get("accepted_choices")
-        or (
-            _EVIDENCE_USER_CHOICES
-            if category == "EVIDENCE_GAP"
-            else ["UPLOAD_RESOURCES", "REWORK", "EVIDENCE_RECOVERY", "NEXT", "DONE"]
-        )
+    issues: list[dict[str, Any]] = []
+    for issue in [
+        *(pending.get("issues") or []),
+        *((state.get("assessment") or {}).get("issues") or []),
+    ]:
+        if isinstance(issue, dict) and issue not in issues:
+            issues.append(issue)
+    accepted_choices = sanitize_blocker_choices(
+        state,
+        issues,
+        pending.get("accepted_choices"),
+        category,
     )
-    if category == "EVIDENCE_GAP" and not public_web_runtime_available():
-        accepted_choices = [
-            choice for choice in accepted_choices if choice != "AUTHORIZE_WEB"
-        ]
     evidence_descriptions = [
         str(issue.get("description") or "").strip()
         for issue in issues
         if isinstance(issue, dict)
         and str(issue.get("description") or "").strip()
     ]
+    accepted_choice_labels = [
+        str(blocker_action_spec(choice).get("label") or choice)
+        for choice in accepted_choices
+    ]
     default_evidence_guidance = (
         "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
         + "\n".join(f"- {description}" for description in evidence_descriptions)
-        + "\n请在页面的阻塞处理区选择：上传补充资料、授权公开网络检索、"
-        "调整任务要求，或接受仅报告现有证据及缺口。"
+        + "\n请在页面的阻塞处理区选择："
+        + "、".join(accepted_choice_labels)
+        + "。"
+        + (
+            "\n“接受证据缺口”仅接受证据可得性缺口；篇幅、格式、内容及"
+            "引用完整性错误仍会继续处理。"
+            if "ACCEPT_EVIDENCE_GAP" in accepted_choices
+            else ""
+        )
     )
     guidance = str(
         pending.get("guidance")

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from os.path import basename
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
 
 from src.evidence_waivers import (
     is_waivable_evidence_gap,
@@ -51,19 +52,16 @@ MAX_TASK_PATCHES = 1
 MAX_JOB_PATCHES = 3
 MAX_VERIFIER_RETRIES = 1
 
+NEXT_RESUME_ALIASES = frozenset(
+    {"NEXT", "CONTINUE", "继续", "带限制继续", "接受当前结果", "跳过"}
+)
+
 _EVIDENCE_USER_CHOICES = [
     "UPLOAD_RESOURCES",
     "AUTHORIZE_WEB",
     "ADJUST_REQUIREMENT",
     "ACCEPT_EVIDENCE_GAP",
 ]
-_CONTENT_USER_CHOICES = [
-    "REWORK",
-    "ADJUST_REQUIREMENT",
-    "ACCEPT_AS_DRAFT",
-    "DONE",
-]
-
 _CATEGORY_PRIORITY = {
     IssueCategory.CONTENT_DEFECT: 0,
     IssueCategory.EVIDENCE_GAP: 1,
@@ -140,7 +138,7 @@ def _has_authorized_evidence_retrieval(state: Dict[str, Any]) -> bool:
     )
 
 
-def _current_task(state: Dict[str, Any]) -> Dict[str, Any]:
+def _current_task(state: Mapping[str, Any]) -> Mapping[str, Any]:
     tasks = state.get("tasks") or []
     cursor = int(state.get("cursor", 0) or 0)
     if 0 <= cursor < len(tasks) and isinstance(tasks[cursor], dict):
@@ -208,14 +206,16 @@ def _as_strings(values: Iterable[Any]) -> set[str]:
     return identifiers
 
 
-def _resource_identifiers(resource: Dict[str, Any]) -> set[str]:
+def _resource_identifiers(resource: Mapping[str, Any]) -> set[str]:
     return _as_strings(
         resource.get(key)
         for key in ("name", "path", "file_id", "resource_id")
     )
 
 
-def _missing_resource_category(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
+def _missing_resource_category(
+    issue: Mapping[str, Any], state: Mapping[str, Any]
+) -> IssueCategory:
     requested = str(issue.get("resource_name") or "").strip()
     if not requested:
         return IssueCategory.EXTERNAL_BLOCKER
@@ -237,7 +237,9 @@ def _missing_resource_category(issue: Dict[str, Any], state: Dict[str, Any]) -> 
     return IssueCategory.LOCAL_PLAN_DEFECT
 
 
-def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
+def _classify_issue(
+    issue: Mapping[str, Any], state: Mapping[str, Any]
+) -> IssueCategory:
     code = str(issue.get("code") or "").strip().upper()
     if code == "MISSING_RESOURCE":
         return _missing_resource_category(issue, state)
@@ -260,10 +262,70 @@ def _classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCatego
         return IssueCategory.CONTENT_DEFECT
 
 
-def classify_issue(issue: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
+def classify_issue(
+    issue: Mapping[str, Any], state: Mapping[str, Any]
+) -> IssueCategory:
     """Classify one normalized issue for execution-level recovery planning."""
 
     return _classify_issue(issue, state)
+
+
+def _allows_accept_as_draft(
+    state: Mapping[str, Any],
+    issues: Iterable[Mapping[str, Any]],
+) -> bool:
+    """Allow draft acceptance only when every evidence issue is waivable."""
+
+    evidence_issues = [
+        issue
+        for issue in issues
+        if classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
+    ]
+    return not any(
+        not is_waivable_evidence_gap(issue) for issue in evidence_issues
+    )
+
+
+def sanitize_blocker_choices(
+    state: Mapping[str, Any],
+    issues: Iterable[Mapping[str, Any]],
+    choices: Iterable[Any] | None,
+    category: str,
+) -> list[str]:
+    """Normalize current or persisted blocker choices through policy safety rules."""
+
+    issue_list = list(issues)
+    normalized = list(
+        dict.fromkeys(
+            str(choice or "").strip().upper()
+            for choice in (choices or [])
+            if str(choice or "").strip()
+        )
+    )
+    if not normalized:
+        normalized = (
+            ["UPLOAD_RESOURCES", "AUTHORIZE_WEB", "ADJUST_REQUIREMENT", "DONE"]
+            if str(category or "").upper() == IssueCategory.EVIDENCE_GAP.value
+            else ["REWORK", "DONE"]
+        )
+
+    evidence_issues = [
+        issue
+        for issue in issue_list
+        if classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
+    ]
+    has_waivable_gap = any(
+        is_waivable_evidence_gap(issue) for issue in evidence_issues
+    )
+    allow_draft = _allows_accept_as_draft(state, issue_list)
+    disallowed: set[str] = set()
+    if not has_waivable_gap:
+        disallowed.add("ACCEPT_EVIDENCE_GAP")
+    if not allow_draft:
+        disallowed.update({"ACCEPT_AS_DRAFT", *NEXT_RESUME_ALIASES})
+    if not public_web_runtime_available():
+        disallowed.add("AUTHORIZE_WEB")
+    return [choice for choice in normalized if choice not in disallowed]
 
 
 def classify_assessment(assessment: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
@@ -346,11 +408,17 @@ def _pending_user_action(
         ),
         "blocker_status": "ACTIVE",
     }
+    issues = [
+        issue
+        for issue in assessment.get("issues") or []
+        if isinstance(issue, Mapping)
+    ]
+    allow_draft = _allows_accept_as_draft(state, issues)
     if category is IssueCategory.EVIDENCE_GAP:
         evidence_issues = [
             issue
             for issue in assessment.get("issues") or []
-            if isinstance(issue, dict)
+            if isinstance(issue, Mapping)
             and classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
         ]
         accepted_choices = list(_EVIDENCE_USER_CHOICES[:-1])
@@ -361,6 +429,8 @@ def _pending_user_action(
             ]
         if any(is_waivable_evidence_gap(issue) for issue in evidence_issues):
             accepted_choices.append("ACCEPT_EVIDENCE_GAP")
+        if evidence_issues and allow_draft:
+            accepted_choices.append("ACCEPT_AS_DRAFT")
         descriptions = [
             str(issue.get("description") or "").strip()
             for issue in evidence_issues
@@ -372,7 +442,9 @@ def _pending_user_action(
             choices_for_guidance.append("授权公开网络检索")
         choices_for_guidance.append("调整任务要求")
         if "ACCEPT_EVIDENCE_GAP" in accepted_choices:
-            choices_for_guidance.append("接受仅报告现有证据及缺口")
+            choices_for_guidance.append("接受证据缺口并继续修复其他问题")
+        if "ACCEPT_AS_DRAFT" in accepted_choices:
+            choices_for_guidance.append("接受为带风险草稿")
         choice_guidance = "、".join(choices_for_guidance) + "。"
         runtime_guidance = (
             "\n当前服务器未提供可用的公开网络检索工具；请先安装并初始化该能力，"
@@ -391,28 +463,52 @@ def _pending_user_action(
                         else "当前任务的自动证据恢复已达上限，仍存在以下证据缺口：\n"
                     )
                     + f"{gap_list or '- 当前授权来源不足以满足硬性证据要求。'}\n"
+                    + (
+                        "“接受证据缺口”仅接受证据可得性缺口；篇幅、格式、内容及"
+                        "引用完整性错误仍会继续处理。\n"
+                        if "ACCEPT_EVIDENCE_GAP" in accepted_choices
+                        else ""
+                    )
                     + f"请在页面的阻塞处理区选择：{choice_guidance}"
                     + f"{runtime_guidance}"
                 ),
             }
         )
     elif category is IssueCategory.CONTENT_DEFECT:
+        accepted_choices = ["REWORK", "ADJUST_REQUIREMENT"]
+        if allow_draft:
+            accepted_choices.append("ACCEPT_AS_DRAFT")
+        accepted_choices.append("DONE")
+        choice_guidance = (
+            "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
+            if allow_draft
+            else "按反馈再次返工、调整任务要求，或结束工作流。"
+        )
         pending.update(
             {
-                "accepted_choices": list(_CONTENT_USER_CHOICES),
+                "accepted_choices": accepted_choices,
                 "guidance": (
                     "当前任务已达到自动返工上限，但仍未通过验收。请在页面的阻塞处理区选择："
-                    "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
+                    f"{choice_guidance}"
                 ),
             }
         )
     elif category is IssueCategory.VERIFIER_FAILURE:
+        accepted_choices = ["REWORK"]
+        if allow_draft:
+            accepted_choices.append("ACCEPT_AS_DRAFT")
+        accepted_choices.append("DONE")
+        choice_guidance = (
+            "重新生成后再校验、明确接受当前未验证内容为带风险草稿，或结束工作流。"
+            if allow_draft
+            else "重新生成后再校验，或结束工作流。"
+        )
         pending.update(
             {
-                "accepted_choices": ["REWORK", "ACCEPT_AS_DRAFT", "DONE"],
+                "accepted_choices": accepted_choices,
                 "guidance": (
-                    "自动校验未能完成。请在页面的阻塞处理区选择：重新生成后再校验、"
-                    "明确接受当前未验证内容为带风险草稿，或结束工作流。"
+                    "自动校验未能完成。请在页面的阻塞处理区选择："
+                    f"{choice_guidance}"
                 ),
             }
         )

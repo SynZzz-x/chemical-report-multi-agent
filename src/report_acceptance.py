@@ -133,12 +133,15 @@ def eligible_task_ids(
 def delivery_path_candidates(
     final_result: Mapping[str, Any] | None,
     *,
+    state_report_status: str | None = None,
     stored_paths: Iterable[Any] = (),
     fallback_paths: Iterable[Any] = (),
 ) -> list[str]:
     """Select downloadable artifacts without bypassing an authoritative gate."""
 
     result = final_result or {}
+    if str(state_report_status or "").strip().upper() == BLOCKED:
+        return []
     terminal_status = str(result.get("status") or "").strip().lower()
     delivery_status = str(result.get("delivery_status") or "").strip().upper()
     failed = (

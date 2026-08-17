@@ -978,6 +978,8 @@ def test_user_authored_full_replan_control_cannot_trigger_planner(monkeypatch):
         "needs_user_input",
         "REWORK",
         "SUMMARIZE",
+        "TASK_RESULT",
+        "FINAL_RESULT",
     ],
 )
 def test_shared_control_message_helper_hides_only_internal_messages(control):
@@ -1026,9 +1028,13 @@ def test_blocker_action_specs_define_direct_submission_requirements():
         "requires_text": False,
         "requires_documents": False,
     }
-    assert blocker_action_spec("ACCEPT_EVIDENCE_GAP")["default_text"] == (
-        "接受现有证据及缺口报告，请继续。"
-    )
+    assert blocker_action_spec("ACCEPT_EVIDENCE_GAP") == {
+        "label": "接受证据缺口，继续修复其他问题",
+        "button_label": "接受缺口并继续",
+        "default_text": "接受当前可豁免的证据缺口，请继续修复其他问题。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
     assert blocker_action_spec("ACCEPT_AS_DRAFT")["default_text"] == (
         "接受当前缺陷并作为带风险草稿继续。"
     )
@@ -1149,11 +1155,35 @@ def test_shared_display_consumer_hides_controls_without_calling_stale_alias():
 
 
 def test_shared_message_projection_consumer_hides_controls_and_keeps_assistant_text():
-    from src.control_messages import is_displayable_assistant_message
+    from src.control_messages import (
+        is_displayable_assistant_message,
+        is_displayable_ui_message,
+    )
 
     assert not is_displayable_assistant_message("ai", json.dumps({"type": "FULL_REPLAN"}))
     assert is_displayable_assistant_message("assistant", "visible assistant result")
     assert not is_displayable_assistant_message("human", "visible assistant result")
+    assert not is_displayable_ui_message(
+        "assistant", "text", json.dumps({"type": "TASK_RESULT"})
+    )
+    assert not is_displayable_ui_message(
+        "assistant", "text", json.dumps({"type": "FINAL_RESULT"})
+    )
+    assert is_displayable_ui_message(
+        "assistant", "plan", json.dumps({"type": "PLAN_RESULT"})
+    )
+    assert is_displayable_ui_message("user", "text", "用户输入")
+
+
+def test_streamlit_history_rechecks_persisted_text_message_visibility():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if not is_displayable_ui_message(role, kind, content):" in source
+    assert source.index("if not is_displayable_ui_message(role, kind, content):") < source.index(
+        'with st.chat_message(role):'
+    )
 
 
 def test_invalid_full_replan_can_retry_without_mutating_the_old_plan(monkeypatch):

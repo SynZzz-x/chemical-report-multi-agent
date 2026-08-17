@@ -100,6 +100,15 @@ def test_authoritative_blocked_result_never_exposes_stale_report_paths():
     ) == []
 
 
+def test_top_level_blocked_status_never_exposes_legacy_stored_report_paths():
+    assert delivery_path_candidates(
+        {},
+        state_report_status="BLOCKED",
+        stored_paths=["/old/report.docx"],
+        fallback_paths=["/cache/report.docx"],
+    ) == []
+
+
 def test_authoritative_renderer_failure_does_not_fall_back_to_old_artifacts():
     assert delivery_path_candidates(
         {"report_status": "READY_FOR_FINAL", "attachments": [], "path": None},

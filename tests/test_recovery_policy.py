@@ -52,6 +52,13 @@ def assessment_with(code, category, **issue):
     }
 
 
+def assessment_with_issues(*issues):
+    return {
+        "status": "FAILED",
+        "issues": list(issues),
+    }
+
+
 def test_evidence_gap_recovers_once_then_requests_user_input():
     state = recovery_state(task_id="T2")
     assessment = assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP")
@@ -70,6 +77,7 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
         "AUTHORIZE_WEB",
         "ADJUST_REQUIREMENT",
         "ACCEPT_EVIDENCE_GAP",
+        "ACCEPT_AS_DRAFT",
     ]
     assert "上传" in second["pending_user_action"]["guidance"]
     assert "页面" in second["pending_user_action"]["guidance"]
@@ -112,6 +120,77 @@ def test_verifier_failure_blocker_never_offers_ambiguous_next_action():
         "DONE",
     ]
     assert "NEXT" not in decision["pending_user_action"]["accepted_choices"]
+
+
+def test_content_and_waivable_evidence_gap_can_be_explicitly_accepted_as_draft():
+    state = recovery_state(
+        task_id="T1",
+        evidence_recovery_count={"T1": 1},
+    )
+    assessment = assessment_with_issues(
+        {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+        {"code": "EVIDENCE_GAP", "category": "EVIDENCE_GAP"},
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["pending_user_action"]["category"] == "EVIDENCE_GAP"
+    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+    assert "ACCEPT_AS_DRAFT" in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+
+
+@pytest.mark.parametrize(
+    "integrity_code",
+    ["INVALID_CITATION_ID", "MISSING_INLINE_CITATION", "SOURCE_UNSUPPORTED"],
+)
+def test_content_and_integrity_issue_cannot_be_accepted_as_draft(integrity_code):
+    state = recovery_state(
+        task_id="T1",
+        evidence_recovery_count={"T1": 1},
+    )
+    assessment = assessment_with_issues(
+        {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+        {"code": integrity_code, "category": "EVIDENCE_GAP"},
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert "ACCEPT_EVIDENCE_GAP" not in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+    assert "ACCEPT_AS_DRAFT" not in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+    assert "带风险草稿" not in decision["pending_user_action"]["guidance"]
+
+
+@pytest.mark.parametrize(
+    "integrity_code",
+    ["INVALID_CITATION_ID", "MISSING_INLINE_CITATION", "SOURCE_UNSUPPORTED"],
+)
+def test_verifier_failure_and_integrity_issue_cannot_be_accepted_as_draft(
+    integrity_code,
+):
+    state = recovery_state(
+        task_id="T1",
+        verifier_retry_count={"T1": 1},
+    )
+    assessment = assessment_with_issues(
+        {"code": "LLM_ERROR", "category": "VERIFIER_FAILURE"},
+        {"code": integrity_code, "category": "EVIDENCE_GAP"},
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+    assert "ACCEPT_AS_DRAFT" not in decision["pending_user_action"][
+        "accepted_choices"
+    ]
+    assert "带风险草稿" not in decision["pending_user_action"]["guidance"]
 
 
 def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeypatch):

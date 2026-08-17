@@ -19,6 +19,8 @@ INTERNAL_CONTROL_TYPES = frozenset(
         "needs_user_input",
         "REWORK",
         "SUMMARIZE",
+        "TASK_RESULT",
+        "FINAL_RESULT",
     }
 )
 
@@ -32,9 +34,9 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_documents": False,
     },
     "ACCEPT_EVIDENCE_GAP": {
-        "label": "接受现有证据及缺口报告",
-        "button_label": "接受并继续",
-        "default_text": "接受现有证据及缺口报告，请继续。",
+        "label": "接受证据缺口，继续修复其他问题",
+        "button_label": "接受缺口并继续",
+        "default_text": "接受当前可豁免的证据缺口，请继续修复其他问题。",
         "requires_text": False,
         "requires_documents": False,
     },
@@ -138,6 +140,16 @@ def is_displayable_assistant_content(content: str) -> bool:
 def is_displayable_assistant_message(role: str, content: str) -> bool:
     """Apply the role and internal-control rules used by every chat projection."""
     return str(role or "").lower() in {"ai", "assistant"} and is_displayable_assistant_content(content)
+
+
+def is_displayable_ui_message(role: str, kind: str, content: str) -> bool:
+    """Filter restored text messages while preserving structured UI projections."""
+
+    if str(kind or "text").lower() != "text":
+        return True
+    if str(role or "").lower() not in {"ai", "assistant"}:
+        return True
+    return is_displayable_assistant_message(role, content)
 
 
 def blocker_guidance(payload: Any) -> str | None:

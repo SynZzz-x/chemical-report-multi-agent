@@ -508,7 +508,7 @@ def test_evidence_blocker_resume_returns_to_evidence_recovery_without_cursor_res
     assert "docs" in update and update["docs"] == []
 
 
-def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
+def test_legacy_evidence_blocker_without_choices_fails_closed(monkeypatch):
     captured = {}
 
     def fake_interrupt(payload):
@@ -530,13 +530,14 @@ def test_evidence_blocker_exposes_specific_user_resolution_choices(monkeypatch):
         "UPLOAD_RESOURCES",
         "AUTHORIZE_WEB",
         "ADJUST_REQUIREMENT",
-        "ACCEPT_EVIDENCE_GAP",
+        "DONE",
     ]
     assert "catalyst life" in captured["guidance_text"]
-    assert update["workflow_action"] == "NEXT"
-    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
-    assert update["section_status"]["T2"]["status"] == "USER_ACCEPTED_GAP"
-    assert update["report_status"] == "BLOCKED"
+    assert "接受仅报告现有证据及缺口" not in captured["guidance_text"]
+    assert "接受证据缺口" not in captured["guidance_text"]
+    assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert "results" not in update
+    assert "section_status" not in update
 
 
 def test_accepting_evidence_gap_reworks_remaining_content_defect(monkeypatch):
@@ -731,6 +732,120 @@ def test_special_resume_choice_cannot_bypass_pending_accepted_choices(monkeypatc
     assert update["workflow_action"] == "REWORK"
     assert "web_authorized" not in update
     assert "tasks" not in update
+
+
+def test_accept_as_draft_cannot_bypass_pending_accepted_choices(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "ACCEPT_AS_DRAFT", "text": "", "docs": []},
+    )
+    state = graph_state(
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": [{"code": "INVALID_CITATION_ID"}],
+            "accepted_choices": ["UPLOAD_RESOURCES", "ADJUST_REQUIREMENT"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert "results" not in update
+    assert "section_status" not in update
+
+
+def test_legacy_draft_choice_is_removed_for_citation_integrity_issue(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "ACCEPT_AS_DRAFT", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {"code": "LLM_ERROR"},
+                {"code": "INVALID_CITATION_ID"},
+            ],
+        },
+        pending_user_action={
+            "category": "VERIFIER_FAILURE",
+            "task_id": "T2",
+            "issues": [{"code": "LLM_ERROR"}],
+            "accepted_choices": ["REWORK", "ACCEPT_AS_DRAFT", "DONE"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert "ACCEPT_AS_DRAFT" not in captured["accepted_choices"]
+    assert update["workflow_action"] == "REWORK"
+    assert "results" not in update
+    assert "section_status" not in update
+
+
+def test_missing_blocker_choices_cannot_fall_back_to_accepting_next(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "NEXT", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        pending_user_action={
+            "category": "VERIFIER_FAILURE",
+            "task_id": "T2",
+            "issues": [
+                {"code": "LLM_ERROR"},
+                {"code": "INVALID_CITATION_ID"},
+            ],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert "NEXT" not in captured["accepted_choices"]
+    assert update["workflow_action"] == "REWORK"
+    assert "results" not in update
+    assert "section_status" not in update
+
+
+@pytest.mark.parametrize(
+    "next_alias",
+    ["CONTINUE", "继续", "带限制继续", "接受当前结果", "跳过"],
+)
+def test_legacy_next_alias_cannot_bypass_integrity_gate(monkeypatch, next_alias):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": next_alias, "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [{"code": "INVALID_CITATION_ID"}],
+        },
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": [{"code": "INVALID_CITATION_ID"}],
+            "accepted_choices": ["REWORK", next_alias, "DONE"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert next_alias.upper() not in captured["accepted_choices"]
+    assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert "results" not in update
+    assert "section_status" not in update
 
 
 def test_upload_resources_uses_category_appropriate_resume_route(monkeypatch):
@@ -941,7 +1056,7 @@ def test_evidence_blocker_honors_explicit_rework_resume(monkeypatch):
     )
 
 
-def test_explicit_next_resume_commits_current_result_before_advancing(monkeypatch):
+def test_explicit_next_cannot_bypass_missing_blocker_contract(monkeypatch):
     monkeypatch.setattr(
         recovery_module,
         "interrupt",
@@ -957,8 +1072,9 @@ def test_explicit_next_resume_commits_current_result_before_advancing(monkeypatc
 
     update = needs_user_input(state, {})
 
-    assert update["workflow_action"] == "NEXT"
-    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
+    assert update["workflow_action"] == "REWORK"
+    assert "results" not in update
+    assert "section_status" not in update
 
 
 def test_resume_dict_text_alias_honors_only_an_accepted_action(monkeypatch):
