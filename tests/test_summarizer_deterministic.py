@@ -534,6 +534,74 @@ def test_user_accepted_verifier_contract_error_hides_internal_schema_terms(
     assert "json" not in markdown.casefold()
 
 
+def test_user_accepted_missing_figure_is_omitted_from_draft(monkeypatch, tmp_path):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status(
+            "USER_ACCEPTED_WARNING",
+            [{"code": "MISSING_FIGURE", "description": "要求的因果图未能生成"}],
+        ),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"][1]["generate_figure"] = True
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert result["report_status"] == "DRAFT_WITH_GAPS"
+    assert "要求的因果图未能生成" in markdown
+    assert result["blocking_sections"] == []
+
+
+def test_user_accepted_missing_table_is_omitted_from_draft(monkeypatch, tmp_path):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status(
+            "USER_ACCEPTED_WARNING",
+            [{"code": "MISSING_TABLE", "description": "要求的表格未能生成"}],
+        ),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"][1]["generate_table"] = True
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert result["report_status"] == "DRAFT_WITH_GAPS"
+    assert "要求的表格未能生成" in markdown
+    assert result["blocking_sections"] == []
+
+
+def test_user_acceptance_of_unrelated_issue_does_not_waive_missing_figure(
+    monkeypatch,
+):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status(
+            "USER_ACCEPTED_WARNING",
+            [{"code": "TOO_LONG", "description": "正文超过篇幅要求"}],
+        ),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"][1]["generate_figure"] = True
+    monkeypatch.setattr(
+        summarizer_v2,
+        "get_session_cache_dir",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("new missing asset must block delivery")
+        ),
+    )
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert result["report_status"] == "BLOCKED"
+    assert result["blocking_sections"][0]["issues"][0]["code"] == (
+        "MISSING_FIGURE_ASSET"
+    )
+
+
 def test_missing_admitted_result_blocks_instead_of_silently_omitting_section(
     monkeypatch, tmp_path
 ):
@@ -683,6 +751,37 @@ def test_corrupt_image_file_blocks_delivery(monkeypatch, tmp_path):
 
     assert result["report_status"] == "BLOCKED"
     assert result["blocking_sections"][0]["issues"][0]["code"] == "INVALID_FIGURE_CONTENT"
+
+
+def test_user_accepted_missing_figure_does_not_waive_corrupt_image(
+    monkeypatch, tmp_path
+):
+    statuses = {
+        "T1": _status("VERIFIED_PASS"),
+        "T2": _status(
+            "USER_ACCEPTED_WARNING",
+            [{"code": "MISSING_FIGURE", "description": "接受缺少图形"}],
+        ),
+    }
+    state = _state(statuses=statuses)
+    state["tasks"][1]["generate_figure"] = True
+    figure_path = tmp_path / "fake.png"
+    figure_path.write_bytes(b"not a png")
+    state["results"][0]["figures"] = [{"path": str(figure_path)}]
+    monkeypatch.setattr(
+        summarizer_v2,
+        "get_session_cache_dir",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("corrupt accepted asset must still block")
+        ),
+    )
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert result["report_status"] == "BLOCKED"
+    assert result["blocking_sections"][0]["issues"][0]["code"] == (
+        "INVALID_FIGURE_CONTENT"
+    )
 
 
 def test_truncated_jpeg_that_passes_verify_is_not_renderable(tmp_path):

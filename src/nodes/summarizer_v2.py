@@ -44,6 +44,36 @@ from ..utils.path_manager import get_session_cache_dir
 
 logger = logging.getLogger(__name__)
 
+_ACCEPTED_MISSING_ASSET_CODES = {
+    "figure": frozenset(
+        {
+            "MISSING_FIGURE",
+            "MISSING_IMAGE",
+            "MISSING_FIGURE_ASSET",
+        }
+    ),
+    "table": frozenset({"MISSING_TABLE", "MISSING_TABLE_ASSET"}),
+}
+
+
+def _user_accepted_missing_asset(
+    status_entry: Mapping[str, Any], asset_kind: str
+) -> bool:
+    """Return whether the user explicitly accepted this asset absence family."""
+
+    if (
+        str(status_entry.get("status") or "") != USER_ACCEPTED_WARNING
+        or str(status_entry.get("accepted_by") or "") != "user"
+    ):
+        return False
+    accepted_codes = _ACCEPTED_MISSING_ASSET_CODES.get(asset_kind, frozenset())
+    return any(
+        str(issue.get("code") or "").strip().upper() in accepted_codes
+        for issue in status_entry.get("issues") or []
+        if isinstance(issue, Mapping)
+    )
+
+
 def find_title(state: State) -> str:
     for message in state.get("messages", []) or []:
         try:
@@ -261,7 +291,18 @@ def _ordered_sections(
                 invalid_tables += 1
                 continue
             valid_tables.append(table)
-        if invalid_tables or (task.get("generate_table") and not valid_tables):
+        missing_required_table = bool(task.get("generate_table") and not valid_tables)
+        accepted_missing_table = (
+            missing_required_table
+            and not invalid_tables
+            and _user_accepted_missing_asset(status_entry, "table")
+        )
+        if accepted_missing_table:
+            logger.info(
+                "Summarizer accepted asset degradation: task=%s asset=table",
+                task_id,
+            )
+        elif invalid_tables or missing_required_table:
             code = "INVALID_TABLE_ASSET" if invalid_tables else "MISSING_TABLE_ASSET"
             missing.append(
                 {
@@ -314,8 +355,24 @@ def _ordered_sections(
                 if markers not in description:
                     figure["description"] = f"{description}（关系证据：{markers}）"
             figures.append(figure)
-        if invalid_figures or missing_figure_paths or invalid_figure_content or (
-            task.get("generate_figure") and not figures
+        missing_required_figure = bool(task.get("generate_figure") and not figures)
+        accepted_missing_figure = (
+            missing_required_figure
+            and not invalid_figures
+            and not missing_figure_paths
+            and not invalid_figure_content
+            and _user_accepted_missing_asset(status_entry, "figure")
+        )
+        if accepted_missing_figure:
+            logger.info(
+                "Summarizer accepted asset degradation: task=%s asset=figure",
+                task_id,
+            )
+        elif (
+            invalid_figures
+            or missing_figure_paths
+            or invalid_figure_content
+            or missing_required_figure
         ):
             if missing_figure_paths:
                 code = "MISSING_FIGURE_FILE"
@@ -402,6 +459,10 @@ def _blocking_sections(state: State) -> list[dict[str, Any]]:
 
 
 def _blocked_update(blocking_sections: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    logger.warning(
+        "Summarizer admission blocked: blocking_sections=%s",
+        list(blocking_sections),
+    )
     final_result = {
         "summary": "报告未满足正式交付准入条件。",
         "evaluation": "请先处理阻塞章节，或明确接受相应缺口后生成带风险草稿。",
@@ -597,6 +658,15 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
     tasks = state.get("tasks") or []
     statuses = state.get("section_status") or {}
     report_status = derive_report_status(tasks, statuses)
+    logger.info(
+        "Summarizer admission: report_status=%s section_status=%s",
+        report_status,
+        {
+            str(task_id): str(entry.get("status") or "")
+            for task_id, entry in statuses.items()
+            if isinstance(entry, Mapping)
+        },
+    )
     if report_status == BLOCKED:
         return _blocked_update(_blocking_sections(state))
 
