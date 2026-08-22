@@ -47,6 +47,13 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_text": False,
         "requires_documents": False,
     },
+    "RETRY_ASSET": {
+        "label": "重新生成图形或表格",
+        "button_label": "重新生成资产",
+        "default_text": "仅重新生成当前缺失的图形或表格，不重写正文。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
     "ADJUST_REQUIREMENT": {
         "label": "调整任务要求",
         "button_label": "提交新要求",

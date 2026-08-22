@@ -583,6 +583,98 @@ def test_accepting_evidence_gap_reworks_remaining_content_defect(monkeypatch):
     assert update["section_status"]["T2"]["status"] == "BLOCKED"
 
 
+def test_accepting_evidence_gap_routes_remaining_figure_to_asset_recovery(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "ACCEPT_EVIDENCE_GAP", "text": "", "docs": []},
+    )
+    evidence_issue = evidence_gap_assessment()["issues"][0]
+    figure_issue = {
+        "code": "MISSING_FIGURE",
+        "category": "CONTENT_DEFECT",
+        "description": "缺少正式因果图",
+    }
+    state = graph_state(
+        assessment={"status": "FAILED", "issues": [evidence_issue, figure_issue]},
+        pending_user_action={
+            "category": "EVIDENCE_GAP",
+            "task_id": "T2",
+            "issues": [evidence_issue, figure_issue],
+            "accepted_choices": ["ACCEPT_EVIDENCE_GAP"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "ASSET_RECOVERY"
+    assert update["asset_retry_count"] == {"T2": 1}
+    assert "worker_state" not in update
+
+
+def test_asset_blocker_retry_routes_directly_to_asset_recovery(monkeypatch):
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {"action": "RETRY_ASSET", "text": "", "docs": []},
+    )
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [{"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"}],
+        },
+        pending_user_action={
+            "category": "CONTENT_DEFECT",
+            "task_id": "T2",
+            "issues": [{"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"}],
+            "accepted_choices": [
+                "RETRY_ASSET",
+                "ADJUST_REQUIREMENT",
+                "ACCEPT_AS_DRAFT",
+                "DONE",
+            ],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert update["workflow_action"] == "ASSET_RECOVERY"
+    assert "worker_state" not in update
+
+
+def test_stale_retry_asset_choice_cannot_bypass_mixed_issue_policy(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "RETRY_ASSET", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"},
+                {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+            ],
+        },
+        pending_user_action={
+            "category": "CONTENT_DEFECT",
+            "task_id": "T2",
+            "issues": [
+                {"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"},
+                {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+            ],
+            "accepted_choices": ["RETRY_ASSET", "REWORK", "DONE"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert "RETRY_ASSET" not in captured["accepted_choices"]
+    assert update["workflow_action"] == "REWORK"
+
+
 def test_length_rewrite_feedback_is_tool_free_and_preserves_source_result():
     state = graph_state(
         assessment={
@@ -1398,6 +1490,8 @@ def test_auto_graph_has_no_replan_route_to_planner():
     assert '"Verifier", "DecisionPolicy"' in source
     assert '"DecisionPolicy"' in source
     assert '"PlanPatcher"' in source
+    assert '"AssetRecovery"' in source
+    assert '"ASSET_RECOVERY": "AssetRecovery"' in source
     assert '"NeedsUserInput"' in source
     assert '"RETRY_VERIFIER": "Verifier"' in source
 

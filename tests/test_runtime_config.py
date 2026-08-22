@@ -4,6 +4,7 @@ import pytest
 
 from src.limits import MAX_PLAN_TASKS
 from src.recovery.policy import (
+    MAX_ASSET_RETRIES,
     MAX_CONTENT_RETRIES,
     MAX_EVIDENCE_RECOVERIES,
     MAX_JOB_PATCHES,
@@ -23,6 +24,7 @@ def test_runtime_budget_covers_maximum_plan_bounded_recovery_with_margin():
             + 3 * MAX_CONTENT_RETRIES
             + 4 * MAX_EVIDENCE_RECOVERIES
             + 2 * MAX_VERIFIER_RETRIES
+            + 3 * MAX_ASSET_RETRIES
         )
         + 4 * MAX_JOB_PATCHES
     )

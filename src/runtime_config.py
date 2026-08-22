@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from src.limits import MAX_PLAN_TASKS
 from src.recovery.policy import (
+    MAX_ASSET_RETRIES,
     MAX_CONTENT_RETRIES,
     MAX_EVIDENCE_RECOVERIES,
     MAX_JOB_PATCHES,
@@ -18,6 +19,7 @@ _BASE_TASK_SUPERSTEPS = 3  # Worker -> Verifier -> DecisionPolicy
 _CONTENT_RETRY_SUPERSTEPS = 3
 _EVIDENCE_RECOVERY_SUPERSTEPS = 4
 _VERIFIER_RETRY_SUPERSTEPS = 2
+_ASSET_RECOVERY_SUPERSTEPS = 3
 _PLAN_PATCH_SUPERSTEPS = 4
 
 
@@ -32,6 +34,7 @@ def recursion_limit_for_tasks(task_count: int | None = None) -> int:
             + _CONTENT_RETRY_SUPERSTEPS * MAX_CONTENT_RETRIES
             + _EVIDENCE_RECOVERY_SUPERSTEPS * MAX_EVIDENCE_RECOVERIES
             + _VERIFIER_RETRY_SUPERSTEPS * MAX_VERIFIER_RETRIES
+            + _ASSET_RECOVERY_SUPERSTEPS * MAX_ASSET_RETRIES
         )
         + _PLAN_PATCH_SUPERSTEPS * MAX_JOB_PATCHES
     )

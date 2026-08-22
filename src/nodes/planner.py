@@ -415,6 +415,7 @@ def _job_task_ids(state: State) -> list[str]:
     for key in (
         "task_revisions",
         "task_retry_count",
+        "asset_retry_count",
         "evidence_recovery_count",
         "task_patch_count",
         "verifier_retry_count",
@@ -1639,6 +1640,8 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "continuation_action": "",
                 "verification_warning": {},
                 "task_retry_count": {},
+                "asset_retry_count": {},
+                "asset_recovery_error": "",
                 "evidence_recovery_count": {},
                 "verifier_retry_count": {},
                 "task_patch_count": {},

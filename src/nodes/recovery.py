@@ -54,6 +54,8 @@ _RESUME_ACTION_ALIASES = {
     "RETRY": WorkflowAction.REWORK.value,
     "返工": WorkflowAction.REWORK.value,
     "重试": WorkflowAction.REWORK.value,
+    "RETRY_ASSET": WorkflowAction.ASSET_RECOVERY.value,
+    "重新生成资产": WorkflowAction.ASSET_RECOVERY.value,
     "EVIDENCE_RECOVERY": WorkflowAction.EVIDENCE_RECOVERY.value,
     "证据恢复": WorkflowAction.EVIDENCE_RECOVERY.value,
     "扩大检索": WorkflowAction.EVIDENCE_RECOVERY.value,
@@ -84,6 +86,7 @@ _EVIDENCE_USER_CHOICES = [
 ]
 _SPECIAL_RESUME_CHOICES = set(_EVIDENCE_USER_CHOICES)
 _SPECIAL_RESUME_CHOICES.add("ACCEPT_AS_DRAFT")
+_SPECIAL_RESUME_CHOICES.add("RETRY_ASSET")
 _SPECIAL_CHOICE_ALIASES = {
     "上传补充资料": "UPLOAD_RESOURCES",
     "上传资料": "UPLOAD_RESOURCES",
@@ -96,6 +99,7 @@ _SPECIAL_CHOICE_ALIASES = {
     "接受证据缺口": "ACCEPT_EVIDENCE_GAP",
     "接受为带风险草稿": "ACCEPT_AS_DRAFT",
     "接受当前缺陷并作为带风险草稿继续": "ACCEPT_AS_DRAFT",
+    "重新生成图形或表格": "RETRY_ASSET",
 }
 
 
@@ -751,6 +755,8 @@ def needs_user_input(
             )
         elif requested_choice in {"AUTHORIZE_WEB", "ADJUST_REQUIREMENT"}:
             requested_action = WorkflowAction.REWORK.value
+        elif requested_choice == "RETRY_ASSET":
+            requested_action = WorkflowAction.ASSET_RECOVERY.value
         elif requested_choice == "ACCEPT_EVIDENCE_GAP":
             requested_action = _continuation_action(state).value
         elif requested_choice == "ACCEPT_AS_DRAFT":
@@ -771,6 +777,7 @@ def needs_user_input(
 
     routable_choices = {
         WorkflowAction.REWORK.value,
+        WorkflowAction.ASSET_RECOVERY.value,
         WorkflowAction.EVIDENCE_RECOVERY.value,
         WorkflowAction.NEXT.value,
         WorkflowAction.DONE.value,

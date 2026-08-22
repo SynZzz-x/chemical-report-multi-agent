@@ -94,6 +94,8 @@ class State(TypedDict, total=False):
     worker_state: Dict[str, Any]
     guidance: Dict[str, Any]
     task_retry_count: Dict[str, int]
+    asset_retry_count: Dict[str, int]
+    asset_recovery_error: str
     replan_count: int
     workflow_action: str
     plan_revision: int

@@ -29,6 +29,7 @@ class WorkflowAction(str, Enum):
     NEXT = "NEXT"
     DONE = "DONE"
     REWORK = "REWORK"
+    ASSET_RECOVERY = "ASSET_RECOVERY"
     EVIDENCE_RECOVERY = "EVIDENCE_RECOVERY"
     PLAN_PATCH = "PLAN_PATCH"
     NEEDS_USER_INPUT = "NEEDS_USER_INPUT"
@@ -47,6 +48,7 @@ class IssueCategory(str, Enum):
 
 
 MAX_CONTENT_RETRIES = 2
+MAX_ASSET_RETRIES = 1
 MAX_EVIDENCE_RECOVERIES = 1
 MAX_TASK_PATCHES = 1
 MAX_JOB_PATCHES = 3
@@ -83,6 +85,7 @@ _CONTENT_CODES = {
     "UNSUPPORTED_RECOMMENDATION",
     "REQUIREMENT_MISSING",
 }
+_ASSET_ISSUE_CODES = {"MISSING_FIGURE", "MISSING_TABLE"}
 _VERIFIER_CODES = {
     "ASSESSMENT_CONTRACT_ERROR",
     "LLM_ERROR",
@@ -319,10 +322,25 @@ def sanitize_blocker_choices(
     )
     allow_draft = _allows_accept_as_draft(state, issue_list)
     disallowed: set[str] = set()
+    current_task_id = str(_current_task(state).get("task_id") or "").strip()
+    current_result = state.get("current_result") or {}
+    result_task_id = (
+        str(current_result.get("task_id") or "").strip()
+        if isinstance(current_result, Mapping)
+        else ""
+    )
+    allow_asset_retry = bool(
+        str(category or "").upper() == IssueCategory.CONTENT_DEFECT.value
+        and _asset_only_issues({"issues": issue_list})
+        and current_task_id
+        and result_task_id == current_task_id
+    )
     if not has_waivable_gap:
         disallowed.add("ACCEPT_EVIDENCE_GAP")
     if not allow_draft:
         disallowed.update({"ACCEPT_AS_DRAFT", *NEXT_RESUME_ALIASES})
+    if not allow_asset_retry:
+        disallowed.add("RETRY_ASSET")
     if not public_web_runtime_available():
         disallowed.add("AUTHORIZE_WEB")
     return [choice for choice in normalized if choice not in disallowed]
@@ -355,6 +373,16 @@ def classify_assessment(assessment: Dict[str, Any], state: Dict[str, Any]) -> Is
         or [IssueCategory.CONTENT_DEFECT],
         key=_CATEGORY_PRIORITY.get,
     )
+
+
+def _asset_only_issues(assessment: Mapping[str, Any]) -> bool:
+    codes = {
+        str(issue.get("code") or "").strip().upper()
+        for issue in assessment.get("issues") or []
+        if isinstance(issue, Mapping)
+        and str(issue.get("code") or "").strip().upper() not in _VERIFIER_CODES
+    }
+    return bool(codes) and codes <= _ASSET_ISSUE_CODES
 
 
 def _continuation_action(state: Dict[str, Any]) -> WorkflowAction:
@@ -394,6 +422,7 @@ def _pending_user_action(
     plan_revision = int(state.get("plan_revision", 1) or 1)
     blocker_sequence = max(
         int((state.get("task_retry_count") or {}).get(task_id, 0) or 0),
+        int((state.get("asset_retry_count") or {}).get(task_id, 0) or 0),
         int((state.get("evidence_recovery_count") or {}).get(task_id, 0) or 0),
         int((state.get("verifier_retry_count") or {}).get(task_id, 0) or 0),
         1,
@@ -475,20 +504,36 @@ def _pending_user_action(
             }
         )
     elif category is IssueCategory.CONTENT_DEFECT:
-        accepted_choices = ["REWORK", "ADJUST_REQUIREMENT"]
+        asset_only = _asset_only_issues(assessment)
+        accepted_choices = (
+            ["RETRY_ASSET", "ADJUST_REQUIREMENT"]
+            if asset_only
+            else ["REWORK", "ADJUST_REQUIREMENT"]
+        )
         if allow_draft:
             accepted_choices.append("ACCEPT_AS_DRAFT")
         accepted_choices.append("DONE")
-        choice_guidance = (
-            "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
-            if allow_draft
-            else "按反馈再次返工、调整任务要求，或结束工作流。"
-        )
+        if asset_only:
+            choice_guidance = (
+                "重新生成资产、调整资产要求、明确接受为带风险草稿，或结束工作流。"
+                if allow_draft
+                else "重新生成资产、调整资产要求，或结束工作流。"
+            )
+            guidance_prefix = (
+                "当前正文已保留，但所需图形或表格资产自动恢复失败；正文不会重新生成。"
+            )
+        else:
+            choice_guidance = (
+                "按反馈再次返工、调整任务要求、明确接受为带风险草稿，或结束工作流。"
+                if allow_draft
+                else "按反馈再次返工、调整任务要求，或结束工作流。"
+            )
+            guidance_prefix = "当前任务已达到自动返工上限，但仍未通过验收。"
         pending.update(
             {
                 "accepted_choices": accepted_choices,
                 "guidance": (
-                    "当前任务已达到自动返工上限，但仍未通过验收。请在页面的阻塞处理区选择："
+                    f"{guidance_prefix}请在页面的阻塞处理区选择："
                     f"{choice_guidance}"
                 ),
             }
@@ -538,12 +583,14 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     """Choose a bounded recovery action without invoking models or graph nodes."""
     task_id = _current_task_id(state)
     task_retry_count = _counter_update(state, "task_retry_count")
+    asset_retry_count = _counter_update(state, "asset_retry_count")
     evidence_recovery_count = _counter_update(state, "evidence_recovery_count")
     task_patch_count = _counter_update(state, "task_patch_count")
     verifier_retry_count = _counter_update(state, "verifier_retry_count")
     job_patch_count = int(state.get("job_patch_count", 0) or 0)
     update: Dict[str, Any] = {
         "task_retry_count": task_retry_count,
+        "asset_retry_count": asset_retry_count,
         "evidence_recovery_count": evidence_recovery_count,
         "task_patch_count": task_patch_count,
         "verifier_retry_count": verifier_retry_count,
@@ -608,6 +655,50 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         category = IssueCategory.CONTENT_DEFECT
 
     if category is IssueCategory.CONTENT_DEFECT:
+        if _asset_only_issues(assessment) and state.get("current_result"):
+            retries = asset_retry_count.get(task_id, 0)
+            if retries < MAX_ASSET_RETRIES:
+                asset_retry_count[task_id] = retries + 1
+                update["workflow_action"] = WorkflowAction.ASSET_RECOVERY.value
+                return update
+
+            warning = {
+                "code": "ASSET_RETRY_LIMIT_REACHED",
+                "category": IssueCategory.CONTENT_DEFECT.value,
+                "task_id": task_id,
+                "issues": list(assessment.get("issues") or []),
+            }
+            warnings = [
+                existing
+                for existing in update["verification_warnings"]
+                if not (
+                    existing.get("code") == "ASSET_RETRY_LIMIT_REACHED"
+                    and str(existing.get("task_id")) == task_id
+                )
+            ]
+            warnings.append(warning)
+            statuses = record_section_status(
+                state,
+                ACCEPT_WITH_WARNING,
+                accepted_by="system",
+                issues=assessment.get("issues") or [],
+            )
+            update.update(
+                {
+                    "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
+                    "verification_warning": warning,
+                    "verification_warnings": warnings,
+                    "pending_user_action": _pending_user_action(
+                        category, state, assessment
+                    ),
+                    "section_status": statuses,
+                    "report_status": derive_report_status(
+                        state.get("tasks") or [], statuses
+                    ),
+                }
+            )
+            return update
+
         retries = task_retry_count.get(task_id, 0)
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1

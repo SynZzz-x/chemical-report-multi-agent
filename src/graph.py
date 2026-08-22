@@ -15,6 +15,7 @@ from .nodes.recovery import (
     route_after_blocker,
     route_policy,
 )
+from .nodes.asset_recovery import asset_recovery, route_after_asset_recovery
 from .nodes.summarizer_v2 import summarizer
 from .nodes.synthesis import synthesis
 from .nodes.exiting import exiting
@@ -154,6 +155,7 @@ class WorkFlowBase(StateGraph):
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
                     "REWORK": "Worker",
+                    "ASSET_RECOVERY": "AssetRecovery",
                     "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
@@ -165,6 +167,16 @@ class WorkFlowBase(StateGraph):
 
             self.add_node("EvidenceRecovery", evidence_recovery)
             self.add_edge("EvidenceRecovery", "Worker")
+
+            self.add_node("AssetRecovery", asset_recovery)
+            self.add_conditional_edges(
+                "AssetRecovery",
+                route_after_asset_recovery,
+                {
+                    "RETRY_VERIFIER": "Verifier",
+                    "REWORK": "Worker",
+                },
+            )
 
             self.add_node("PlanPatcher", plan_patcher)
             self.add_conditional_edges(
@@ -184,6 +196,7 @@ class WorkFlowBase(StateGraph):
                 route_after_execution_blocker,
                 {
                     "REWORK": "Worker",
+                    "ASSET_RECOVERY": "AssetRecovery",
                     "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",

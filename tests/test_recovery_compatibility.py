@@ -1038,6 +1038,13 @@ def test_blocker_action_specs_define_direct_submission_requirements():
     assert blocker_action_spec("ACCEPT_AS_DRAFT")["default_text"] == (
         "接受当前缺陷并作为带风险草稿继续。"
     )
+    assert blocker_action_spec("RETRY_ASSET") == {
+        "label": "重新生成图形或表格",
+        "button_label": "重新生成资产",
+        "default_text": "仅重新生成当前缺失的图形或表格，不重写正文。",
+        "requires_text": False,
+        "requires_documents": False,
+    }
     assert blocker_action_spec("ADJUST_REQUIREMENT")["requires_text"] is True
     assert blocker_action_spec("UPLOAD_RESOURCES")["requires_documents"] is True
     assert blocker_action_spec("RETRY_INITIAL_PLAN") == {

@@ -2,6 +2,7 @@ import pytest
 
 from src.recovery.policy import (
     IssueCategory,
+    MAX_ASSET_RETRIES,
     WorkflowAction,
     classify_assessment,
     commit_current_result,
@@ -18,6 +19,7 @@ def recovery_state(
     evidence_recovery_count=None,
     task_patch_count=None,
     verifier_retry_count=None,
+    asset_retry_count=None,
     job_patch_count=0,
     results=None,
     use_rag=True,
@@ -40,9 +42,72 @@ def recovery_state(
         "evidence_recovery_count": dict(evidence_recovery_count or {}),
         "task_patch_count": dict(task_patch_count or {}),
         "verifier_retry_count": dict(verifier_retry_count or {}),
+        "asset_retry_count": dict(asset_retry_count or {}),
         "job_patch_count": job_patch_count,
         "verification_warnings": [],
     }
+
+
+@pytest.mark.parametrize("code", ["MISSING_FIGURE", "MISSING_TABLE"])
+def test_pure_asset_defect_uses_bounded_asset_recovery(code):
+    state = recovery_state(task_id="T2")
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with(code, "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.ASSET_RECOVERY
+    assert decision["asset_retry_count"] == {"T2": 1}
+    assert decision["task_retry_count"] == {}
+
+
+def test_asset_recovery_does_not_override_mixed_content_defects():
+    state = recovery_state(task_id="T2")
+    assessment = assessment_with_issues(
+        {"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"},
+        {"code": "TOO_LONG", "category": "CONTENT_DEFECT"},
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == WorkflowAction.REWORK
+    assert decision["asset_retry_count"] == {}
+    assert decision["task_retry_count"] == {"T2": 1}
+
+
+def test_asset_recovery_does_not_override_evidence_recovery():
+    state = recovery_state(task_id="T2")
+    assessment = assessment_with_issues(
+        {"code": "MISSING_FIGURE", "category": "CONTENT_DEFECT"},
+        {"code": "EVIDENCE_GAP", "category": "EVIDENCE_GAP"},
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == WorkflowAction.EVIDENCE_RECOVERY
+    assert decision["asset_retry_count"] == {}
+
+
+def test_asset_retry_limit_uses_asset_specific_user_blocker():
+    state = recovery_state(
+        task_id="T2",
+        asset_retry_count={"T2": MAX_ASSET_RETRIES},
+    )
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("MISSING_FIGURE", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["pending_user_action"]["accepted_choices"] == [
+        "RETRY_ASSET",
+        "ADJUST_REQUIREMENT",
+        "ACCEPT_AS_DRAFT",
+        "DONE",
+    ]
+    assert "正文不会重新生成" in decision["pending_user_action"]["guidance"]
 
 
 def assessment_with(code, category, **issue):
