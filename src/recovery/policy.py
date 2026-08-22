@@ -90,6 +90,7 @@ _VERIFIER_CODES = {
     "ASSESSMENT_CONTRACT_ERROR",
     "LLM_ERROR",
     "LLM_NOT_ENABLED",
+    "VERIFIER_UNAVAILABLE",
     "VERIFIER_ERROR",
     "VERIFIER_SERVICE_ERROR",
 }
@@ -279,9 +280,15 @@ def _allows_accept_as_draft(
 ) -> bool:
     """Allow draft acceptance only when every evidence issue is waivable."""
 
+    issue_list = list(issues)
+    if any(
+        classify_issue(issue, state) is IssueCategory.VERIFIER_FAILURE
+        for issue in issue_list
+    ):
+        return False
     evidence_issues = [
         issue
-        for issue in issues
+        for issue in issue_list
         if classify_issue(issue, state) is IssueCategory.EVIDENCE_GAP
     ]
     return not any(
@@ -309,8 +316,15 @@ def sanitize_blocker_choices(
         normalized = (
             ["UPLOAD_RESOURCES", "AUTHORIZE_WEB", "ADJUST_REQUIREMENT", "DONE"]
             if str(category or "").upper() == IssueCategory.EVIDENCE_GAP.value
-            else ["REWORK", "DONE"]
+            else (
+                ["RETRY_VERIFIER", "DONE"]
+                if str(category or "").upper()
+                == IssueCategory.VERIFIER_FAILURE.value
+                else ["REWORK", "DONE"]
+            )
         )
+    if str(category or "").upper() == IssueCategory.VERIFIER_FAILURE.value:
+        normalized = ["RETRY_VERIFIER", "DONE"]
 
     evidence_issues = [
         issue
@@ -349,28 +363,18 @@ def sanitize_blocker_choices(
 def classify_assessment(assessment: Dict[str, Any], state: Dict[str, Any]) -> IssueCategory:
     """Return the highest-priority actionable category in an assessment.
 
-    A contract error is a Verifier health signal, not a defect in the candidate
-    result. It controls recovery only when no other issue survived assessment.
-    Runtime/service failures retain their existing priority because semantic
-    verification did not run successfully at all.
+    Any Verifier failure invalidates semantic issues that coexist in a legacy
+    assessment because the candidate result was never assessed reliably.
     """
     classified = [
-        (
-            str(issue.get("code") or "").strip().upper(),
-            _classify_issue(issue, state),
-        )
+        _classify_issue(issue, state)
         for issue in assessment.get("issues") or []
         if isinstance(issue, dict)
     ]
-    actionable = [
-        category
-        for code, category in classified
-        if code != "ASSESSMENT_CONTRACT_ERROR"
-    ]
+    if IssueCategory.VERIFIER_FAILURE in classified:
+        return IssueCategory.VERIFIER_FAILURE
     return max(
-        actionable
-        or [category for _, category in classified]
-        or [IssueCategory.CONTENT_DEFECT],
+        classified or [IssueCategory.CONTENT_DEFECT],
         key=_CATEGORY_PRIORITY.get,
     )
 
@@ -539,21 +543,19 @@ def _pending_user_action(
             }
         )
     elif category is IssueCategory.VERIFIER_FAILURE:
-        accepted_choices = ["REWORK"]
-        if allow_draft:
-            accepted_choices.append("ACCEPT_AS_DRAFT")
-        accepted_choices.append("DONE")
-        choice_guidance = (
-            "重新生成后再校验、明确接受当前未验证内容为带风险草稿，或结束工作流。"
-            if allow_draft
-            else "重新生成后再校验，或结束工作流。"
-        )
+        accepted_choices = ["RETRY_VERIFIER", "DONE"]
+        descriptions = [
+            str(issue.get("description") or "").strip()
+            for issue in issues
+            if str(issue.get("description") or "").strip()
+        ]
+        failure_detail = descriptions[0] if descriptions else "自动校验未能完成。"
         pending.update(
             {
                 "accepted_choices": accepted_choices,
                 "guidance": (
-                    "自动校验未能完成。请在页面的阻塞处理区选择："
-                    f"{choice_guidance}"
+                    f"{failure_detail}请在页面的阻塞处理区选择："
+                    "仅重试自动校验器，或结束工作流。"
                 ),
             }
         )
@@ -598,6 +600,52 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         "pending_user_action": {},
         "verification_warnings": list(state.get("verification_warnings") or []),
     }
+
+    verifier_failure = state.get("verifier_failure") or {}
+    if isinstance(verifier_failure, Mapping) and str(
+        verifier_failure.get("code") or ""
+    ).strip():
+        failure_assessment = {
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": str(verifier_failure.get("code")),
+                    "category": IssueCategory.VERIFIER_FAILURE.value,
+                    "description": str(
+                        verifier_failure.get("message")
+                        or "自动校验器本身未能产生合法校验结果。"
+                    ),
+                    "suggestion": "仅重试自动校验器，或检查模型服务配置。",
+                    "severity": "error",
+                }
+            ],
+        }
+        retries = verifier_retry_count.get(task_id, 0)
+        if bool(verifier_failure.get("retryable")) and retries < MAX_VERIFIER_RETRIES:
+            verifier_retry_count[task_id] = retries + 1
+            update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
+            return update
+        statuses = record_section_status(
+            state,
+            BLOCKED,
+            accepted_by="system",
+            issues=failure_assessment["issues"],
+        )
+        update.update(
+            {
+                "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
+                "pending_user_action": _pending_user_action(
+                    IssueCategory.VERIFIER_FAILURE,
+                    state,
+                    failure_assessment,
+                ),
+                "section_status": statuses,
+                "report_status": derive_report_status(
+                    state.get("tasks") or [], statuses
+                ),
+            }
+        )
+        return update
 
     if str(assessment.get("status") or "").upper() == "PASS":
         accepted_gap = matching_evidence_gap_acceptance(state)

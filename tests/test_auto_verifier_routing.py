@@ -5,6 +5,7 @@ import pytest
 
 from src.nodes import verifier as auto_verifier_module
 from src.recovery.policy import decide_recovery_action
+from src.verifier_contract import AssessmentContractError, parse_verifier_assessment
 
 
 def _state(*, cursor=0):
@@ -61,6 +62,272 @@ def _run(monkeypatch, state, assessment):
     return update, captured
 
 
+def _run_responses(monkeypatch, state, responses):
+    model = SimpleNamespace(calls=[])
+    pending = list(responses)
+
+    def invoke(payload, **kwargs):
+        model.calls.append(payload)
+        return SimpleNamespace(content=pending.pop(0))
+
+    model.invoke = invoke
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *args, **kwargs: model,
+    )
+    update = auto_verifier_module.verifier(
+        state,
+        {"configurable": {"use_llm": True}},
+    )
+    return update, model
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        json.dumps(
+            {
+                "status": "PASS",
+                "issues": [],
+                "requirements_met": [],
+                "requirements_missing": [],
+            }
+        ),
+        json.dumps(
+            {
+                "status": "UNKNOWN",
+                "current_section": "引言",
+                "issues": [],
+                "requirements_met": [],
+                "requirements_missing": [],
+            }
+        ),
+        json.dumps(
+            {
+                "status": "FAILED",
+                "current_section": "引言",
+                "issues": [],
+                "requirements_met": [],
+                "requirements_missing": [],
+            }
+        ),
+        json.dumps(
+            {
+                "status": "PASS",
+                "current_section": "引言",
+                "issues": [
+                    {
+                        "code": "TOO_SHORT",
+                        "category": "CONTENT_DEFECT",
+                        "description": "内容过短",
+                        "suggestion": "扩写",
+                        "severity": "unknown",
+                    }
+                ],
+                "requirements_met": [],
+                "requirements_missing": [],
+            }
+        ),
+        json.dumps(
+            {
+                "status": "PASS",
+                "current_section": "引言",
+                "issues": [],
+                "requirements_met": [],
+                "requirements_missing": [],
+                "recommended_decision": "NEXT",
+            }
+        ),
+    ],
+)
+def test_canonical_assessment_contract_rejects_invalid_payloads(payload):
+    with pytest.raises(AssessmentContractError):
+        parse_verifier_assessment(payload)
+
+
+def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="src.nodes.verifier")
+    state = _state()
+    state["current_result"]["text_output"] += "敏感正文不可进入修复请求[E1]"
+    valid_pass = {
+        "status": "PASS",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": ["包含背景"],
+        "requirements_missing": [],
+    }
+
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        ["not-json", json.dumps(valid_pass, ensure_ascii=False)],
+    )
+
+    assert update["assessment"]["status"] == "PASS"
+    assert update["verifier_failure"] == {}
+    assert update["verifier_retry_count"] == {"T1": 1}
+    assert len(model.calls) == 2
+    assert "敏感正文不可进入修复请求" not in json.dumps(
+        model.calls[1], ensure_ascii=False, default=str
+    )
+    assert any(
+        "AutoVerifier contract validation failed: task=T1 attempt=1/3"
+        in message
+        for message in caplog.messages
+    )
+    assert any(
+        "AutoVerifier contract retry: task=T1 attempt=2/3" in message
+        for message in caplog.messages
+    )
+    assert any(
+        "AutoVerifier assessment: task=T1 status=PASS contract_attempts=2"
+        in message
+        for message in caplog.messages
+    )
+    assert all("敏感正文不可进入修复请求" not in message for message in caplog.messages)
+
+
+def test_repaired_semantic_length_failure_enters_policy_once(monkeypatch):
+    state = _state()
+    state["task_retry_count"] = {}
+    state["tasks"][0]["task_description"] = "撰写不少于500字的引言。"
+    state["current_result"]["text_output"] += "[E1]"
+    invalid_contract = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [],
+        "requirements_met": [],
+        "requirements_missing": [],
+    }
+    valid_failure = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "TOO_SHORT",
+                "category": "CONTENT_DEFECT",
+                "description": "正文低于最低字数要求。",
+                "suggestion": "补充任务要求的有效内容。",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["最低字数"],
+    }
+
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        [
+            json.dumps(invalid_contract, ensure_ascii=False),
+            json.dumps(valid_failure, ensure_ascii=False),
+        ],
+    )
+    decision = decide_recovery_action({**state, **update}, update["assessment"])
+
+    assert [issue["code"] for issue in update["assessment"]["issues"]] == [
+        "TOO_SHORT"
+    ]
+    assert update["verifier_retry_count"] == {"T1": 1}
+    assert len(model.calls) == 2
+    assert decision["workflow_action"] == "LENGTH_REWRITE"
+    assert decision["task_retry_count"] == {"T1": 1}
+
+
+def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
+    state = _state()
+    state.update(
+        {
+            "task_retry_count": {"T1": 2},
+            "asset_retry_count": {"T1": 1},
+            "evidence_recovery_count": {"T1": 1},
+            "task_patch_count": {"T1": 1},
+            "job_patch_count": 3,
+            "task_revisions": {"T1": 4},
+            "verifier_retry_count": {},
+        }
+    )
+
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        ["not-json", "still-not-json", "also-not-json"],
+    )
+    decision = decide_recovery_action({**state, **update}, update["assessment"])
+
+    assert len(model.calls) == 3
+    assert update["assessment"] == {}
+    assert update["verifier_failure"] == {
+        "code": "VERIFIER_UNAVAILABLE",
+        "category": "VERIFIER_FAILURE",
+        "message": "自动校验器本身未能产生合法校验结果。",
+        "retryable": False,
+        "contract_attempts": 3,
+    }
+    assert update["verifier_retry_count"] == {"T1": 2}
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["task_retry_count"] == state["task_retry_count"]
+    assert decision["asset_retry_count"] == state["asset_retry_count"]
+    assert decision["evidence_recovery_count"] == state["evidence_recovery_count"]
+    assert decision["task_patch_count"] == state["task_patch_count"]
+    assert decision["job_patch_count"] == state["job_patch_count"]
+    assert "results" not in decision
+    assert "worker_state" not in decision
+    assert decision["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+    assert "自动校验器本身未能产生合法校验结果" in decision[
+        "pending_user_action"
+    ]["guidance"]
+
+
+def test_contract_validation_logs_exclude_invalid_input_values(
+    monkeypatch, caplog, tmp_path
+):
+    caplog.set_level("WARNING", logger="src.nodes.verifier")
+    log_path = tmp_path / "verifier.jsonl"
+    monkeypatch.setattr(auto_verifier_module, "LOG_PATH", str(log_path))
+    secret = "SECRET-DO-NOT-LOG"
+    invalid = json.dumps(
+        {
+            "status": secret,
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": [],
+            "requirements_missing": [],
+        }
+    )
+
+    update, _ = _run_responses(monkeypatch, _state(), [invalid, invalid, invalid])
+
+    assert update["verifier_failure"]["code"] == "VERIFIER_UNAVAILABLE"
+    assert all(secret not in message for message in caplog.messages)
+    assert secret not in log_path.read_text(encoding="utf-8")
+
+
+def test_service_failure_logs_exclude_exception_payload(monkeypatch, tmp_path):
+    log_path = tmp_path / "verifier.jsonl"
+    monkeypatch.setattr(auto_verifier_module, "LOG_PATH", str(log_path))
+    secret = "SECRET-SERVICE-ERROR-PAYLOAD"
+
+    class FailingModel:
+        def invoke(self, payload, **kwargs):
+            raise RuntimeError(secret)
+
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *args, **kwargs: FailingModel(),
+    )
+
+    update = auto_verifier_module.verifier(
+        _state(), {"configurable": {"use_llm": True}}
+    )
+
+    assert update["verifier_failure"]["code"] == "LLM_ERROR"
+    assert secret not in log_path.read_text(encoding="utf-8")
+
+
 def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
     state = _state()
     state["current_result"]["text_output"] += "[E1]"
@@ -79,12 +346,12 @@ def test_verifier_is_assessment_only_and_classifies_evidence_gap(monkeypatch):
         ],
         "requirements_met": ["包含背景"],
         "requirements_missing": ["关键结论来源"],
-        "recommended_decision": "REPLAN",
     }
 
     update, _ = _run(monkeypatch, state, assessment)
 
-    assert set(update) == {"assessment"}
+    assert set(update) == {"assessment", "verifier_failure"}
+    assert update["verifier_failure"] == {}
     assert "decision" not in update
     assert "recommended_decision" not in update["assessment"]
     assert update["assessment"]["issues"][0]["category"] == "EVIDENCE_GAP"
@@ -671,10 +938,14 @@ def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
         )
         config = {"configurable": {"use_llm": False}}
 
-    sanitized = auto_verifier_module.verifier(state, config)["assessment"]
-    first = decide_recovery_action(state, sanitized)
-    second = decide_recovery_action({**state, **first}, sanitized)
+    verifier_update = auto_verifier_module.verifier(state, config)
+    first_state = {**state, **verifier_update}
+    first = decide_recovery_action(first_state, verifier_update["assessment"])
+    second_state = {**first_state, **first}
+    second = decide_recovery_action(second_state, verifier_update["assessment"])
 
+    assert verifier_update["assessment"] == {}
+    assert verifier_update["verifier_failure"]["code"] == code
     assert first["workflow_action"] == "RETRY_VERIFIER"
     assert first["verifier_retry_count"] == {"T1": 1}
     assert first["task_retry_count"] == {"T1": 1}
@@ -685,9 +956,9 @@ def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     assert state["results"] == original_results
 
 
-def test_verifier_service_error_keeps_debug_detail_out_of_user_issue(monkeypatch):
+def test_verifier_contract_failure_keeps_debug_detail_out_of_user_message(monkeypatch):
     class InvalidJsonModel:
-        def invoke(self, payload):
+        def invoke(self, payload, **kwargs):
             return SimpleNamespace(content="not-json verifier output")
 
     monkeypatch.setattr(
@@ -696,14 +967,16 @@ def test_verifier_service_error_keeps_debug_detail_out_of_user_issue(monkeypatch
         lambda *args, **kwargs: InvalidJsonModel(),
     )
 
-    assessment = auto_verifier_module.verifier(
+    update = auto_verifier_module.verifier(
         _state(), {"configurable": {"use_llm": True}}
-    )["assessment"]
+    )
 
-    issue = assessment["issues"][0]
-    assert issue["code"] == "LLM_ERROR"
-    assert issue["description"] == "自动校验服务未能返回可用的结构化结果。"
-    assert "Expecting value" not in issue["description"]
+    assert update["assessment"] == {}
+    assert update["verifier_failure"]["code"] == "VERIFIER_UNAVAILABLE"
+    assert update["verifier_failure"]["message"] == (
+        "自动校验器本身未能产生合法校验结果。"
+    )
+    assert "Expecting value" not in update["verifier_failure"]["message"]
 
 
 def test_assessment_contract_error_never_consumes_worker_content_retries():

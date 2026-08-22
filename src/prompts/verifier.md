@@ -64,7 +64,8 @@ Synthesis 专用来源上下文（普通任务时为空）：
 {format_instructions}
 
 每个 issue 必须包含非空的 `code`、`category`、`description`、`suggestion` 和
-`severity`；只有资源问题可增加 `resource_name`。`EVIDENCE_GAP` 应在能够明确表达
+`severity`；`severity` 只能是 `minor`、`major` 或 `critical`。只有资源问题可增加
+`resource_name`。`EVIDENCE_GAP` 应在能够明确表达
 补充检索目标时增加简洁的 `retrieval_query`，仅包含主题、实体、参数、指标和关系，
 不得包含“任务要求”“正文未完成”“Verifier 判定”等诊断语言。无法形成有效检索词时
 省略该字段，不得复制 description。`retrieval_query` 属于当前审核问题，不属于 Planner

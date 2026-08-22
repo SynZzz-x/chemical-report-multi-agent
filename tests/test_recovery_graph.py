@@ -874,8 +874,8 @@ def test_legacy_draft_choice_is_removed_for_citation_integrity_issue(monkeypatch
 
     update = needs_user_input(state, {})
 
-    assert "ACCEPT_AS_DRAFT" not in captured["accepted_choices"]
-    assert update["workflow_action"] == "REWORK"
+    assert captured["accepted_choices"] == ["RETRY_VERIFIER", "DONE"]
+    assert update["workflow_action"] == "RETRY_VERIFIER"
     assert "results" not in update
     assert "section_status" not in update
 
@@ -901,10 +901,48 @@ def test_missing_blocker_choices_cannot_fall_back_to_accepting_next(monkeypatch)
 
     update = needs_user_input(state, {})
 
-    assert "NEXT" not in captured["accepted_choices"]
-    assert update["workflow_action"] == "REWORK"
+    assert captured["accepted_choices"] == ["RETRY_VERIFIER", "DONE"]
+    assert update["workflow_action"] == "RETRY_VERIFIER"
     assert "results" not in update
     assert "section_status" not in update
+
+
+def test_verifier_blocker_retry_routes_only_to_verifier(monkeypatch):
+    captured = {}
+
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {"action": "RETRY_VERIFIER", "text": "", "docs": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", fake_interrupt)
+    state = graph_state(
+        verifier_retry_count={"T2": 2},
+        verifier_failure={
+            "code": "VERIFIER_UNAVAILABLE",
+            "category": "VERIFIER_FAILURE",
+            "message": "自动校验器本身未能产生合法校验结果。",
+            "retryable": False,
+            "contract_attempts": 3,
+        },
+        assessment={},
+        pending_user_action={
+            "category": "VERIFIER_FAILURE",
+            "task_id": "T2",
+            "issues": [{"code": "VERIFIER_UNAVAILABLE"}],
+            "accepted_choices": ["RETRY_VERIFIER", "DONE"],
+        },
+    )
+
+    update = needs_user_input(state, {})
+
+    assert captured["accepted_choices"] == ["RETRY_VERIFIER", "DONE"]
+    assert update["workflow_action"] == "RETRY_VERIFIER"
+    assert route_after_blocker({**state, **update}) == "RETRY_VERIFIER"
+    assert update.get("task_retry_count", state["task_retry_count"]) == {}
+    assert update.get("verifier_retry_count", state["verifier_retry_count"]) == {
+        "T2": 2
+    }
+    assert "worker_state" not in update
 
 
 @pytest.mark.parametrize(
@@ -1515,6 +1553,67 @@ def test_verifier_contract_failure_routes_only_back_to_verifier_once():
     assert route_policy({**state, **update}) == "RETRY_VERIFIER"
     assert "worker_state" not in update
     assert update["task_retry_count"] == {}
+
+
+def test_synthesis_contract_exhaustion_never_routes_to_synthesis_rewrite():
+    state = graph_state(
+        cursor=2,
+        task_retry_count={"T3": 1},
+        verifier_retry_count={"T3": 2},
+        verifier_failure={
+            "code": "VERIFIER_UNAVAILABLE",
+            "category": "VERIFIER_FAILURE",
+            "message": "自动校验器本身未能产生合法校验结果。",
+            "retryable": False,
+            "contract_attempts": 3,
+        },
+        assessment={},
+    )
+    state["tasks"][2]["task_type"] = "synthesis"
+
+    update = decision_policy(state, {})
+
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert route_policy({**state, **update}) == "NEEDS_USER_INPUT"
+    assert update["task_retry_count"] == {"T3": 1}
+    assert update["verifier_retry_count"] == {"T3": 2}
+    assert "worker_state" not in update
+    assert update["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+
+
+def test_legacy_mixed_synthesis_contract_error_only_retries_verifier():
+    state = graph_state(
+        cursor=2,
+        task_retry_count={"T3": 1},
+        asset_retry_count={"T3": 1},
+        evidence_recovery_count={"T3": 1},
+        task_patch_count={"T3": 1},
+        job_patch_count=2,
+        verifier_retry_count={},
+        assessment={
+            "status": "FAILED",
+            "issues": [
+                {
+                    "code": "ASSESSMENT_CONTRACT_ERROR",
+                    "category": "VERIFIER_FAILURE",
+                },
+                {"code": "TOO_SHORT", "category": "CONTENT_DEFECT"},
+            ],
+        },
+    )
+    state["tasks"][2]["task_type"] = "synthesis"
+
+    update = decision_policy(state, {})
+
+    assert update["workflow_action"] == "RETRY_VERIFIER"
+    assert route_policy({**state, **update}) == "RETRY_VERIFIER"
+    assert update["task_retry_count"] == {"T3": 1}
+    assert update["asset_retry_count"] == {"T3": 1}
+    assert update["evidence_recovery_count"] == {"T3": 1}
+    assert update["task_patch_count"] == {"T3": 1}
+    assert update["job_patch_count"] == 2
+    assert update["verifier_retry_count"] == {"T3": 1}
+    assert "worker_state" not in update
 
 
 def test_automatic_planner_filters_legacy_replan_without_resetting_cursor(monkeypatch):

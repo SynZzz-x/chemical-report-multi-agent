@@ -54,6 +54,13 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_text": False,
         "requires_documents": False,
     },
+    "RETRY_VERIFIER": {
+        "label": "仅重试自动校验器",
+        "button_label": "重试校验",
+        "default_text": "请仅重试自动校验器，不要重写当前正文。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
     "ADJUST_REQUIREMENT": {
         "label": "调整任务要求",
         "button_label": "提交新要求",

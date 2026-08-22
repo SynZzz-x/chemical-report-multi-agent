@@ -200,6 +200,7 @@ class WorkFlowBase(StateGraph):
                     "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
                     "EVIDENCE_RECOVERY": "EvidenceRecovery",
+                    "RETRY_VERIFIER": "Verifier",
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
                 },

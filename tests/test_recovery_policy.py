@@ -180,11 +180,47 @@ def test_verifier_failure_blocker_never_offers_ambiguous_next_action():
 
     assert decision["workflow_action"] == "NEEDS_USER_INPUT"
     assert decision["pending_user_action"]["accepted_choices"] == [
-        "REWORK",
-        "ACCEPT_AS_DRAFT",
+        "RETRY_VERIFIER",
         "DONE",
     ]
     assert "NEXT" not in decision["pending_user_action"]["accepted_choices"]
+
+
+def test_exhausted_verifier_execution_failure_precedes_semantic_assessment():
+    state = recovery_state(
+        task_id="T1",
+        task_retry_count={"T1": 1},
+        evidence_recovery_count={"T1": 1},
+        task_patch_count={"T1": 1},
+        verifier_retry_count={"T1": 2},
+        asset_retry_count={"T1": 1},
+        job_patch_count=2,
+    )
+    state["verifier_failure"] = {
+        "code": "VERIFIER_UNAVAILABLE",
+        "category": "VERIFIER_FAILURE",
+        "message": "自动校验器本身未能产生合法校验结果。",
+        "retryable": False,
+        "contract_attempts": 3,
+    }
+
+    decision = decide_recovery_action(
+        state,
+        assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
+    )
+
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["task_retry_count"] == {"T1": 1}
+    assert decision["asset_retry_count"] == {"T1": 1}
+    assert decision["evidence_recovery_count"] == {"T1": 1}
+    assert decision["task_patch_count"] == {"T1": 1}
+    assert decision["job_patch_count"] == 2
+    assert decision["pending_user_action"]["issues"][0]["code"] == (
+        "VERIFIER_UNAVAILABLE"
+    )
+    assert "自动校验器本身未能产生合法校验结果" in decision[
+        "pending_user_action"
+    ]["guidance"]
 
 
 def test_content_and_waivable_evidence_gap_can_be_explicitly_accepted_as_draft():
@@ -346,7 +382,7 @@ def test_classification_uses_priority_and_never_treats_evidence_as_plan_defect()
     )
 
 
-def test_actionable_length_defect_uses_dedicated_rewrite_despite_contract_error():
+def test_legacy_mixed_contract_error_invalidates_semantic_issues():
     state = recovery_state(task_id="T1")
     assessment = {
         "status": "FAILED",
@@ -359,13 +395,13 @@ def test_actionable_length_defect_uses_dedicated_rewrite_despite_contract_error(
         ],
     }
 
-    assert classify_assessment(assessment, state) is IssueCategory.CONTENT_DEFECT
+    assert classify_assessment(assessment, state) is IssueCategory.VERIFIER_FAILURE
 
     decision = decide_recovery_action(state, assessment)
 
-    assert decision["workflow_action"] == WorkflowAction.LENGTH_REWRITE
-    assert decision["task_retry_count"] == {"T1": 1}
-    assert decision["verifier_retry_count"] == {}
+    assert decision["workflow_action"] == WorkflowAction.RETRY_VERIFIER
+    assert decision["task_retry_count"] == {}
+    assert decision["verifier_retry_count"] == {"T1": 1}
 
 
 def test_synthesis_content_or_evidence_failure_uses_synthesis_rewrite():

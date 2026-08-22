@@ -116,6 +116,130 @@ def test_compiled_auto_graph_pass_advances_to_next_task():
     }
 
 
+def test_compiled_auto_graph_repairs_verifier_without_rerunning_worker():
+    script = textwrap.dedent(
+        r'''
+        import importlib
+        import json
+        from types import SimpleNamespace
+        from langchain_core.runnables import RunnableLambda
+
+        graph_module = importlib.import_module("src.graph")
+        verifier_module = importlib.import_module("src.nodes.verifier")
+        worker_visits = []
+        model_calls = []
+        responses = [
+            "not-json",
+            json.dumps({
+                "status": "PASS",
+                "current_section": "引言",
+                "issues": [],
+                "requirements_met": ["引言正文"],
+                "requirements_missing": [],
+            }, ensure_ascii=False),
+        ]
+        task = {
+            "task_id": "T1",
+            "task_name": "引言",
+            "task_description": "撰写引言",
+            "task_type": "analysis",
+            "generate_table": False,
+            "generate_figure": False,
+        }
+
+        def invoke_model(payload):
+            model_calls.append(payload)
+            return SimpleNamespace(content=responses.pop(0))
+
+        def fake_intake(state, config=None, **kwargs):
+            return {
+                "tasks": [task],
+                "cursor": 0,
+                "results": [],
+                "planner_action": "PROCEED",
+                "decision": "NEXT",
+                "task_retry_count": {},
+                "asset_retry_count": {},
+                "evidence_recovery_count": {},
+                "task_patch_count": {},
+                "verifier_retry_count": {},
+            }
+
+        def fake_worker(state, config=None, **kwargs):
+            worker_visits.append("T1")
+            return {
+                "current_task": task,
+                "current_result": {
+                    "task_id": "T1",
+                    "status": "COMPLETED",
+                    "text_output": "引言正文",
+                    "citations": [],
+                },
+            }
+
+        graph_module.intake = fake_intake
+        graph_module.create_worker_workflow = lambda: fake_worker
+        graph_module.verifier_auto = verifier_module.verifier
+        verifier_module.get_llm = lambda *args, **kwargs: RunnableLambda(
+            invoke_model
+        )
+        verifier_module.get_app_config = lambda: SimpleNamespace(
+            deepseek_api_key="test-key"
+        )
+        graph_module.summarizer = lambda state, config=None, **kwargs: {
+            "final_result": {"success": True}
+        }
+        graph_module.exiting = lambda state, config=None, **kwargs: {}
+
+        app = graph_module.WorkFlowAuto().compile()
+        result = app.invoke(
+            {"messages": [], "tasks": [], "results": [], "cursor": 0},
+            {"configurable": {"use_llm": True}, "recursion_limit": 30},
+        )
+        print("GRAPH_RESULT=" + json.dumps({
+            "worker_visits": worker_visits,
+            "model_calls": len(model_calls),
+            "task_retry_count": result.get("task_retry_count"),
+            "verifier_retry_count": result.get("verifier_retry_count"),
+            "workflow_action": result.get("workflow_action"),
+            "assessment": result.get("assessment"),
+            "verifier_failure": result.get("verifier_failure"),
+        }, ensure_ascii=False))
+        '''
+    )
+    env = dict(os.environ)
+    env["MPLCONFIGDIR"] = "/tmp/matplotlib-agent"
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    payload_line = next(
+        line for line in completed.stdout.splitlines() if line.startswith("GRAPH_RESULT=")
+    )
+    payload = json.loads(payload_line.removeprefix("GRAPH_RESULT="))
+
+    assert payload == {
+        "worker_visits": ["T1"],
+        "model_calls": 2,
+        "task_retry_count": {},
+        "verifier_retry_count": {"T1": 1},
+        "workflow_action": "DONE",
+        "assessment": {
+            "status": "PASS",
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": ["引言正文"],
+            "requirements_missing": [],
+        },
+        "verifier_failure": {},
+    }
+
+
 def test_compiled_auto_graph_has_no_invalid_runnable_config_warning():
     script = textwrap.dedent(
         r'''

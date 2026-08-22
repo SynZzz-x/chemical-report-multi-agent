@@ -54,6 +54,8 @@ _RESUME_ACTION_ALIASES = {
     "RETRY": WorkflowAction.REWORK.value,
     "返工": WorkflowAction.REWORK.value,
     "重试": WorkflowAction.REWORK.value,
+    "RETRY_VERIFIER": WorkflowAction.RETRY_VERIFIER.value,
+    "仅重试自动校验器": WorkflowAction.RETRY_VERIFIER.value,
     "RETRY_ASSET": WorkflowAction.ASSET_RECOVERY.value,
     "重新生成资产": WorkflowAction.ASSET_RECOVERY.value,
     "EVIDENCE_RECOVERY": WorkflowAction.EVIDENCE_RECOVERY.value,
@@ -777,6 +779,7 @@ def needs_user_input(
 
     routable_choices = {
         WorkflowAction.REWORK.value,
+        WorkflowAction.RETRY_VERIFIER.value,
         WorkflowAction.ASSET_RECOVERY.value,
         WorkflowAction.EVIDENCE_RECOVERY.value,
         WorkflowAction.NEXT.value,
@@ -802,6 +805,8 @@ def needs_user_input(
         action = requested_action
     elif category == "EVIDENCE_GAP":
         action = WorkflowAction.EVIDENCE_RECOVERY.value
+    elif category == IssueCategory.VERIFIER_FAILURE.value:
+        action = WorkflowAction.RETRY_VERIFIER.value
     else:
         action = WorkflowAction.REWORK.value
 

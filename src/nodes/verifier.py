@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -18,11 +19,22 @@ from src.nodes.synthesis import build_synthesis_context
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
 from src.task_contract import effective_web_allowed
+from src.verifier_contract import (
+    AssessmentContractError,
+    VerifierAssessment,
+    VerifierExecutionFailure,
+    parse_verifier_assessment,
+)
 
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_PATH = os.path.join(LOG_DIR, "verifier_logs.jsonl")
+logger = logging.getLogger(__name__)
+
+MAX_VERIFIER_CONTRACT_RETRIES = 2
+_MAX_CONTRACT_RESPONSE_CHARS = 4000
+_MAX_CONTRACT_ERROR_CHARS = 1000
 
 _CATEGORY_BY_CODE = {
     "EVIDENCE_GAP": "EVIDENCE_GAP",
@@ -103,14 +115,6 @@ def _task_name(tasks: list[dict[str, Any]], index: int) -> str:
     return f"Task_{index}"
 
 
-def _clean_json_fences(content: str) -> str:
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    return cleaned
-
-
 def _synthesis_verification_context(state: State) -> dict[str, Any]:
     """Expose deterministic accepted-claim lineage only for synthesis review."""
 
@@ -145,6 +149,13 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
         use_llm = bool(get_app_config().deepseek_api_key)
 
     llm_record: dict[str, Any] = {}
+    verifier_failure: dict[str, Any] = {}
+    verifier_retry_count = dict(state.get("verifier_retry_count") or {})
+    task_id = str(
+        (tasks[cursor] if 0 <= cursor < len(tasks) else {}).get("task_id")
+        or cursor
+    )
+    contract_retries = 0
     if use_llm:
         try:
             current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
@@ -175,7 +186,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 template = prompt_file.read()
             format_instructions = (
                 "仅输出 JSON 对象：status 为 PASS|FAILED|BLOCKED；issues 每项必须含 "
-                "code、category、description、suggestion、severity，可选 resource_name；"
+                "code、category、description、suggestion、severity；severity 仅允许 "
+                "minor|major|critical；可选 resource_name；"
                 "EVIDENCE_GAP 可选 retrieval_query；"
                 "另含 current_section、requirements_met、requirements_missing。不得输出路由建议。"
             )
@@ -189,9 +201,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 "web_authorized": web_authorized,
                 "web_allowed": effective_web_allowed(current_task, web_authorized),
             }
-            chain = ChatPromptTemplate.from_messages([("system", template)]) | get_llm(
-                config, json_mode=True
-            )
+            model = get_llm(config, json_mode=True)
+            chain = ChatPromptTemplate.from_messages([("system", template)]) | model
             response = chain.invoke(
                 {
                     "task_name": _task_name(tasks, cursor),
@@ -213,19 +224,100 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 }
             )
             raw_response = str(response.content)
-            llm_record["response_snippet"] = raw_response[:500]
-            assessment = json.loads(_clean_json_fences(raw_response))
-            llm_record["response_snippet"] = str(assessment)[:500]
+            assessment_model: VerifierAssessment | None = None
+            contract_error: AssessmentContractError | None = None
+            for attempt in range(1, MAX_VERIFIER_CONTRACT_RETRIES + 2):
+                try:
+                    assessment_model = parse_verifier_assessment(raw_response)
+                    contract_error = None
+                    break
+                except AssessmentContractError as exc:
+                    contract_error = exc
+                    logger.warning(
+                        "AutoVerifier contract validation failed: task=%s "
+                        "attempt=%s/%s error_type=%s error=%s",
+                        task_id,
+                        attempt,
+                        MAX_VERIFIER_CONTRACT_RETRIES + 1,
+                        type(exc.__cause__ or exc).__name__,
+                        _bounded_contract_error(exc),
+                    )
+                    if attempt > MAX_VERIFIER_CONTRACT_RETRIES:
+                        break
+                    contract_retries += 1
+                    verifier_retry_count[task_id] = (
+                        int(verifier_retry_count.get(task_id, 0) or 0) + 1
+                    )
+                    logger.info(
+                        "AutoVerifier contract retry: task=%s attempt=%s/%s",
+                        task_id,
+                        attempt + 1,
+                        MAX_VERIFIER_CONTRACT_RETRIES + 1,
+                    )
+                    raw_response = _invoke_contract_repair(
+                        model,
+                        raw_response,
+                        exc,
+                        config,
+                    )
+            if assessment_model is None:
+                failure = VerifierExecutionFailure(
+                    code="VERIFIER_UNAVAILABLE",
+                    message="自动校验器本身未能产生合法校验结果。",
+                    retryable=False,
+                    contract_attempts=MAX_VERIFIER_CONTRACT_RETRIES + 1,
+                )
+                verifier_failure = failure.model_dump(mode="json")
+                assessment = {}
+                llm_record["error"] = _bounded_contract_error(
+                    contract_error or AssessmentContractError("invalid assessment")
+                )
+            else:
+                assessment = assessment_model.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+                llm_record["response_snippet"] = str(assessment)[:500]
         except Exception as exc:
-            assessment = _service_error_assessment(tasks, cursor, "LLM_ERROR", str(exc))
-            llm_record["error"] = str(exc)
+            failure = VerifierExecutionFailure(
+                code="LLM_ERROR",
+                message="自动校验服务未能返回可用的结构化结果。",
+                retryable=True,
+                contract_attempts=1,
+            )
+            verifier_failure = failure.model_dump(mode="json")
+            assessment = {}
+            llm_record["error_type"] = type(exc).__name__
+            llm_record["error"] = "verification model invocation failed"
     else:
-        assessment = _service_error_assessment(
-            tasks,
-            cursor,
-            "LLM_NOT_ENABLED",
-            "LLM is not enabled for verification",
+        failure = VerifierExecutionFailure(
+            code="LLM_NOT_ENABLED",
+            message="自动校验服务当前不可用。",
+            retryable=True,
+            contract_attempts=1,
         )
+        verifier_failure = failure.model_dump(mode="json")
+        assessment = {}
+
+    if verifier_failure:
+        logger.error(
+            "AutoVerifier execution failure: task=%s code=%s attempts=%s",
+            task_id,
+            verifier_failure["code"],
+            verifier_failure["contract_attempts"],
+        )
+        _log_verifier_output(
+            state,
+            {},
+            llm_record,
+            raw_issues=[],
+            verifier_failure=verifier_failure,
+        )
+        return {
+            "assessment": {},
+            "verifier_failure": verifier_failure,
+            "verifier_retry_count": verifier_retry_count,
+        }
 
     raw_issues = _bounded_raw_issues(assessment)
     sanitized = _sanitize_assessment(assessment, state)
@@ -241,11 +333,66 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
         f"name={_task_name(tasks, cursor)} status={sanitized.get('status')} "
         f"issue_count={len(issues)} plan_revision={plan_revision}"
     )
+    logger.info(
+        "AutoVerifier assessment: task=%s status=%s contract_attempts=%s",
+        task_id,
+        sanitized.get("status"),
+        contract_retries + 1,
+    )
     for issue in issues[:5]:
         description = re.sub(r"\s+", " ", str(issue.get("description") or "")).strip()
         print(f"  - {issue.get('code')}: {description}")
     _log_verifier_output(state, sanitized, llm_record, raw_issues=raw_issues)
-    return {"assessment": sanitized}
+    update: dict[str, Any] = {
+        "assessment": sanitized,
+        "verifier_failure": {},
+    }
+    if contract_retries:
+        update["verifier_retry_count"] = verifier_retry_count
+    return update
+
+
+def _invoke_contract_repair(
+    model: Any,
+    previous_response: str,
+    error: AssessmentContractError,
+    config: RunnableConfig,
+) -> str:
+    """Repair only the prior assessment structure without resending report text."""
+
+    repair_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "你只修复上一条 AutoVerifier assessment 的 JSON 结构。"
+                "保留原判断语义，不重新分析报告，不添加新问题。"
+                "仅返回符合给定 JSON Schema 的 JSON 对象。",
+            ),
+            (
+                "human",
+                "JSON Schema:\n{schema}\n\n上一条输出：\n{previous_response}"
+                "\n\n校验错误：\n{validation_error}",
+            ),
+        ]
+    )
+    response = (repair_prompt | model).invoke(
+        {
+            "schema": json.dumps(
+                VerifierAssessment.model_json_schema(),
+                ensure_ascii=False,
+            ),
+            "previous_response": str(previous_response)[
+                :_MAX_CONTRACT_RESPONSE_CHARS
+            ],
+            "validation_error": _bounded_contract_error(error),
+        },
+        config=config,
+    )
+    return str(response.content)
+
+
+def _bounded_contract_error(error: BaseException) -> str:
+    return re.sub(r"\s+", " ", str(error)).strip()[:_MAX_CONTRACT_ERROR_CHARS]
 
 
 def _apply_citation_integrity(
@@ -450,31 +597,6 @@ def _duplicates_deterministic_issue(
     return False
 
 
-def _service_error_assessment(
-    tasks: list[dict[str, Any]], cursor: int, code: str, description: str
-) -> dict[str, Any]:
-    user_description = (
-        "自动校验服务未能返回可用的结构化结果。"
-        if code == "LLM_ERROR"
-        else "自动校验服务当前不可用。"
-    )
-    return {
-        "status": "FAILED",
-        "current_section": _task_name(tasks, cursor),
-        "issues": [
-            {
-                "code": code,
-                "category": "EXTERNAL_BLOCKER",
-                "description": user_description,
-                "suggestion": "Retry automatic verification after checking model configuration.",
-                "severity": "error",
-            }
-        ],
-        "requirements_met": [],
-        "requirements_missing": ["automatic quality assessment"],
-    }
-
-
 def _contract_error_assessment(
     assessment: dict[str, Any], tasks: list[dict[str, Any]], cursor: int
 ) -> dict[str, Any]:
@@ -671,6 +793,7 @@ def _log_verifier_output(
     llm_record: dict[str, Any] | None = None,
     *,
     raw_issues: list[dict[str, Any]] | None = None,
+    verifier_failure: dict[str, Any] | None = None,
 ) -> None:
     def safe(value: Any) -> Any:
         try:
@@ -686,6 +809,7 @@ def _log_verifier_output(
         "plan_revision": int(state.get("plan_revision", 1) or 1),
         "assessment": safe(assessment),
         "raw_issues": safe(raw_issues or []),
+        "verifier_failure": safe(verifier_failure or {}),
     }
     if llm_record:
         entry["llm"] = safe(llm_record)
