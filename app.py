@@ -612,13 +612,12 @@ def _render_pending_resume_submission() -> dict[str, Any] | None:
         f"{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]}"
     )
     action = str(
-        st.selectbox(
+        st.radio(
             "选择当前阻塞的处理方式",
-            options=[""] + choices,
-            format_func=lambda value: (
-                "请选择……"
-                if not value
-                else blocker_action_spec(value).get("label", value)
+            options=choices,
+            index=None,
+            format_func=lambda value: blocker_action_spec(value).get(
+                "label", value
             ),
             key=f"blocker_action_{widget_scope}",
         )

@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -1018,6 +1019,36 @@ def test_shared_blocker_guidance_uses_specific_or_generic_text():
     }
 
 
+def test_blocker_choices_preserve_all_evidence_gap_actions():
+    from src.control_messages import blocker_choices
+
+    unavailable_payload = {
+        "type": "needs_user_input",
+        "category": "EVIDENCE_GAP",
+        "accepted_choices": [
+            "UPLOAD_RESOURCES",
+            "ADJUST_REQUIREMENT",
+            "ACCEPT_EVIDENCE_GAP",
+        ],
+    }
+    available_payload = {
+        **unavailable_payload,
+        "accepted_choices": [
+            "UPLOAD_RESOURCES",
+            "AUTHORIZE_WEB",
+            "ADJUST_REQUIREMENT",
+            "ACCEPT_EVIDENCE_GAP",
+        ],
+    }
+
+    assert blocker_choices(unavailable_payload) == unavailable_payload[
+        "accepted_choices"
+    ]
+    assert blocker_choices(available_payload) == available_payload[
+        "accepted_choices"
+    ]
+
+
 def test_blocker_action_specs_define_direct_submission_requirements():
     from src.control_messages import blocker_action_spec
 
@@ -1029,8 +1060,8 @@ def test_blocker_action_specs_define_direct_submission_requirements():
         "requires_documents": False,
     }
     assert blocker_action_spec("ACCEPT_EVIDENCE_GAP") == {
-        "label": "接受证据缺口，继续修复其他问题",
-        "button_label": "接受缺口并继续",
+        "label": "接受现有证据及缺口报告",
+        "button_label": "接受并继续",
         "default_text": "接受当前可豁免的证据缺口，请继续修复其他问题。",
         "requires_text": False,
         "requires_documents": False,
@@ -1075,6 +1106,7 @@ def test_blocker_submission_validation_rejects_missing_required_input():
     )
     assert validate_blocker_submission("UPLOAD_RESOURCES", "", 1) is None
     assert validate_blocker_submission("AUTHORIZE_WEB", "", 0) is None
+    assert validate_blocker_submission("ACCEPT_EVIDENCE_GAP", "", 0) is None
     assert validate_blocker_submission("", "", 0) == "请选择有效的处理方式。"
     assert validate_blocker_submission("RETRY_INITIAL_PLAN", "", 0) is None
 
@@ -1092,6 +1124,18 @@ def test_blocker_resume_payload_applies_defaults_and_preserves_action_and_docs()
         "message_id": "msg-web",
         "docs": [],
         "action": "AUTHORIZE_WEB",
+    }
+
+    assert build_blocker_resume_payload(
+        action="ACCEPT_EVIDENCE_GAP",
+        text="",
+        docs=[],
+        message_id="msg-gap",
+    ) == {
+        "text": "接受当前可豁免的证据缺口，请继续修复其他问题。",
+        "message_id": "msg-gap",
+        "docs": [],
+        "action": "ACCEPT_EVIDENCE_GAP",
     }
 
     docs = [{"file_id": "file-1", "path": "/tmp/standard.pdf"}]
@@ -1151,6 +1195,45 @@ def test_streamlit_uses_action_specific_blocker_submission_controls():
     assert '"resume_action": resume_action' in source
     assert '"resume_action_label": resume_action_label' in source
     assert 'file_type=["csv", "pdf", "docx", "txt", "md"]' in source
+
+
+def test_streamlit_blocker_selector_is_an_unselected_radio():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    render_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_render_pending_resume_submission"
+    )
+    radio_calls = [
+        node
+        for node in ast.walk(render_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "st"
+        and node.func.attr == "radio"
+    ]
+    selectbox_calls = [
+        node
+        for node in ast.walk(render_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "st"
+        and node.func.attr == "selectbox"
+    ]
+
+    assert len(radio_calls) == 1
+    assert selectbox_calls == []
+    keywords = {keyword.arg: keyword.value for keyword in radio_calls[0].keywords}
+    assert isinstance(keywords["options"], ast.Name)
+    assert keywords["options"].id == "choices"
+    assert isinstance(keywords["index"], ast.Constant)
+    assert keywords["index"].value is None
 
 
 def test_shared_display_consumer_hides_controls_without_calling_stale_alias():

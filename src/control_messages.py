@@ -34,8 +34,8 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_documents": False,
     },
     "ACCEPT_EVIDENCE_GAP": {
-        "label": "接受证据缺口，继续修复其他问题",
-        "button_label": "接受缺口并继续",
+        "label": "接受现有证据及缺口报告",
+        "button_label": "接受并继续",
         "default_text": "接受当前可豁免的证据缺口，请继续修复其他问题。",
         "requires_text": False,
         "requires_documents": False,

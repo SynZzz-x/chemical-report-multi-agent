@@ -306,7 +306,27 @@ def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeyp
     )
 
     assert "AUTHORIZE_WEB" not in decision["pending_user_action"]["accepted_choices"]
+    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
+        "accepted_choices"
+    ]
     assert "当前服务器未提供可用的公开网络检索工具" in decision["pending_user_action"]["guidance"]
+
+
+def test_evidence_blocker_offers_web_when_runtime_is_available(monkeypatch):
+    monkeypatch.setattr(
+        "src.recovery.policy.public_web_runtime_available",
+        lambda: True,
+    )
+    state = recovery_state(task_id="T2", evidence_recovery_count={"T2": 1})
+
+    decision = decide_recovery_action(
+        state, assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP")
+    )
+
+    assert "AUTHORIZE_WEB" in decision["pending_user_action"]["accepted_choices"]
+    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
+        "accepted_choices"
+    ]
 
 
 def test_nonwaivable_source_failure_does_not_offer_gap_acceptance():
