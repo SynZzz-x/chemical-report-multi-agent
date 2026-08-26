@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.evidence.models import EvidenceBundle, EvidenceRecord
+from src.evidence.normalizer import normalize_rag_tool_calls
 from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode, ChemicalKnowledgeBaseTool, ToolManager
 from src.tool_names import canonical_tool_name
@@ -865,13 +866,13 @@ def test_adaptive_rag_query_logs_its_position_in_shared_budget(monkeypatch, caps
     )
 
 
-def test_worker_binds_rag_claims_to_known_evidence_ids():
+def test_worker_binds_rag_claims_to_known_evidence_ids(caplog):
     node = AutonomousToolNode.__new__(AutonomousToolNode)
+    caplog.set_level("INFO", logger=worker_graph_module.__name__)
 
     class Model:
         def invoke(self, messages):
-            assert '"evidence_id": "E1"' in messages[0].content
-            return SimpleNamespace(content="聚合温度会影响熔融指数。[E1]")
+            pytest.fail("valid inline citations must bypass the binding LLM")
 
     node.llm_client = Model()
     evidence = EvidenceBundle(
@@ -888,11 +889,12 @@ def test_worker_binds_rag_claims_to_known_evidence_ids():
 
     revised = node._bind_claims_to_evidence(
         {"task_description": "分析温度对质量的影响"},
-        "聚合温度会影响熔融指数。",
+        "聚合温度会影响熔融指数。[ E1 ]",
         evidence,
     )
 
     assert revised == "聚合温度会影响熔融指数。[E1]"
+    assert "citation_binding_mode=deterministic_repair" in caplog.text
 
 
 def test_worker_rejects_unknown_evidence_ids_from_binding_pass(capsys):
@@ -925,8 +927,9 @@ def test_worker_rejects_unknown_evidence_ids_from_binding_pass(capsys):
     assert "E404" in capsys.readouterr().out
 
 
-def test_worker_binding_pass_reviews_partially_cited_content():
+def test_worker_binding_pass_reviews_partially_cited_content(caplog):
     node = AutonomousToolNode.__new__(AutonomousToolNode)
+    caplog.set_level("INFO", logger=worker_graph_module.__name__)
 
     class Model:
         def __init__(self):
@@ -934,7 +937,7 @@ def test_worker_binding_pass_reviews_partially_cited_content():
 
         def invoke(self, messages):
             self.called = True
-            return SimpleNamespace(content="温度影响熔指。[E1]压力影响密度。[E2]")
+            return SimpleNamespace(content="不应调用")
 
     model = Model()
     node.llm_client = model
@@ -963,8 +966,79 @@ def test_worker_binding_pass_reviews_partially_cited_content():
         evidence,
     )
 
-    assert model.called is True
-    assert "[E2]" in revised
+    assert model.called is False
+    assert revised == "温度影响熔指。[E1]压力影响密度。"
+    assert "citation_binding_mode=direct" in caplog.text
+
+
+def test_worker_binding_deduplicates_and_orders_adjacent_known_ids_without_llm():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def invoke(self, messages):
+            pytest.fail("deterministic citation canonicalization must bypass LLM")
+
+    node.llm_client = Model()
+    evidence = EvidenceBundle(
+        records=tuple(
+            EvidenceRecord(
+                evidence_id=evidence_id,
+                source_type="rag",
+                title=evidence_id,
+                supporting_text="证据。",
+                file_path=f"/srv/docs/{evidence_id}.docx",
+            )
+            for evidence_id in ("E1", "E2")
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析工艺"},
+        "结论。[E2] [E1][E2]",
+        evidence,
+    )
+
+    assert revised == "结论。[E1][E2]"
+
+
+def test_worker_binding_uses_llm_only_when_all_valid_inline_citations_are_missing(
+    caplog,
+):
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    caplog.set_level("WARNING", logger=worker_graph_module.__name__)
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            assert '"evidence_id": "E1"' in messages[0].content
+            return SimpleNamespace(content="聚合温度会影响熔融指数。[E1]")
+
+    model = Model()
+    node.llm_client = model
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="聚乙烯工艺说明",
+                supporting_text="聚合温度会影响熔融指数。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度对质量的影响"},
+        "聚合温度会影响熔融指数。",
+        evidence,
+    )
+
+    assert model.calls == 1
+    assert revised == "聚合温度会影响熔融指数。[E1]"
+    assert "citation_binding_mode=llm_fallback" in caplog.text
 
 
 def test_worker_fallback_removes_unknown_ids_from_original_content():
@@ -995,6 +1069,158 @@ def test_worker_fallback_removes_unknown_ids_from_original_content():
 
     assert revised == "原文包含伪引用。"
     assert "E404" not in revised
+
+
+def test_worker_removes_unknown_id_from_compound_citation_without_llm():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+
+    class Model:
+        def invoke(self, messages):
+            pytest.fail("a compound citation with a known ID is locally repairable")
+
+    node.llm_client = Model()
+    evidence = EvidenceBundle(
+        records=(
+            EvidenceRecord(
+                evidence_id="E1",
+                source_type="rag",
+                title="工艺证据",
+                supporting_text="温度影响熔指。",
+                file_path="/srv/docs/process.docx",
+            ),
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析温度"},
+        "温度影响熔指。[E1, E404]",
+        evidence,
+    )
+
+    assert revised == "温度影响熔指。[E1]"
+
+
+def test_worker_normalizes_compound_citation_with_inherited_e_prefix():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.llm_client = SimpleNamespace(
+        invoke=lambda *_args, **_kwargs: pytest.fail(
+            "compound citation normalization must bypass LLM"
+        )
+    )
+    evidence = EvidenceBundle(
+        records=tuple(
+            EvidenceRecord(
+                evidence_id=evidence_id,
+                source_type="rag",
+                title=evidence_id,
+                supporting_text="证据。",
+                file_path=f"/srv/docs/{evidence_id}.docx",
+            )
+            for evidence_id in ("E1", "E2")
+        )
+    )
+
+    revised = node._bind_claims_to_evidence(
+        {"task_description": "分析工艺"},
+        "结论。[E1, 2]",
+        evidence,
+    )
+
+    assert revised == "结论。[E1][E2]"
+
+
+def test_worker_generation_evidence_context_assigns_stable_inline_ids():
+    context = AutonomousToolNode._evidence_context_for_generation(
+        [
+            {
+                "tool": "chemical_knowledge_base_tool",
+                "parameters": {"query": "聚乙烯工艺"},
+                "success": True,
+                "full_result": {
+                    "evidence": [
+                        {
+                            "content": "温度影响熔融指数。",
+                            "source": "/srv/docs/process.docx",
+                            "title": "工艺证据",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+    assert '"evidence_id": "E1"' in context
+    assert "正文中直接使用对应的 [E编号]" in context
+
+
+def test_worker_generation_evidence_context_preserves_no_evidence_constraint():
+    context = AutonomousToolNode._evidence_context_for_generation(
+        [
+            {
+                "tool": "chemical_knowledge_base_tool",
+                "parameters": {"query": "缺失主题"},
+                "success": False,
+                "full_result": {"error": "unavailable", "has_evidence": False},
+            }
+        ]
+    )
+
+    assert "未提供可验证的来源证据" in context
+    assert "不得使用模型常识补答" in context
+
+
+def test_worker_clean_loop_uses_prefetched_stable_id_without_binding_call():
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=2)
+    prefetched_calls = [
+        {
+            "tool": "chemical_knowledge_base_tool",
+            "parameters": {"query": "聚乙烯工艺"},
+            "success": True,
+            "full_result": {
+                "evidence": [
+                    {
+                        "content": "温度影响熔融指数。",
+                        "source": "/srv/docs/process.docx",
+                        "title": "工艺证据",
+                    }
+                ]
+            },
+            "prefetched": True,
+        }
+    ]
+    evidence_context = node._evidence_context_for_generation(prefetched_calls)
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages, **_kwargs):
+            self.calls += 1
+            assert '"evidence_id": "E1"' in messages[0].content
+            return SimpleNamespace(
+                content="温度影响熔融指数。[E1]" + "正文" * 100,
+                tool_calls=[],
+            )
+
+    model = Model()
+    node.llm_client = model
+    content, calls, _stats = node._execute_tool_loop(
+        model,
+        [SimpleNamespace(content=evidence_context)],
+        [],
+        {"task_id": "T1", "task_name": "工艺概述"},
+        initial_tool_calls=prefetched_calls,
+    )
+    evidence = normalize_rag_tool_calls(calls)
+    revised = node._bind_claims_to_evidence(
+        {"task_id": "T1", "task_description": "工艺概述"},
+        content,
+        evidence,
+    )
+
+    assert model.calls == 1
+    assert revised == content
 
 
 def test_worker_task_prompt_preserves_all_covered_section_headings(monkeypatch):

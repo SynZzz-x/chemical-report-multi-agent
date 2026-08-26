@@ -1781,27 +1781,169 @@ def test_worker_prompt_uses_task_length_and_requires_formal_assets():
     assert "证据缺口" in system_prompt
 
 
-def test_plan_guidance_explicitly_uses_json_mode(monkeypatch):
-    modes = []
+def test_plan_guidance_is_rendered_deterministically_without_llm(monkeypatch):
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("plan guidance must not call an LLM"),
+    )
+
+    guidance = planner_module._generate_plan_guidance(
+        [
+            _task(
+                task_name="数据分析",
+                use_resources=["/tmp/process.csv"],
+                tool_requirements=["csv_analysis_tool"],
+                generate_table=True,
+            ),
+            _task(task_id="T2", task_name="工艺背景", use_resources=[]),
+        ],
+        [{"name": "process.csv", "path": "/tmp/process.csv", "file_id": "F1"}],
+        {},
+    )
+
+    assert "请确认" in guidance["natural_language_guidance"]
+    assert "上传资源" in guidance["natural_language_guidance"]
+    assert "直接运行" in guidance["natural_language_guidance"]
+    assert guidance["resource_mapping"]["数据分析"] == [
+        "process.csv（已提供）"
+    ]
+    assert guidance["resource_mapping"]["工艺背景"] == []
+    assert "目标：基于知识库梳理聚乙烯生产工艺并注明来源。" in guidance[
+        "natural_language_guidance"
+    ]
+    assert "工具：csv_analysis_tool" in guidance["natural_language_guidance"]
+    assert "输出：正式表格" in guidance["natural_language_guidance"]
+
+
+def test_intake_generates_canonical_request_with_one_llm_call(monkeypatch):
+    calls = []
 
     class Model:
-        def invoke(self, _messages, **_kwargs):
+        def invoke(self, messages, **kwargs):
+            calls.append((messages, kwargs))
             return SimpleNamespace(
                 content=json.dumps(
                     {
-                        "natural_language_guidance": "请确认",
-                        "resource_mapping": {},
+                        "is_chat": False,
+                        "user_intent": "编写聚乙烯工艺报告",
+                        "task_type": "工程项目报告",
+                        "title": "聚乙烯工艺报告",
+                        "doc_length": "不限",
+                        "web_authorized": False,
                     },
                     ensure_ascii=False,
                 )
             )
 
-    def fake_get_llm(_config, *, json_mode):
-        modes.append(json_mode)
-        return Model()
+    monkeypatch.setattr(intake_module, "get_llm", lambda *_args, **_kwargs: Model())
 
-    monkeypatch.setattr(planner_module, "get_llm", fake_get_llm)
+    parsed = intake_module.llm_parse_user_need("写一份聚乙烯工艺报告", {})
 
-    planner_module._generate_plan_guidance([_task()], [], {})
+    assert len(calls) == 1
+    assert parsed["constraints"] == []
+    assert parsed["sections"] == []
+    assert parsed["core_content"] == []
+    assert parsed["missing_fields"] == []
 
-    assert modes == [True]
+
+def test_intake_canonicalizer_defaults_optional_nulls_and_validates_required_fields(
+    monkeypatch,
+):
+    responses = [
+        {
+            "is_chat": False,
+            "user_intent": "生成工艺报告",
+            "task_type": "工程报告",
+            "title": "工艺报告",
+            "doc_length": None,
+            "style": "unsupported",
+            "constraints": None,
+        },
+        {
+            "is_chat": False,
+            "task_type": "工程报告",
+            "title": "工艺报告",
+            "doc_length": "1000字",
+        },
+    ]
+
+    class Model:
+        def invoke(self, _messages, **_kwargs):
+            return SimpleNamespace(
+                content=json.dumps(responses.pop(0), ensure_ascii=False)
+            )
+
+    monkeypatch.setattr(intake_module, "get_llm", lambda *_args, **_kwargs: Model())
+
+    parsed = intake_module.llm_parse_user_need("生成工艺报告", {})
+    assert parsed["doc_length"] == "不限"
+    assert parsed["style"] == "formal"
+    assert parsed["constraints"] == []
+
+    with pytest.raises(ValueError, match="user_intent"):
+        intake_module.llm_parse_user_need("生成工艺报告", {})
+
+
+def test_intake_chat_path_still_uses_one_llm_call(monkeypatch):
+    calls = []
+
+    class Model:
+        def invoke(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {"is_chat": True, "response": "你好，我可以帮你生成报告。"},
+                    ensure_ascii=False,
+                )
+            )
+
+    monkeypatch.setattr(intake_module, "get_llm", lambda *_args, **_kwargs: Model())
+
+    parsed = intake_module.llm_parse_user_need("你好", {})
+
+    assert len(calls) == 1
+    assert parsed == {"is_chat": True, "response": "你好，我可以帮你生成报告。"}
+
+
+def test_plan_guidance_uses_structured_resource_identity_not_basename():
+    guidance = planner_module._generate_plan_guidance(
+        [
+            _task(
+                task_name="数据分析",
+                use_resources=["/new/process.csv"],
+                tool_requirements=["csv_analysis_tool"],
+            )
+        ],
+        [
+            {
+                "name": "process.csv",
+                "path": "/initial/process.csv",
+                "file_id": "initial-file",
+            }
+        ],
+        {},
+    )
+
+    assert guidance["resource_mapping"]["数据分析"] == ["process.csv"]
+
+    refreshed = planner_module._generate_plan_guidance(
+        [
+            _task(
+                task_name="数据分析",
+                use_resources=["/new/process.csv"],
+                tool_requirements=["csv_analysis_tool"],
+            )
+        ],
+        [
+            {
+                "name": "process.csv",
+                "path": "/new/process.csv",
+                "file_id": "new-file",
+            }
+        ],
+        {},
+    )
+    assert refreshed["resource_mapping"]["数据分析"] == [
+        "process.csv（已提供）"
+    ]

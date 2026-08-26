@@ -171,19 +171,6 @@ def extract_current_request(state: State) -> Dict[str, Any]:
     }
 
 
-def _load_intake_refine_prompt() -> str:
-    base_dir = os.path.dirname(__file__)
-    path = os.path.join(base_dir, "../prompts/intake_refine.md")
-    try:
-        with open(path, "r", encoding="utf-8") as file:
-            return file.read()
-    except OSError:
-        return (
-            "改善 Intake 节点的输出，确保 JSON 格式正确，包含必要字段"
-            "（user_intent, task_type, title, doc_length）。"
-        )
-
-
 def _load_intake_prompt() -> str:
     base_dir = os.path.dirname(__file__)
     path = os.path.join(base_dir, "../prompts/intake_to_planner.md")
@@ -201,9 +188,53 @@ def _extract_first_json(text: str) -> str:
     return match.group(0)
 
 
+def _normalize_canonical_intake(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate one-shot Intake output without a second model call."""
+
+    normalized = dict(parsed)
+    missing = [
+        field
+        for field in ("user_intent", "task_type", "title")
+        if not isinstance(normalized.get(field), str)
+        or not normalized[field].strip()
+    ]
+    if missing:
+        raise ValueError(
+            "Intake canonical output missing required fields: " + ", ".join(missing)
+        )
+    for field in ("user_intent", "task_type", "title"):
+        normalized[field] = normalized[field].strip()
+
+    doc_length = normalized.get("doc_length")
+    normalized["doc_length"] = (
+        doc_length.strip()
+        if isinstance(doc_length, str) and doc_length.strip()
+        else "不限"
+    )
+    for field in ("constraints", "sections", "core_content", "missing_fields"):
+        values = normalized.get(field)
+        normalized[field] = (
+            [value.strip() for value in values if isinstance(value, str) and value.strip()]
+            if isinstance(values, list)
+            else []
+        )
+    style = str(normalized.get("style") or "formal").strip().casefold()
+    normalized["style"] = (
+        style if style in {"formal", "academic", "creative", "simple"} else "formal"
+    )
+    output_format = normalized.get("output_format")
+    normalized["output_format"] = (
+        output_format.strip()
+        if isinstance(output_format, str) and output_format.strip()
+        else None
+    )
+    normalized["web_authorized"] = normalized.get("web_authorized") is True
+    return normalized
+
+
 def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, Any]:
-    """调用 LLM，将本轮自然语言输入解析为结构化需求。"""
-    model = get_llm(config)
+    """Generate one canonical representation of the current user request."""
+    model = get_llm(config, json_mode=True)
     system_template = _load_intake_prompt()
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -217,43 +248,13 @@ def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, A
         messages,
         config=config,
         node="Intake",
-        purpose="request_parse",
+        purpose="canonical_intake_generation",
         json_mode=True,
     )
-    initial_output = _extract_first_json(str(response.content))
-
-    try:
-        pre_parsed = json.loads(initial_output)
-        if pre_parsed.get("is_chat"):
-            return pre_parsed
-    except (TypeError, json.JSONDecodeError):
-        pass
-
-    refine_template = _load_intake_refine_prompt()
-    refine_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", refine_template),
-            ("human", "{init_output}"),
-        ]
-    )
-    refine_messages = refine_prompt.format_messages(init_output=initial_output)
-    refined_response = invoke_llm(
-        model,
-        refine_messages,
-        config=config,
-        node="Intake",
-        purpose="request_refine",
-        json_mode=True,
-    )
-
-    refined_text = str(refined_response.content)
-    tagged_json = re.search(r"<json>((.|\n)*?)</json>", refined_text)
-    payload = tagged_json.group(1) if tagged_json else _extract_first_json(refined_text)
-
-    parsed = json.loads(payload)
-    parsed.setdefault("constraints", [])
-    parsed.setdefault("missing_fields", [])
-    return parsed
+    parsed = json.loads(_extract_first_json(str(response.content)))
+    if parsed.get("is_chat"):
+        return parsed
+    return _normalize_canonical_intake(parsed)
 
 
 def build_task_spec(

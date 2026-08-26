@@ -32,7 +32,7 @@ def _state(*, cursor=0):
         "current_result": {
             "task_id": current["task_id"],
             "status": "COMPLETED",
-            "text_output": f"{current['task_name']}正文",
+            "text_output": f"{current['task_name']}正文。[E1]",
             "tables": [],
             "figures": [],
             "citations": [{"evidence_id": "E1"}],
@@ -173,12 +173,12 @@ def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
         model.calls[1], ensure_ascii=False, default=str
     )
     assert any(
-        "AutoVerifier contract validation failed: task=T1 attempt=1/3"
+        "AutoVerifier contract validation failed: task=T1 attempt=1/2"
         in message
         for message in caplog.messages
     )
     assert any(
-        "AutoVerifier contract retry: task=T1 attempt=2/3" in message
+        "AutoVerifier contract retry: task=T1 attempt=2/2" in message
         for message in caplog.messages
     )
     retry_records = [
@@ -195,51 +195,87 @@ def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
     assert all("敏感正文不可进入修复请求" not in message for message in caplog.messages)
 
 
-def test_repaired_semantic_length_failure_enters_policy_once(monkeypatch):
+def test_preflight_length_failure_enters_policy_without_verifier_retry(monkeypatch):
     state = _state()
     state["task_retry_count"] = {}
     state["tasks"][0]["task_description"] = "撰写不少于500字的引言。"
     state["current_result"]["text_output"] += "[E1]"
-    invalid_contract = {
-        "status": "FAILED",
-        "current_section": "引言",
-        "issues": [],
-        "requirements_met": [],
-        "requirements_missing": [],
-    }
-    valid_failure = {
-        "status": "FAILED",
-        "current_section": "引言",
-        "issues": [
-            {
-                "code": "TOO_SHORT",
-                "category": "CONTENT_DEFECT",
-                "description": "正文低于最低字数要求。",
-                "suggestion": "补充任务要求的有效内容。",
-                "severity": "major",
-            }
-        ],
-        "requirements_met": [],
-        "requirements_missing": ["最低字数"],
-    }
-
-    update, model = _run_responses(
-        monkeypatch,
-        state,
-        [
-            json.dumps(invalid_contract, ensure_ascii=False),
-            json.dumps(valid_failure, ensure_ascii=False),
-        ],
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("length preflight must bypass LLM"),
+    )
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
     )
     decision = decide_recovery_action({**state, **update}, update["assessment"])
 
     assert [issue["code"] for issue in update["assessment"]["issues"]] == [
         "TOO_SHORT"
     ]
-    assert update["verifier_retry_count"] == {"T1": 1}
-    assert len(model.calls) == 2
+    assert "verifier_retry_count" not in update
     assert decision["workflow_action"] == "LENGTH_REWRITE"
     assert decision["task_retry_count"] == {"T1": 1}
+
+
+def test_preflight_517_chars_against_500_max_routes_length_rewrite(monkeypatch):
+    state = _state()
+    state["task_retry_count"] = {}
+    state["tasks"][0]["task_description"] = "正文不超过500字。"
+    state["current_result"].update(
+        {"text_output": "聚" * 517, "citations": []}
+    )
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "length preflight must bypass assessment and contract repair"
+        ),
+    )
+
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+    decision = decide_recovery_action({**state, **update}, update["assessment"])
+
+    assert update["assessment"]["issues"] == [
+        {
+            "code": "TOO_LONG",
+            "category": "CONTENT_DEFECT",
+            "description": "正文确定性计数为 517 字，超过最高要求 500 字。",
+            "suggestion": "压缩重复内容，但保留必要结论、证据和资产说明。",
+            "severity": "major",
+            "actual": 517,
+            "required_min": None,
+            "required_max": 500,
+        }
+    ]
+    assert decision["workflow_action"] == "LENGTH_REWRITE"
+
+
+def test_valid_preflight_calls_semantic_verifier_once(monkeypatch):
+    state = _state()
+    state["tasks"][0]["task_description"] = "正文不超过500字。"
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        [
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "current_section": "引言",
+                    "issues": [],
+                    "requirements_met": ["长度和引用符合要求"],
+                    "requirements_missing": [],
+                },
+                ensure_ascii=False,
+            )
+        ],
+    )
+
+    assert update["assessment"]["status"] == "PASS"
+    assert len(model.calls) == 1
+    assert "verifier_retry_count" not in update
 
 
 def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
@@ -259,20 +295,20 @@ def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
     update, model = _run_responses(
         monkeypatch,
         state,
-        ["not-json", "still-not-json", "also-not-json"],
+        ["not-json", "still-not-json"],
     )
     decision = decide_recovery_action({**state, **update}, update["assessment"])
 
-    assert len(model.calls) == 3
+    assert len(model.calls) == 2
     assert update["assessment"] == {}
     assert update["verifier_failure"] == {
         "code": "VERIFIER_UNAVAILABLE",
         "category": "VERIFIER_FAILURE",
         "message": "自动校验器本身未能产生合法校验结果。",
         "retryable": False,
-        "contract_attempts": 3,
+        "contract_attempts": 2,
     }
-    assert update["verifier_retry_count"] == {"T1": 2}
+    assert update["verifier_retry_count"] == {"T1": 1}
     assert decision["workflow_action"] == "NEEDS_USER_INPUT"
     assert decision["task_retry_count"] == state["task_retry_count"]
     assert decision["asset_retry_count"] == state["asset_retry_count"]
@@ -401,12 +437,14 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
         "requirements_missing": [],
     }
 
-    _, captured = _run(monkeypatch, _state(cursor=1), assessment)
+    state = _state(cursor=1)
+    state["current_result"]["tables"] = [{"title": "质量指标"}]
+    _, captured = _run(monkeypatch, state, assessment)
 
     assert "必须生成质量指标表格" in captured["task_requirements"]
     assets = json.loads(captured["worker_assets"])
     assert assets["citations"] == [{"evidence_id": "E1"}]
-    assert assets["tables"] == []
+    assert assets["tables"] == [{"title": "质量指标"}]
     assert "actual_length" in assets
 
 
@@ -484,7 +522,17 @@ def test_deterministic_length_failure_overrides_llm_pass(monkeypatch):
         "requirements_missing": [],
     }
 
-    update, captured = _run(monkeypatch, state, assessment)
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deterministic preflight failures must bypass the semantic verifier"
+        ),
+    )
+    update = auto_verifier_module.verifier(
+        state,
+        {"configurable": {"use_llm": True}},
+    )
 
     issue = next(
         item for item in update["assessment"]["issues"] if item["code"] == "TOO_SHORT"
@@ -492,9 +540,7 @@ def test_deterministic_length_failure_overrides_llm_pass(monkeypatch):
     assert update["assessment"]["status"] == "FAILED"
     assert issue["actual"] == 2
     assert issue["required_min"] == 20
-    assets = json.loads(captured["worker_assets"])
-    assert assets["actual_length"] == 2
-    assert assets["length_target"] == {"min": 20, "max": 30}
+    assert update["verifier_failure"] == {}
 
 
 def test_deterministic_length_replaces_llm_estimate_for_the_same_issue(monkeypatch):
@@ -724,9 +770,33 @@ def test_verifier_rejects_unknown_inline_evidence_id(monkeypatch):
         "requirements_missing": [],
     }
 
-    update, _ = _run(monkeypatch, state, assessment)
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("citation preflight must bypass LLM"),
+    )
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
 
     assert update["assessment"]["status"] == "FAILED"
+    assert update["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
+    assert "E404" in update["assessment"]["issues"][0]["description"]
+
+
+def test_verifier_rejects_unknown_id_inside_compound_citation(monkeypatch):
+    state = _state()
+    state["current_result"]["text_output"] = "温度影响熔融指数。[E1, E404]"
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("citation preflight must bypass LLM"),
+    )
+
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+
     assert update["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
     assert "E404" in update["assessment"]["issues"][0]["description"]
 
@@ -742,7 +812,14 @@ def test_verifier_requires_inline_binding_when_citations_are_available(monkeypat
         "requirements_missing": [],
     }
 
-    update, _ = _run(monkeypatch, state, assessment)
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("citation preflight must bypass LLM"),
+    )
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
 
     assert update["assessment"]["status"] == "FAILED"
     assert update["assessment"]["issues"][0]["code"] == "MISSING_INLINE_CITATION"

@@ -13,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
+from src.evidence.citations import extract_inline_evidence_ids
 from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm, invoke_llm
 from src.nodes.synthesis import build_synthesis_context
@@ -32,7 +33,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LOG_PATH = os.path.join(LOG_DIR, "verifier_logs.jsonl")
 logger = logging.getLogger(__name__)
 
-MAX_VERIFIER_CONTRACT_RETRIES = 2
+MAX_VERIFIER_CONTRACT_RETRIES = 1
 _MAX_CONTRACT_RESPONSE_CHARS = 4000
 _MAX_CONTRACT_ERROR_CHARS = 1000
 
@@ -139,6 +140,21 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     current_result = state.get("current_result", {}) or {}
     tasks = state.get("tasks", []) or []
     cursor = int(state.get("cursor", 0) or 0)
+    task_id = str(
+        (tasks[cursor] if 0 <= cursor < len(tasks) else {}).get("task_id")
+        or cursor
+    )
+
+    preflight = _deterministic_preflight(state)
+    if preflight.get("status") == "FAILED":
+        issues = list(preflight.get("issues") or [])
+        logger.info(
+            "Verifier deterministic preflight: task=%s status=FAILED issue_count=%s",
+            task_id,
+            len(issues),
+        )
+        _log_verifier_output(state, preflight, {}, raw_issues=[])
+        return {"assessment": preflight, "verifier_failure": {}}
 
     try:
         configurable = config.get("configurable", {}) if config else {}
@@ -151,10 +167,6 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
     llm_record: dict[str, Any] = {}
     verifier_failure: dict[str, Any] = {}
     verifier_retry_count = dict(state.get("verifier_retry_count") or {})
-    task_id = str(
-        (tasks[cursor] if 0 <= cursor < len(tasks) else {}).get("task_id")
-        or cursor
-    )
     contract_retries = 0
     if use_llm:
         try:
@@ -439,9 +451,7 @@ def _apply_citation_integrity(
     content = str(
         current_result.get("content") or current_result.get("text_output") or ""
     )
-    cited_ids = {
-        value.upper() for value in re.findall(r"\[(E\d+)\]", content, re.IGNORECASE)
-    }
+    cited_ids = extract_inline_evidence_ids(content)
     unknown_ids = cited_ids - known_ids
     issue = None
     missing_requirement = "正文中的证据编号绑定"
@@ -604,6 +614,26 @@ def _apply_deterministic_validation(
         }
     )
     return updated
+
+
+def _deterministic_preflight(state: State) -> dict[str, Any]:
+    """Build a canonical assessment for failures requiring no semantic judgement."""
+
+    tasks = state.get("tasks") or []
+    cursor = int(state.get("cursor", 0) or 0)
+    assessment: dict[str, Any] = {
+        "status": "PASS",
+        "current_section": _task_name(tasks, cursor),
+        "issues": [],
+        "requirements_met": [],
+        "requirements_missing": [],
+    }
+    assessment = _apply_citation_integrity(
+        assessment,
+        state.get("current_result") or {},
+    )
+    assessment = _apply_deterministic_validation(assessment, state)
+    return apply_evidence_gap_acceptance(assessment, state)
 
 
 def _duplicates_deterministic_issue(

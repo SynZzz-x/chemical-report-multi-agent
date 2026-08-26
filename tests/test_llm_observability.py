@@ -5,10 +5,16 @@ from collections import Counter
 from pathlib import Path
 import re
 from types import SimpleNamespace
+import json
 
 import pytest
 
+from src.evidence.models import EvidenceBundle, EvidenceRecord
 from src.llm import extract_token_usage, invoke_llm
+from src.nodes import intake as intake_module
+from src.nodes import planner as planner_module
+from src.nodes import verifier as verifier_module
+from src.nodes.worker.agent.graph import AutonomousToolNode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -165,13 +171,11 @@ def test_invoke_llm_preserves_omitted_config_call_shape():
     assert runnable.calls == [("input", {})]
 
 
-def test_all_18_llm_call_sites_use_the_observability_taxonomy():
+def test_all_phase_one_llm_call_sites_use_the_observability_taxonomy():
     expected = Counter(
         {
-            ("Intake", "request_parse"): 1,
-            ("Intake", "request_refine"): 1,
+            ("Intake", "canonical_intake_generation"): 1,
             ("Planner", "plan_generation"): 1,
-            ("Planner", "plan_guidance"): 1,
             ("Worker", "task_generation"): 3,
             ("Worker", "citation_binding"): 1,
             ("Verifier", "assessment"): 1,
@@ -204,5 +208,130 @@ def test_all_18_llm_call_sites_use_the_observability_taxonomy():
             purpose = ast.literal_eval(keywords["purpose"])
             actual[(node_name, purpose)] += 1
 
-    assert sum(actual.values()) == 18
+    assert sum(actual.values()) == 16
     assert actual == expected
+
+
+def test_phase_one_clean_path_removes_three_runtime_calls(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="src.llm.observability")
+
+    class IntakeModel:
+        model_name = "deepseek-chat"
+
+        def invoke(self, _messages, **_kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "is_chat": False,
+                        "user_intent": "生成工艺报告",
+                        "task_type": "工程报告",
+                        "title": "工艺报告",
+                        "doc_length": "500字",
+                        "constraints": [],
+                        "sections": ["工艺概述"],
+                        "core_content": ["温度影响"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    class VerifierModel:
+        model_name = "deepseek-chat"
+
+        def invoke(self, _payload, **_kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "status": "PASS",
+                        "current_section": "工艺概述",
+                        "issues": [],
+                        "requirements_met": ["内容和引用符合要求"],
+                        "requirements_missing": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    monkeypatch.setattr(
+        intake_module, "get_llm", lambda *_args, **_kwargs: IntakeModel()
+    )
+    monkeypatch.setattr(
+        verifier_module, "get_llm", lambda *_args, **_kwargs: VerifierModel()
+    )
+    monkeypatch.setattr(
+        planner_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail("guidance must be deterministic"),
+    )
+
+    intake_module.llm_parse_user_need("生成一份500字工艺报告", {})
+    planner_module._generate_plan_guidance(
+        [
+            {
+                "task_id": "T1",
+                "task_name": "工艺概述",
+                "task_description": "撰写不超过500字的工艺概述。",
+                "tool_requirements": [],
+                "use_resources": [],
+                "generate_table": False,
+                "generate_figure": False,
+            }
+        ],
+        [],
+        {},
+    )
+    worker = AutonomousToolNode.__new__(AutonomousToolNode)
+    worker.llm_client = SimpleNamespace(
+        invoke=lambda *_args, **_kwargs: pytest.fail(
+            "valid citations must bypass citation binding LLM"
+        )
+    )
+    worker._bind_claims_to_evidence(
+        {"task_id": "T1", "task_description": "工艺概述"},
+        "温度影响熔融指数。[E1]",
+        EvidenceBundle(
+            records=(
+                EvidenceRecord(
+                    evidence_id="E1",
+                    source_type="rag",
+                    title="工艺证据",
+                    supporting_text="温度影响熔融指数。",
+                    file_path="/srv/docs/process.docx",
+                ),
+            )
+        ),
+    )
+    verifier_module.verifier(
+        {
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "task_name": "工艺概述",
+                    "task_description": "撰写不超过500字的工艺概述。",
+                    "generate_table": False,
+                    "generate_figure": False,
+                }
+            ],
+            "cursor": 0,
+            "current_result": {
+                "text_output": "温度影响熔融指数。[E1]",
+                "citations": [{"evidence_id": "E1"}],
+                "tables": [],
+                "figures": [],
+            },
+            "plan_revision": 1,
+        },
+        {"configurable": {"use_llm": True}},
+    )
+
+    starts = [
+        message
+        for message in caplog.messages
+        if message.startswith("LLM_CALL_START ")
+    ]
+    assert len(starts) == 2
+    assert "node=Intake purpose=canonical_intake_generation" in starts[0]
+    assert "node=Verifier purpose=assessment" in starts[1]
+    assert all("request_refine" not in message for message in starts)
+    assert all("plan_guidance" not in message for message in starts)
+    assert all("citation_binding" not in message for message in starts)

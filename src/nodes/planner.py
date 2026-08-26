@@ -1134,38 +1134,92 @@ def _refine_tasks(
         ) from exc
 
 
-def _generate_plan_guidance(tasks: List[Dict[str, Any]], initial_resources: List[str], config: RunnableConfig) -> Dict[str, Any]:
-    """生成计划确认引导信息和资源映射关系"""
-    try:
-        model = get_llm(config, json_mode=True)
-        sys_prompt = _read_prompt("../prompts/planner_resource_guide.md")
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", sys_prompt),
-            ("human", "请生成引导信息和资源映射")
-        ])
-        messages = prompt.format_messages(
-            tasks=json.dumps(tasks, ensure_ascii=False),
-            initial_resources=json.dumps(initial_resources, ensure_ascii=False)
+def _generate_plan_guidance(
+    tasks: List[Dict[str, Any]],
+    initial_resources: List[Any],
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    """Render plan confirmation data from the validated task contract."""
+
+    del config  # Kept in the signature for planner/recovery compatibility.
+    provided: Dict[str, str] = {}
+    for resource in initial_resources or []:
+        if isinstance(resource, dict):
+            display_name = str(
+                resource.get("name")
+                or os.path.basename(
+                    str(resource.get("path") or resource.get("file_path") or "")
+                )
+            ).strip()
+            identities = {
+                str(resource.get(field) or "").strip().casefold()
+                for field in ("path", "file_path", "file_id", "resource_id")
+                if str(resource.get(field) or "").strip()
+            }
+            if not identities and display_name:
+                identities.add(display_name.casefold())
+        else:
+            raw_resource = str(resource or "").strip()
+            display_name = os.path.basename(raw_resource)
+            identities = {raw_resource.casefold()} if raw_resource else set()
+        for identity in identities:
+            provided[identity] = display_name
+    resource_mapping: Dict[str, List[str]] = {}
+    task_lines: List[str] = []
+    for index, task in enumerate(tasks or [], start=1):
+        task_name = str(task.get("task_name") or f"任务 {index}")
+        resources: List[str] = []
+        for raw_resource in task.get("use_resources") or []:
+            identity = str(raw_resource).strip().casefold()
+            name = os.path.basename(str(raw_resource).strip())
+            if not name:
+                continue
+            label = provided.get(identity, name)
+            if identity in provided:
+                label += "（已提供）"
+            if label not in resources:
+                resources.append(label)
+        tools = {
+            canonical_tool_name(value)
+            for value in task.get("tool_requirements") or []
+        }
+        tools.discard(None)
+        if "csv_analysis_tool" in tools and not any(
+            str(value).casefold().endswith(".csv")
+            for value in task.get("use_resources") or []
+        ):
+            resources.append("任务所需数据文件（CSV 格式）")
+        resource_mapping[task_name] = resources
+        outputs = []
+        if task.get("generate_table") is True:
+            outputs.append("正式表格")
+        if task.get("generate_figure") is True:
+            outputs.append("正式图形")
+        if not outputs:
+            outputs.append("报告正文")
+        task_lines.extend(
+            (
+                f"{index}. **{task_name}**",
+                f"   - 目标：{task.get('task_description') or '按计划完成该任务'}",
+                "   - 使用资料：" + ("、".join(resources) if resources else "无"),
+                "   - 工具：" + ("、".join(sorted(tools)) if tools else "无"),
+                "   - 输出：" + "、".join(outputs),
+            )
         )
-        resp = invoke_llm(
-            model,
-            messages,
-            config=config,
-            node="Planner",
-            purpose="plan_guidance",
-            json_mode=True,
-        )
-        
-        content = str(resp.content)
-        json_match = re.search(r"\{[\s\S]*\}", content)
-        if json_match:
-            return json.loads(json_match.group(0))
-    except Exception:
-        pass
-        
+
+    logger.info(
+        "Planner plan guidance rendered: mode=deterministic tasks=%s resources=%s",
+        len(tasks or []),
+        sum(len(values) for values in resource_mapping.values()),
+    )
     return {
-        "natural_language_guidance": "为您生成的任务计划如下，请您查阅。如果需要补充资料，请上传；如果您对计划满意，或者您也可以直接运行，我们将立即开始工作。",
-        "resource_mapping": {}
+        "natural_language_guidance": (
+            f"为您生成了 {len(tasks or [])} 个任务，请确认计划。\n\n"
+            + "\n".join(task_lines)
+            + "\n\n如需补充资料，请上传资源；如果计划符合要求且无需补充资料，"
+            "您也可以直接运行，我们将立即开始工作。"
+        ),
+        "resource_mapping": resource_mapping,
     }
 
 
@@ -1293,7 +1347,10 @@ def planner(state: State, config: RunnableConfig, **kwargs):
     else:
         # 准备 Guidance 数据供 Confirm 节点使用
         intake_data = _get_intake_data(state)
-        initial_resources_names = [r.get("name") for r in intake_data.get("resources", []) if isinstance(r, dict)]
+        current_resources = merge_docs(
+            intake_data.get("resources", []),
+            state.get("docs") or [],
+        )
         
         if planner_action == "FULL_REPLAN_ERROR":
             guidance_result = _full_replan_error_guidance(
@@ -1303,7 +1360,7 @@ def planner(state: State, config: RunnableConfig, **kwargs):
             guidance_result = _initial_plan_error_guidance(initial_plan_error)
         else:
             guidance_result = _generate_plan_guidance(
-                tasks, initial_resources_names, config
+                tasks, current_resources, config
             )
         result["guidance"] = guidance_result
     
@@ -1367,14 +1424,13 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
 
     if not guidance_result:
         intake_data = _get_intake_data(state)
-        initial_resource_names = [
-            resource.get("name")
-            for resource in intake_data.get("resources", [])
-            if isinstance(resource, dict) and resource.get("name")
-        ]
+        current_resources = merge_docs(
+            intake_data.get("resources", []),
+            state.get("docs") or [],
+        )
         guidance_result = _generate_plan_guidance(
             tasks,
-            initial_resource_names,
+            current_resources,
             config,
         )
 
@@ -1513,18 +1569,13 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "docs": resumed_docs,
                 "web_authorized": effective_web_authorized,
             }
-        initial_resource_names = [
-            resource.get("name")
-            for resource in intake_data.get("resources", [])
-            if isinstance(resource, dict) and resource.get("name")
-        ]
         return {
             "messages": [feedback_message],
             "cursor": int(state.get("cursor", 0) or 0),
             "planner_action": "FULL_REPLAN_REFINED",
             "full_replan_candidate_tasks": refined_tasks,
             "guidance": _generate_plan_guidance(
-                refined_tasks, initial_resource_names, config
+                refined_tasks, combined_docs, config
             ),
             "docs": resumed_docs,
             "web_authorized": effective_web_authorized,
@@ -1551,18 +1602,13 @@ def planner_confirm(state: State, config: RunnableConfig, **kwargs):
                 "docs": resumed_docs,
                 "web_authorized": effective_web_authorized,
             }
-        initial_resource_names = [
-            resource.get("name")
-            for resource in intake_data.get("resources", [])
-            if isinstance(resource, dict) and resource.get("name")
-        ]
         return {
             "messages": [feedback_message],
             "tasks": refined_tasks,
             "cursor": 0,
             "planner_action": "INTAKE_SUMMARY_REFINED",
             "guidance": _generate_plan_guidance(
-                refined_tasks, initial_resource_names, config
+                refined_tasks, combined_docs, config
             ),
             "docs": resumed_docs,
             "web_authorized": effective_web_authorized,
