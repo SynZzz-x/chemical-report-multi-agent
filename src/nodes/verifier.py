@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
 from src.evidence_waivers import apply_evidence_gap_acceptance
-from src.llm import get_llm
+from src.llm import get_llm, invoke_llm
 from src.nodes.synthesis import build_synthesis_context
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
@@ -203,7 +203,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             }
             model = get_llm(config, json_mode=True)
             chain = ChatPromptTemplate.from_messages([("system", template)]) | model
-            response = chain.invoke(
+            response = invoke_llm(
+                chain,
                 {
                     "task_name": _task_name(tasks, cursor),
                     "task_requirements": json.dumps(
@@ -221,7 +222,14 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                         synthesis_context, ensure_ascii=False, default=str
                     ),
                     "format_instructions": format_instructions,
-                }
+                },
+                node="Verifier",
+                purpose="assessment",
+                task_id=task_id,
+                job_id=state.get("job_id"),
+                plan_revision=state.get("plan_revision"),
+                task_revision=(state.get("task_revisions") or {}).get(task_id),
+                json_mode=True,
             )
             raw_response = str(response.content)
             assessment_model: VerifierAssessment | None = None
@@ -235,12 +243,12 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     contract_error = exc
                     logger.warning(
                         "AutoVerifier contract validation failed: task=%s "
-                        "attempt=%s/%s error_type=%s error=%s",
+                        "attempt=%s/%s error_type=%s "
+                        "reason=assessment_contract_invalid",
                         task_id,
                         attempt,
                         MAX_VERIFIER_CONTRACT_RETRIES + 1,
                         type(exc.__cause__ or exc).__name__,
-                        _bounded_contract_error(exc),
                     )
                     if attempt > MAX_VERIFIER_CONTRACT_RETRIES:
                         break
@@ -248,7 +256,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     verifier_retry_count[task_id] = (
                         int(verifier_retry_count.get(task_id, 0) or 0) + 1
                     )
-                    logger.info(
+                    logger.warning(
                         "AutoVerifier contract retry: task=%s attempt=%s/%s",
                         task_id,
                         attempt + 1,
@@ -259,6 +267,13 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                         raw_response,
                         exc,
                         config,
+                        task_id=task_id,
+                        job_id=state.get("job_id"),
+                        plan_revision=state.get("plan_revision"),
+                        task_revision=(state.get("task_revisions") or {}).get(
+                            task_id
+                        ),
+                        attempt=attempt + 1,
                     )
             if assessment_model is None:
                 failure = VerifierExecutionFailure(
@@ -357,6 +372,12 @@ def _invoke_contract_repair(
     previous_response: str,
     error: AssessmentContractError,
     config: RunnableConfig,
+    *,
+    task_id: str | None = None,
+    job_id: str | None = None,
+    plan_revision: int | None = None,
+    task_revision: int | None = None,
+    attempt: int = 2,
 ) -> str:
     """Repair only the prior assessment structure without resending report text."""
 
@@ -375,7 +396,8 @@ def _invoke_contract_repair(
             ),
         ]
     )
-    response = (repair_prompt | model).invoke(
+    response = invoke_llm(
+        repair_prompt | model,
         {
             "schema": json.dumps(
                 VerifierAssessment.model_json_schema(),
@@ -387,6 +409,14 @@ def _invoke_contract_repair(
             "validation_error": _bounded_contract_error(error),
         },
         config=config,
+        node="Verifier",
+        purpose="assessment_contract_repair",
+        task_id=task_id,
+        job_id=job_id,
+        plan_revision=plan_revision,
+        task_revision=task_revision,
+        attempt=attempt,
+        json_mode=True,
     )
     return str(response.content)
 

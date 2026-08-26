@@ -36,6 +36,9 @@ class ConceptGraphService:
         required_concepts: list[str],
         evidence: EvidenceBundle,
         output_dir: str | Path,
+        job_id: str | None = None,
+        plan_revision: int | None = None,
+        task_revision: int | None = None,
     ) -> dict:
         if not self.settings.enabled:
             return {"success": False, "error": "concept graph generation is disabled"}
@@ -52,6 +55,10 @@ class ConceptGraphService:
             evidence=evidence,
             required_concepts=required_concepts,
             graph_type=graph_type,
+            task_id=task_id,
+            job_id=job_id,
+            plan_revision=plan_revision,
+            task_revision=task_revision,
         )
         validated = validate_graph(
             spec,

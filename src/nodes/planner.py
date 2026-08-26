@@ -9,7 +9,7 @@ from langgraph.types import interrupt
 from typing import Any, Dict, List
 
 from ..state import State, merge_docs
-from ..llm import get_llm
+from ..llm import get_llm, invoke_llm
 from ..limits import MAX_PLAN_TASKS
 from ..report_outline import planner_outline, validate_task_coverage
 from ..rag.catalog import load_active_catalog
@@ -756,7 +756,15 @@ def _invoke_plan_generation(
             )
         response_text = ""
         try:
-            response = model.invoke(messages, config=config)
+            response = invoke_llm(
+                model,
+                messages,
+                config=config,
+                node="Planner",
+                purpose="plan_generation",
+                attempt=attempt,
+                json_mode=True,
+            )
             response_text = str(response.content).strip()
             tasks = _parse_generated_plan_payload(
                 response_text,
@@ -769,12 +777,10 @@ def _invoke_plan_generation(
             last_error = exc
             logger.warning(
                 "Planner generation validation failed: path=%s attempt=%s "
-                "error_type=%s error=%s response=%r",
+                "error_type=%s reason=plan_contract_invalid",
                 failure_label,
                 attempt,
                 type(exc).__name__,
-                str(exc),
-                response_text[:2000],
             )
 
     raise PlannerGenerationError(f"{failure_label}: {last_error}") from last_error
@@ -1141,7 +1147,14 @@ def _generate_plan_guidance(tasks: List[Dict[str, Any]], initial_resources: List
             tasks=json.dumps(tasks, ensure_ascii=False),
             initial_resources=json.dumps(initial_resources, ensure_ascii=False)
         )
-        resp = model.invoke(messages, config=config)
+        resp = invoke_llm(
+            model,
+            messages,
+            config=config,
+            node="Planner",
+            purpose="plan_guidance",
+            json_mode=True,
+        )
         
         content = str(resp.content)
         json_match = re.search(r"\{[\s\S]*\}", content)

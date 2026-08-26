@@ -6,7 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.types import interrupt
 
 from src.state import State
-from src.llm import get_llm
+from src.llm import get_llm, invoke_llm
 from src.nodes.intake import web_authorization_directive
 from src.recovery.policy import commit_current_result
 from src.report_acceptance import (
@@ -93,7 +93,15 @@ def _clean_json_fences(s: str) -> str:
     s2 = re.sub(r"\s*```$", "", s2)
     return s2
 
-def _analyze_feedback(user_feedback: str, task_name: str, current_result_content: str, config: RunnableConfig):
+def _analyze_feedback(
+    user_feedback: str,
+    task_name: str,
+    current_result_content: str,
+    config: RunnableConfig,
+    *,
+    task_id: str | None = None,
+    job_id: str | None = None,
+):
     """使用 LLM 分析用户反馈，决定后续动作"""
     try:
         model = get_llm(config, json_mode=True)
@@ -108,11 +116,19 @@ def _analyze_feedback(user_feedback: str, task_name: str, current_result_content
         # 截取一部分结果以防 prompt 过长
         snippet = current_result_content[:1000] + "..." if len(current_result_content) > 1000 else current_result_content
         
-        res = chain.invoke({
-            "task_name": task_name,
-            "current_result_snippet": snippet,
-            "user_feedback": user_feedback
-        })
+        res = invoke_llm(
+            chain,
+            {
+                "task_name": task_name,
+                "current_result_snippet": snippet,
+                "user_feedback": user_feedback,
+            },
+            node="ManualVerifier",
+            purpose="feedback_analysis",
+            task_id=task_id,
+            job_id=job_id,
+            json_mode=True,
+        )
         
         content_str = _clean_json_fences(str(res.content).strip())
         return json.loads(content_str)
@@ -192,7 +208,14 @@ def verifier_manual(state: State, config: RunnableConfig, **kwargs):
             "suggestions": "",
         }
     else:
-        analysis = _analyze_feedback(feedback_text, task_name, content_text, config)
+        analysis = _analyze_feedback(
+            feedback_text,
+            task_name,
+            content_text,
+            config,
+            task_id=str(current_result.get("task_id") or cursor),
+            job_id=state.get("job_id"),
+        )
 
     decision_code = _normalize_decision(analysis.get("decision", "PASS"))
     suggestions = analysis.get("suggestions", "")

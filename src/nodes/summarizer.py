@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from ..state import State
-from ..llm import get_llm
+from ..llm import get_llm, invoke_llm
 
 
 """
@@ -216,7 +216,14 @@ def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str
             ("human", "{report}")
         ])
         messages = prompt.format_messages(report=report_text or "")
-        resp = model.invoke(messages, config=config)
+        resp = invoke_llm(
+            model,
+            messages,
+            config=config,
+            node="Summarizer",
+            purpose="report_evaluation",
+            json_mode=True,
+        )
         return str(getattr(resp, "content", "")).strip()
     except Exception:
         return "报告生成完成。评价暂不可用。"

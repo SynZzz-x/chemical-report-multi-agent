@@ -12,7 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..evidence.identity import normalize_sections_evidence
-from ..llm import get_llm
+from ..llm import get_llm, invoke_llm
 from ..report_acceptance import is_admitted_section_entry
 from ..report_acceptance import (
     USER_ACCEPTED_GAP,
@@ -398,9 +398,17 @@ def synthesis(
     if model is not None:
         for attempts in range(1, 3):
             try:
-                response = model.invoke(
+                response = invoke_llm(
+                    model,
                     _prompt_messages(task, context, findings),
                     config=config or {},
+                    node="Synthesis",
+                    purpose="report_synthesis",
+                    task_id=task_id,
+                    attempt=attempts,
+                    plan_revision=state.get("plan_revision"),
+                    task_revision=(state.get("task_revisions") or {}).get(task_id),
+                    json_mode=False,
                 )
             except Exception as exc:
                 model_error = str(exc)

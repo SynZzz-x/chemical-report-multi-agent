@@ -18,7 +18,7 @@ from src.evidence_waivers import (
     record_evidence_gap_acceptance,
     split_waivable_evidence_gaps,
 )
-from src.llm import get_llm
+from src.llm import get_llm, invoke_llm
 from src.nodes.planner import planner as planner_node
 from src.recovery.plan_patch import apply_plan_patch, validate_plan_patch
 from src.recovery.policy import (
@@ -647,7 +647,18 @@ def plan_patcher(
     """Generate, validate, and atomically apply one local plan patch."""
     try:
         model = get_llm(config, json_mode=True)
-        response = model.invoke([HumanMessage(content=_plan_patch_prompt(state))])
+        task_id = _current_task_id(state)
+        response = invoke_llm(
+            model,
+            [HumanMessage(content=_plan_patch_prompt(state))],
+            node="EvidenceRecovery",
+            purpose="plan_patch",
+            task_id=task_id,
+            job_id=state.get("job_id"),
+            plan_revision=state.get("plan_revision"),
+            task_revision=(state.get("task_revisions") or {}).get(task_id),
+            json_mode=True,
+        )
         patch = json.loads(_clean_json_fences(str(response.content)))
         validate_plan_patch(state, patch)
         update = apply_plan_patch(state, patch)

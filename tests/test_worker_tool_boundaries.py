@@ -42,6 +42,45 @@ def test_worker_knowledge_base_schema_is_query_only():
     assert set(schema.model_fields) == {"query", "top_k", "doc_type_filter"}
 
 
+def test_chart_subtask_preserves_parent_llm_observability_scope():
+    captured = {}
+
+    class ChartGenerator:
+        def process_planner_input(self, planner_input):
+            captured.update(planner_input)
+            return {"current_result": {"figures": [], "tables": []}}
+
+    tool = worker_graph_module.ChartTool.__new__(worker_graph_module.ChartTool)
+    tool.config = SimpleNamespace(CHART_CACHE_ENABLED=False)
+    tool.chart_generator = ChartGenerator()
+
+    tool._generate_charts_for_dataset(
+        {
+            "task_id": "T4",
+            "_job_id": "job-4",
+            "_plan_revision": 3,
+            "_task_revision": 2,
+        },
+        "/tmp/nonexistent-observability.csv",
+        ["line"],
+        "趋势图",
+        None,
+        None,
+        "blue",
+        False,
+        False,
+        0,
+        1,
+    )
+
+    chart_task = captured["tasks"][0]
+    assert chart_task["task_id"].startswith("T4_")
+    assert chart_task["_observability_task_id"] == "T4"
+    assert chart_task["_job_id"] == "job-4"
+    assert chart_task["_plan_revision"] == 3
+    assert chart_task["_task_revision"] == 2
+
+
 def test_tool_manager_initializes_only_tools_required_by_task():
     initialized = []
 

@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional, Union
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.config import get_app_config
+from src.llm import invoke_llm
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -535,7 +536,13 @@ class LLMClient:
             max_tokens=2000
         )
 
-    def generate_chart_description(self, chart_type: str, image_data: str, metadata: Dict) -> str:
+    def generate_chart_description(
+        self,
+        chart_type: str,
+        image_data: str,
+        metadata: Dict,
+        **scope: Any,
+    ) -> str:
         """生成专业的图表说明（基于图像和元数据）"""
 
         # 构建数据信息字符串
@@ -561,13 +568,22 @@ class LLMClient:
         """
 
         try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
+            response = invoke_llm(
+                self.llm,
+                [HumanMessage(content=prompt)],
+                node="ChartGenerator",
+                purpose="chart_description",
+                json_mode=False,
+                **scope,
+            )
             return response.content
         except Exception as e:
             print(f"大模型调用失败: {str(e)}")
             return f"图表类型：{chart_type}，数据来源：{metadata.get('filename', '未知文件')}"
 
-    def generate_chart_description_fallback(self, chart_type: str, data_info: Dict) -> str:
+    def generate_chart_description_fallback(
+        self, chart_type: str, data_info: Dict, **scope: Any
+    ) -> str:
         """基于数据信息的降级描述生成（向后兼容）"""
         prompt = f"""
         
@@ -586,7 +602,14 @@ class LLMClient:
         """
 
         try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
+            response = invoke_llm(
+                self.llm,
+                [HumanMessage(content=prompt)],
+                node="ChartGenerator",
+                purpose="chart_description_fallback",
+                json_mode=False,
+                **scope,
+            )
             return response.content
         except Exception as e:
             print(f"大模型调用失败: {str(e)}")
@@ -617,8 +640,13 @@ class LLMClient:
 
         return "\n".join(lines)
 
-    def generate_table_description(self, table_type: str, table_data: List[List[str]],
-                                 table_description: str = "") -> str:
+    def generate_table_description(
+        self,
+        table_type: str,
+        table_data: List[List[str]],
+        table_description: str = "",
+        **scope: Any,
+    ) -> str:
         """生成专业的表格说明"""
 
         # 计算表格统计信息
@@ -647,7 +675,14 @@ class LLMClient:
         """
 
         try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
+            response = invoke_llm(
+                self.llm,
+                [HumanMessage(content=prompt)],
+                node="ChartGenerator",
+                purpose="table_description",
+                json_mode=False,
+                **scope,
+            )
             return response.content
         except Exception as e:
             print(f"大模型调用失败: {str(e)}")
@@ -677,6 +712,15 @@ class ChartGenerator:
 
         self.charts_dir = charts_dir or DEFAULT_CHARTS_DIR
         os.makedirs(self.charts_dir, exist_ok=True)
+
+    @staticmethod
+    def _llm_scope(task: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "task_id": task.get("_observability_task_id") or task.get("task_id"),
+            "job_id": task.get("_job_id"),
+            "plan_revision": task.get("_plan_revision"),
+            "task_revision": task.get("_task_revision"),
+        }
 
     def process_planner_input(self, planner_input: Dict) -> Dict:
         """处理来自Planner的完整输入"""
@@ -832,12 +876,17 @@ class ChartGenerator:
                 if self.llm_client and self.use_image_analysis and image_base64 and metadata:
                     # 使用新的图像分析方法
                     description = self.llm_client.generate_chart_description(
-                        chart_type, image_base64, metadata
+                        chart_type,
+                        image_base64,
+                        metadata,
+                        **self._llm_scope(task),
                     )
                 elif self.llm_client:
                     # 降级到旧的数据摘要方法
                     description = self.llm_client.generate_chart_description_fallback(
-                        chart_type, chart_info
+                        chart_type,
+                        chart_info,
+                        **self._llm_scope(task),
                     )
                 else:
                     description = f"{chart_type}图表，展示化工工艺参数的变化趋势和分析结果"
@@ -1054,7 +1103,8 @@ class ChartGenerator:
                     description = self.llm_client.generate_table_description(
                         table["type"],
                         table["data"],
-                        table.get("description", "")
+                        table.get("description", ""),
+                        **self._llm_scope(task),
                     )
                 else:
                     description = f"{table['type']}表格，包含{len(table['data'])-1}行数据"
@@ -1128,12 +1178,17 @@ class ChartGenerator:
                 if self.llm_client and self.use_image_analysis and image_base64 and metadata:
                     # 使用新的图像分析方法
                     description = self.llm_client.generate_chart_description(
-                        chart_type, image_base64, metadata
+                        chart_type,
+                        image_base64,
+                        metadata,
+                        **self._llm_scope(task),
                     )
                 elif self.llm_client:
                     # 降级到旧的数据摘要方法
                     description = self.llm_client.generate_chart_description_fallback(
-                        chart_type, chart_info
+                        chart_type,
+                        chart_info,
+                        **self._llm_scope(task),
                     )
                 else:
                     description = f"{chart_type}图表，展示化工工艺参数的变化趋势和分析结果"
@@ -1179,7 +1234,8 @@ class ChartGenerator:
                     description = self.llm_client.generate_table_description(
                         table["type"],
                         table["data"],
-                        table.get("description", "")
+                        table.get("description", ""),
+                        **self._llm_scope(task),
                     )
                 else:
                     description = f"{table['type']}表格，包含{len(table['data'])-1}行数据"

@@ -181,6 +181,12 @@ def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
         "AutoVerifier contract retry: task=T1 attempt=2/3" in message
         for message in caplog.messages
     )
+    retry_records = [
+        record
+        for record in caplog.records
+        if "AutoVerifier contract retry:" in record.getMessage()
+    ]
+    assert retry_records and all(record.levelname == "WARNING" for record in retry_records)
     assert any(
         "AutoVerifier assessment: task=T1 status=PASS contract_attempts=2"
         in message

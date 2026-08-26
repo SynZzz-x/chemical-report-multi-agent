@@ -7,7 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.evidence.models import EvidenceBundle
-from src.llm import get_llm
+from src.llm import get_llm, invoke_llm
 
 from .models import ConceptGraphSpec
 
@@ -42,6 +42,10 @@ class ConceptGraphExtractor:
         evidence: EvidenceBundle,
         required_concepts: list[str] | tuple[str, ...],
         graph_type: str = "causal",
+        task_id: str | None = None,
+        job_id: str | None = None,
+        plan_revision: int | None = None,
+        task_revision: int | None = None,
     ) -> ConceptGraphSpec:
         if graph_type != "causal":
             raise ValueError(f"graph type {graph_type!r} is reserved but not implemented")
@@ -51,10 +55,18 @@ class ConceptGraphExtractor:
             "required_concepts": list(required_concepts),
             "evidence": [record.model_dump(mode="json") for record in evidence.records],
         }
-        response = self.llm.invoke(
+        response = invoke_llm(
+            self.llm,
             [
                 SystemMessage(content=self.system_prompt),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
-            ]
+            ],
+            node="ConceptGraph",
+            purpose="concept_graph_extraction",
+            task_id=task_id,
+            job_id=job_id,
+            plan_revision=plan_revision,
+            task_revision=task_revision,
+            json_mode=True,
         )
         return ConceptGraphSpec.model_validate(_parse_json_object(response))

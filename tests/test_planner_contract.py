@@ -303,7 +303,7 @@ def test_initial_planner_repairs_one_invalid_response(monkeypatch):
     assert "validation" in repair_text.lower() or "校验" in repair_text
 
 
-def test_planner_validation_log_includes_error_detail_and_long_response_snippet(
+def test_planner_validation_log_excludes_response_and_error_detail(
     monkeypatch,
     caplog,
 ):
@@ -316,8 +316,9 @@ def test_planner_validation_log_includes_error_detail_and_long_response_snippet(
 
     log_text = caplog.text
     assert "JSONDecodeError" in log_text
-    assert "Expecting value" in log_text
-    assert "TAIL_MARKER" in log_text
+    assert "reason=plan_contract_invalid" in log_text
+    assert "Expecting value" not in log_text
+    assert "TAIL_MARKER" not in log_text
 
 
 def test_initial_planner_two_invalid_responses_fail_without_placeholder_tasks(monkeypatch):

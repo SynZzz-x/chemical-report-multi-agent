@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
-from ..llm import get_llm
+from ..llm import get_llm, invoke_llm
 from ..state import State, merge_docs
 
 # ============================================================
@@ -212,7 +212,14 @@ def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, A
         ]
     )
     messages = prompt.format_messages(user_input=raw_request)
-    response = model.invoke(messages, config=config)
+    response = invoke_llm(
+        model,
+        messages,
+        config=config,
+        node="Intake",
+        purpose="request_parse",
+        json_mode=True,
+    )
     initial_output = _extract_first_json(str(response.content))
 
     try:
@@ -230,7 +237,14 @@ def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, A
         ]
     )
     refine_messages = refine_prompt.format_messages(init_output=initial_output)
-    refined_response = model.invoke(refine_messages, config=config)
+    refined_response = invoke_llm(
+        model,
+        refine_messages,
+        config=config,
+        node="Intake",
+        purpose="request_refine",
+        json_mode=True,
+    )
 
     refined_text = str(refined_response.content)
     tagged_json = re.search(r"<json>((.|\n)*?)</json>", refined_text)

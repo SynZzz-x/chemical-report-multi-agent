@@ -3,7 +3,7 @@ from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, SystemM
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
 from ....config import get_app_config, get_rag_settings
-from ....llm import get_llm
+from ....llm import get_llm, invoke_llm
 from ....task_contract import task_allows_web
 from ....tool_names import canonical_tool_name
 from ....report_validation import (
@@ -30,6 +30,10 @@ import hashlib
 import shutil
 import re
 import ast
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 # 添加工具目录到路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'tools'))
@@ -1042,6 +1046,12 @@ class ChartTool(BaseWorkerTool):
                 "messages": [],
                 "tasks": [{
                     "task_id": task_id,
+                    "_observability_task_id": (
+                        task.get("_observability_task_id") or task.get("task_id")
+                    ),
+                    "_job_id": task.get("_job_id"),
+                    "_plan_revision": task.get("_plan_revision"),
+                    "_task_revision": task.get("_task_revision"),
                     "task_name": individual_chart_title,
                     "task_description": f"为数据集 {dataset_name} 生成 {chart_type} 图表",
                     "generate_figure": True,
@@ -1393,6 +1403,15 @@ class AutonomousToolNode:
         self.llm_client = get_llm(llm_config, json_mode=False)
 
     @staticmethod
+    def _llm_scope(task: Task) -> Dict[str, Any]:
+        return {
+            "task_id": task.get("task_id"),
+            "job_id": task.get("_job_id"),
+            "plan_revision": task.get("_plan_revision"),
+            "task_revision": task.get("_task_revision"),
+        }
+
+    @staticmethod
     def _prepare_execution_task(
         task: Task,
         worker_state: Dict[str, Any],
@@ -1615,6 +1634,7 @@ class AutonomousToolNode:
             )
             or 1
         )
+        current_task["_job_id"] = state.get("job_id")
         current_task["_inherited_rag_calls"] = self._inherited_rag_calls(
             state, current_task
         )
@@ -1929,7 +1949,14 @@ class AutonomousToolNode:
             f"完整证据：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
         try:
-            response = self.llm_client.invoke([HumanMessage(content=prompt)])
+            response = invoke_llm(
+                self.llm_client,
+                [HumanMessage(content=prompt)],
+                node="Worker",
+                purpose="citation_binding",
+                json_mode=False,
+                **self._llm_scope(task),
+            )
             revised = str(getattr(response, "content", "") or "").strip()
             cited_ids = {
                 value.upper()
@@ -2339,7 +2366,15 @@ class AutonomousToolNode:
             print(f"\n  🔄 迭代 {iteration + 1}/{max_iterations}")
 
             try:
-                response = llm_with_tools.invoke(messages)
+                response = invoke_llm(
+                    llm_with_tools,
+                    messages,
+                    node="Worker",
+                    purpose="task_generation",
+                    iteration=iteration + 1,
+                    json_mode=False,
+                    **self._llm_scope(task),
+                )
                 messages.append(response)
 
                 if not hasattr(response, 'tool_calls') or not response.tool_calls:
@@ -2354,7 +2389,22 @@ class AutonomousToolNode:
                         messages.append(HumanMessage(
                             content="请生成一个详细的分析报告正文，包含数据分析结果、关键发现、结论和建议。"
                         ))
-                        final_response = self.llm_client.invoke(messages)
+                        logger.warning(
+                            "Worker generation detail retry: task=%s iteration=%s "
+                            "reason=content_too_short",
+                            task.get("task_id") or "-",
+                            iteration + 1,
+                        )
+                        final_response = invoke_llm(
+                            self.llm_client,
+                            messages,
+                            node="Worker",
+                            purpose="task_generation",
+                            attempt=2,
+                            iteration=iteration + 1,
+                            json_mode=False,
+                            **self._llm_scope(task),
+                        )
                         return final_response.content, tool_calls, tool_usage_stats
 
                 for tool_call in response.tool_calls:
@@ -2486,7 +2536,21 @@ class AutonomousToolNode:
         messages.append(HumanMessage(
             content="请基于所有工具调用的结果，生成一个详细的分析报告正文。"
         ))
-        final_response = self.llm_client.invoke(messages)
+        logger.warning(
+            "Worker generation finalization: task=%s iteration=%s "
+            "reason=max_tool_iterations",
+            task.get("task_id") or "-",
+            max_iterations + 1,
+        )
+        final_response = invoke_llm(
+            self.llm_client,
+            messages,
+            node="Worker",
+            purpose="task_generation",
+            iteration=max_iterations + 1,
+            json_mode=False,
+            **self._llm_scope(task),
+        )
         return final_response.content, tool_calls, tool_usage_stats
 
     def _create_task_result(self, task: Task, cursor: int, content: str,

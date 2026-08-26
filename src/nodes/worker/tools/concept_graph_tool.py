@@ -23,4 +23,7 @@ class ConceptGraphTool:
             required_concepts=list(visualization.get("required_concepts") or []),
             evidence=evidence,
             output_dir=output_dir,
+            job_id=task.get("_job_id"),
+            plan_revision=task.get("_plan_revision"),
+            task_revision=task.get("_task_revision"),
         )
