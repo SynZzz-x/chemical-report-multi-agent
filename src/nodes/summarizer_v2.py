@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from PIL import Image as PILImage
 
 from ..evidence.identity import normalize_sections_evidence
+from ..evidence.projection import canonical_source_identity, project_used_citations
 from ..evidence.reporting import (
     append_missing_figures,
     format_evidence_table,
@@ -48,6 +49,7 @@ _ACCEPTED_MISSING_ASSET_CODES = {
     "figure": frozenset(
         {
             "MISSING_FIGURE",
+            "MISSING_REQUIRED_FIGURE",
             "MISSING_IMAGE",
             "MISSING_FIGURE_ASSET",
         }
@@ -72,6 +74,26 @@ def _user_accepted_missing_asset(
         for issue in status_entry.get("issues") or []
         if isinstance(issue, Mapping)
     )
+
+
+_DANGLING_FIGURE_SENTENCE = re.compile(
+    r"[^。！？!?\n]*(?:(?:见|参见)\s*图\s*\d+|如\s*图\s*\d+\s*所示)"
+    r"[^。！？!?\n]*[。！？!?]?"
+)
+_ORPHAN_FIGURE_CAPTION = re.compile(
+    r"^\s*(?:图\s*\d+|Figure\s*\d+)\s*[：:、.．-]?\s*.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _degrade_accepted_missing_figure(text: str) -> str:
+    """Remove references to an accepted-but-absent figure in this section only."""
+
+    cleaned = _DANGLING_FIGURE_SENTENCE.sub("", str(text or ""))
+    cleaned = _ORPHAN_FIGURE_CAPTION.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    note = "> 图形缺口：用户已接受本节缺少正式图形资产，相关图号引用已移除。"
+    return f"{cleaned}\n\n{note}" if cleaned else note
 
 
 def find_title(state: State) -> str:
@@ -402,11 +424,14 @@ def _ordered_sections(
                 }
             )
             continue
+        section_text = str(result.get("text_output") or result.get("content") or "")
+        if accepted_missing_figure:
+            section_text = _degrade_accepted_missing_figure(section_text)
         sections.append(
             {
                 "task_id": task_id,
                 "title": str(task.get("task_name") or task_id),
-                "text": str(result.get("text_output") or result.get("content") or ""),
+                "text": section_text,
                 "tables": [
                     dict(table) for table in valid_tables
                 ],
@@ -511,7 +536,11 @@ def _deduplicate_citations(sections: Sequence[Mapping[str, Any]]) -> list[dict[s
     citations: list[dict[str, Any]] = []
     seen: set[str] = set()
     for section in sections:
-        for citation in section.get("citations") or []:
+        used_citations = project_used_citations(
+            str(section.get("text") or section.get("content") or ""),
+            section.get("citations") or [],
+        )
+        for citation in used_citations:
             if not isinstance(citation, Mapping):
                 continue
             evidence_id = str(citation.get("evidence_id") or "").strip()
@@ -676,6 +705,13 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         return _blocked_update(missing)
 
     sections, evidence_display_map = normalize_sections_evidence(sections)
+    report_sources: list[str] = []
+    seen_sources: set[str] = set()
+    for citation in _deduplicate_citations(sections):
+        source = canonical_source_identity(citation)
+        if source and source.casefold() not in seen_sources:
+            seen_sources.add(source.casefold())
+            report_sources.append(source)
     final_markdown = _assemble_markdown(state, sections, report_status)
     report_dir = os.path.join(get_session_cache_dir(state, config), "report")
     os.makedirs(report_dir, exist_ok=True)
@@ -739,6 +775,7 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         "delivery_status": delivery_status,
         "artifact_errors": artifact_errors,
         "evidence_display_map": evidence_display_map,
+        "report_sources": report_sources,
         "blocking_sections": [],
         "attachments": attachments,
         "path": preferred_path,

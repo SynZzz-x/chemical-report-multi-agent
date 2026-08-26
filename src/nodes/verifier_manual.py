@@ -6,7 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.types import interrupt
 
 from src.state import State
-from src.llm import get_llm, invoke_llm
+from src.llm import get_llm, invoke_llm, with_completion_budget
 from src.nodes.intake import web_authorization_directive
 from src.recovery.policy import commit_current_result
 from src.report_acceptance import (
@@ -105,6 +105,7 @@ def _analyze_feedback(
     """使用 LLM 分析用户反馈，决定后续动作"""
     try:
         model = get_llm(config, json_mode=True)
+        model, budget = with_completion_budget(model, "feedback_analysis")
         template = _read_prompt("../prompts/verifier_manual.md")
         if not template:
             # Fallback if file read fails (though it shouldn't)
@@ -125,6 +126,7 @@ def _analyze_feedback(
             },
             node="ManualVerifier",
             purpose="feedback_analysis",
+            max_completion_tokens=budget,
             task_id=task_id,
             job_id=job_id,
             json_mode=True,

@@ -9,6 +9,10 @@ from typing import Any, Mapping, Optional
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
+from ..concept_graph.attempts import concept_graph_attempt_key
+from ..concept_graph.models import ConceptGraphSpec
+from ..concept_graph.renderer import GraphvizRenderer
+from ..config import get_app_config
 from ..evidence.coverage import assess_coverage
 from ..evidence.models import EvidenceBundle, EvidenceRecord
 from ..evidence.normalizer import normalize_rag_tool_calls
@@ -111,6 +115,68 @@ def _recover_causal_figure(
             "asset_recovery_error": error,
         }
 
+    task_id = str(task.get("task_id") or "task")
+    task_revision = int((state.get("task_revisions") or {}).get(task_id, 1) or 1)
+    attempt_key = concept_graph_attempt_key(task_id, task_revision)
+    attempts = dict(state.get("concept_graph_attempts") or {})
+    if int(attempts.get(attempt_key, 0) or 0) >= 1:
+        graph_spec = current_result.get("graph_spec") or {}
+        if isinstance(graph_spec, Mapping) and graph_spec:
+            try:
+                settings = get_app_config().concept_graph_settings
+                spec = ConceptGraphSpec.model_validate(dict(graph_spec))
+                artifacts = GraphvizRenderer(
+                    font_family=settings.font_family
+                ).render(
+                    spec,
+                    get_job_subdir(state, "charts", config),
+                    task_id=task_id,
+                )
+                if artifacts.png_path:
+                    evidence_ids = list(
+                        dict.fromkeys(
+                            value for edge in spec.edges for value in edge.evidence_ids
+                        )
+                    )
+                    candidate = deepcopy(current_result)
+                    candidate["figures"] = [
+                        {
+                            "figure_id": artifacts.figure_id,
+                            "path": artifacts.png_path,
+                            "svg_path": artifacts.svg_path,
+                            "spec_path": artifacts.spec_path,
+                            "description": str(
+                                visualization.get("title")
+                                or task.get("task_name")
+                                or "概念关系图"
+                            ),
+                            "graph_type": spec.graph_type,
+                            "evidence_ids": evidence_ids,
+                        }
+                    ]
+                    candidate["figures_generated"] = 1
+                    return {
+                        "workflow_action": WorkflowAction.RETRY_VERIFIER.value,
+                        "current_result": candidate,
+                        "asset_recovery_error": "",
+                    }
+            except Exception as exc:
+                logger.warning(
+                    "Deterministic concept graph render failed: task=%s error=%s",
+                    task_id,
+                    exc,
+                )
+        return {
+            "workflow_action": WorkflowAction.RETRY_VERIFIER.value,
+            "current_result": current_result,
+            "asset_recovery_error": (
+                "concept graph semantic attempt limit reached; "
+                "no deterministic figure available"
+            ),
+        }
+
+    attempts[attempt_key] = 1
+
     try:
         result = ConceptGraphTool().execute(
             task,
@@ -126,6 +192,7 @@ def _recover_causal_figure(
             "workflow_action": WorkflowAction.RETRY_VERIFIER.value,
             "current_result": current_result,
             "asset_recovery_error": error,
+            "concept_graph_attempts": attempts,
         }
 
     candidate = deepcopy(current_result)
@@ -137,6 +204,7 @@ def _recover_causal_figure(
         "workflow_action": WorkflowAction.RETRY_VERIFIER.value,
         "current_result": candidate,
         "asset_recovery_error": "",
+        "concept_graph_attempts": attempts,
     }
 
 
@@ -181,7 +249,7 @@ def asset_recovery(
         current_result["tables"] = tables
         logger.info("Asset recovery succeeded: task=%s asset=table", task.get("task_id"))
 
-    if "MISSING_FIGURE" in codes:
+    if codes & {"MISSING_FIGURE", "MISSING_REQUIRED_FIGURE"}:
         update = _recover_causal_figure(state, config, task, current_result)
         if update.get("asset_recovery_error") or update.get("workflow_action") == (
             WorkflowAction.REWORK.value

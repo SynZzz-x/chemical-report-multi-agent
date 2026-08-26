@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langgraph.graph import StateGraph, END
 from ....config import get_app_config, get_rag_settings
 from ....evidence.citations import normalize_inline_citations
-from ....llm import get_llm, invoke_llm
+from ....llm import get_llm, invoke_llm, with_completion_budget
 from ....task_contract import task_allows_web
 from ....tool_names import canonical_tool_name
 from ....report_validation import (
@@ -187,6 +187,7 @@ class TaskResult(TypedDict):
     tables: List[Dict[str, Any]]
     figures: List[Dict[str, Any]]
     sources_used: List[str]
+    report_sources: List[str]
     figures_generated: int
     word_count: int
     generated_at: str
@@ -216,6 +217,7 @@ class State(TypedDict):
     available_tools: List[Dict[str, Any]]
     knowledge_base_initialized: bool = False
     spider_initialized: bool = False
+    concept_graph_attempts: Dict[str, int]
 
 
 # ==================== 3. 工具基类和接口 ====================
@@ -1440,6 +1442,7 @@ class AutonomousToolNode:
             execution_task["_length_rewrite_source_result"] = (
                 deepcopy(source_result) if isinstance(source_result, dict) else {}
             )
+            execution_task["_llm_purpose"] = "length_rewrite"
 
         recovery_plan = feedback.get("recovery_plan")
         if isinstance(recovery_plan, dict):
@@ -1477,6 +1480,7 @@ class AutonomousToolNode:
             length_target = parse_length_target(
                 str(execution_task.get("task_description") or "")
             )
+            current_length = count_report_length(source_text)
             safety_target = ""
             if length_target and length_target.get("max") is not None:
                 hard_max = int(length_target["max"])
@@ -1486,8 +1490,12 @@ class AutonomousToolNode:
                 if length_target.get("min") is not None:
                     target_max = max(target_max, int(length_target["min"]))
                 safety_target = (
-                    f"\n目标有效字数不超过 {target_max} 字"
-                    f"（硬上限 {hard_max} 字，已保留安全余量）。"
+                    f"\n当前正文确定性计数：{current_length} 字。"
+                    f"硬性范围：最低 {length_target.get('min') or 0} 字，"
+                    f"最高 {hard_max} 字。"
+                    f"目标有效字数不超过 {target_max} 字，"
+                    f"硬上限 {hard_max} 字。"
+                    f"本次缓冲目标：不超过 {target_max} 字。"
                 )
             instructions = (
                 f"{instructions}\n"
@@ -1636,6 +1644,9 @@ class AutonomousToolNode:
             or 1
         )
         current_task["_job_id"] = state.get("job_id")
+        current_task["_concept_graph_attempts"] = deepcopy(
+            state.get("concept_graph_attempts") or {}
+        )
         current_task["_inherited_rag_calls"] = self._inherited_rag_calls(
             state, current_task
         )
@@ -1742,6 +1753,12 @@ class AutonomousToolNode:
                 task_result["spider_results_used"] = bool(
                     source_result.get("spider_results_used")
                 )
+                from ....evidence.projection import project_report_sources
+
+                task_result["report_sources"] = project_report_sources(
+                    str(task_result.get("text_output") or ""),
+                    task_result.get("citations") or [],
+                )
 
             all_results = state.get("all_results", []).copy()
             all_results.append(task_result)
@@ -1776,7 +1793,10 @@ class AutonomousToolNode:
                 "all_results": all_results,
                 "worker_state": worker_state,
                 "tool_execution_history": tool_execution_history,
-                "available_tools": [{"name": tool.name, "description": tool.description} for tool in tools]
+                "available_tools": [{"name": tool.name, "description": tool.description} for tool in tools],
+                "concept_graph_attempts": deepcopy(
+                    current_task.get("_concept_graph_attempts") or {}
+                ),
             }
 
         except Exception as e:
@@ -1801,7 +1821,10 @@ class AutonomousToolNode:
                 "current_result": task_result,
                 "cursor": cursor,
                 "all_results": all_results,
-                "worker_state": worker_state
+                "worker_state": worker_state,
+                "concept_graph_attempts": deepcopy(
+                    current_task.get("_concept_graph_attempts") or {}
+                ),
             }
 
     @staticmethod
@@ -1844,6 +1867,7 @@ class AutonomousToolNode:
         return visualization
 
     def _prepare_concept_graph(self, task: Task, tool_calls: List[Dict[str, Any]]):
+        from ....concept_graph.attempts import concept_graph_attempt_key
         from ....evidence.coverage import assess_coverage
         from ....evidence.models import EvidenceBundle
         from ....evidence.normalizer import normalize_rag_tool_calls
@@ -1898,6 +1922,27 @@ class AutonomousToolNode:
                 "success": False,
                 "error": "evidence coverage is insufficient",
             }
+
+        attempts = task.get("_concept_graph_attempts")
+        if not isinstance(attempts, dict):
+            attempts = {}
+            task["_concept_graph_attempts"] = attempts
+        attempt_key = concept_graph_attempt_key(
+            str(task.get("task_id") or "task"),
+            int(task.get("_task_revision", 1) or 1),
+        )
+        if int(attempts.get(attempt_key, 0) or 0) >= 1:
+            logger.warning(
+                "ConceptGraph semantic attempt skipped: task=%s task_revision=%s",
+                task.get("task_id") or "-",
+                task.get("_task_revision", 1),
+            )
+            return evidence, coverage, {
+                "success": False,
+                "error": "concept graph semantic attempt limit reached",
+                "semantic_attempt_skipped": True,
+            }
+        attempts[attempt_key] = 1
 
         try:
             from ..tools.concept_graph_tool import ConceptGraphTool
@@ -1984,11 +2029,17 @@ class AutonomousToolNode:
             f"完整证据：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
         try:
-            response = invoke_llm(
+            binding_llm, binding_budget = with_completion_budget(
                 self.llm_client,
+                "citation_binding",
+                task_description=str(task.get("task_description") or ""),
+            )
+            response = invoke_llm(
+                binding_llm,
                 [HumanMessage(content=prompt)],
                 node="Worker",
                 purpose="citation_binding",
+                max_completion_tokens=binding_budget,
                 json_mode=False,
                 **self._llm_scope(task),
             )
@@ -2392,6 +2443,12 @@ class AutonomousToolNode:
                     if call.get("budgeted_for_attempt") is not False:
                         seen_rag_queries.add(normalized_query)
         rag_query_limit = get_app_config().concept_graph_settings.rag_max_queries
+        generation_purpose = str(task.get("_llm_purpose") or "task_generation")
+        generation_llm, generation_budget = with_completion_budget(
+            llm_with_tools,
+            generation_purpose,
+            task_description=str(task.get("task_description") or ""),
+        )
 
         print(f"🔄 开始工具调用循环，最多{max_iterations}次迭代")
 
@@ -2400,15 +2457,26 @@ class AutonomousToolNode:
 
             try:
                 response = invoke_llm(
-                    llm_with_tools,
+                    generation_llm,
                     messages,
                     node="Worker",
-                    purpose="task_generation",
+                    purpose=generation_purpose,
+                    max_completion_tokens=generation_budget,
                     iteration=iteration + 1,
                     json_mode=False,
                     **self._llm_scope(task),
                 )
                 messages.append(response)
+
+                if generation_purpose == "length_rewrite":
+                    # This scope has one semantic attempt total. A short or empty
+                    # response is handled by deterministic recovery, never by the
+                    # generic Worker detail-retry path.
+                    return (
+                        str(getattr(response, "content", "") or "").strip(),
+                        tool_calls,
+                        tool_usage_stats,
+                    )
 
                 if not hasattr(response, 'tool_calls') or not response.tool_calls:
                     print(f"    ✅ 没有更多工具调用，任务完成")
@@ -2429,10 +2497,15 @@ class AutonomousToolNode:
                             iteration + 1,
                         )
                         final_response = invoke_llm(
-                            self.llm_client,
+                            with_completion_budget(
+                                self.llm_client,
+                                generation_purpose,
+                                task_description=str(task.get("task_description") or ""),
+                            )[0],
                             messages,
                             node="Worker",
-                            purpose="task_generation",
+                            purpose=generation_purpose,
+                            max_completion_tokens=generation_budget,
                             attempt=2,
                             iteration=iteration + 1,
                             json_mode=False,
@@ -2571,6 +2644,13 @@ class AutonomousToolNode:
                 print(f"    ⚠️ 迭代 {iteration + 1} 发生异常: {e}")
                 import traceback
                 traceback.print_exc()
+                if generation_purpose == "length_rewrite":
+                    source_result = task.get("_length_rewrite_source_result") or {}
+                    return (
+                        str(source_result.get("text_output") or ""),
+                        tool_calls,
+                        tool_usage_stats,
+                    )
 
         print("⚠️ 达到最大迭代次数，生成最终回答")
         messages.append(HumanMessage(
@@ -2583,10 +2663,15 @@ class AutonomousToolNode:
             max_iterations + 1,
         )
         final_response = invoke_llm(
-            self.llm_client,
+            with_completion_budget(
+                self.llm_client,
+                generation_purpose,
+                task_description=str(task.get("task_description") or ""),
+            )[0],
             messages,
             node="Worker",
-            purpose="task_generation",
+            purpose=generation_purpose,
+            max_completion_tokens=generation_budget,
             iteration=max_iterations + 1,
             json_mode=False,
             **self._llm_scope(task),
@@ -2670,6 +2755,7 @@ class AutonomousToolNode:
 
             evidence_bundle = normalize_rag_tool_calls(tool_calls)
         from ....evidence.normalizer import citation_dicts
+        from ....evidence.projection import project_report_sources
 
         citations = citation_dicts(evidence_bundle)
         cited_sources = [
@@ -2695,6 +2781,7 @@ class AutonomousToolNode:
             "tables": tables,
             "figures": figures,
             "sources_used": sources_used,
+            "report_sources": project_report_sources(content, citations),
             "figures_generated": figures_generated,
             "word_count": count_report_length(content),
             "plan_revision": int(task.get("_plan_revision", 1) or 1),

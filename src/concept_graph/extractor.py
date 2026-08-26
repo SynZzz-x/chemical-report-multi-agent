@@ -7,7 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.evidence.models import EvidenceBundle
-from src.llm import get_llm, invoke_llm
+from src.llm import get_llm, invoke_llm, with_completion_budget
 
 from .models import ConceptGraphSpec
 
@@ -31,7 +31,9 @@ def _parse_json_object(value: Any) -> dict[str, Any]:
 
 class ConceptGraphExtractor:
     def __init__(self, llm=None):
-        self.llm = llm or get_llm({"configurable": {"temperature": 0.0}}, json_mode=True)
+        self.llm = llm or get_llm(
+            {"configurable": {"temperature": 0.0}}, json_mode=True
+        )
         prompt_path = Path(__file__).resolve().parent.parent / "prompts" / "concept_graph_extractor.md"
         self.system_prompt = prompt_path.read_text(encoding="utf-8")
 
@@ -55,14 +57,18 @@ class ConceptGraphExtractor:
             "required_concepts": list(required_concepts),
             "evidence": [record.model_dump(mode="json") for record in evidence.records],
         }
+        model, budget = with_completion_budget(
+            self.llm, "concept_graph_extraction"
+        )
         response = invoke_llm(
-            self.llm,
+            model,
             [
                 SystemMessage(content=self.system_prompt),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
             ],
             node="ConceptGraph",
             purpose="concept_graph_extraction",
+            max_completion_tokens=budget,
             task_id=task_id,
             job_id=job_id,
             plan_revision=plan_revision,

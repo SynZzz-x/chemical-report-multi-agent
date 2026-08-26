@@ -67,6 +67,54 @@ def parse_length_target(description: str) -> dict[str, int | None] | None:
     return None
 
 
+def safe_deterministic_trim(
+    text: str, *, maximum: int, minimum: int | None = None
+) -> str | None:
+    """Converge only by removing exact duplicate, citation-free prose blocks.
+
+    The function deliberately refuses arbitrary truncation. Headings, lists,
+    tables, fenced blocks, citation-bearing claims, and unique prose are never
+    split or removed.
+    """
+
+    original = str(text or "").strip()
+    if count_report_length(original) <= int(maximum):
+        return original
+    blocks = re.split(r"\n\s*\n", original)
+    seen_plain: set[str] = set()
+    retained: list[str] = []
+    fence_open = False
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        fence_count = stripped.count("```")
+        structural = (
+            fence_open
+            or stripped.startswith(("#", "- ", "* ", "+ ", ">", "|"))
+            or bool(re.match(r"^\d+[.)]\s", stripped))
+            or "|" in stripped
+            or bool(_EVIDENCE_MARKER_RE.search(stripped))
+        )
+        signature = re.sub(r"\s+", " ", stripped).casefold()
+        if not structural and signature in seen_plain:
+            if fence_count % 2:
+                fence_open = not fence_open
+            continue
+        retained.append(stripped)
+        if not structural:
+            seen_plain.add(signature)
+        if fence_count % 2:
+            fence_open = not fence_open
+    candidate = "\n\n".join(retained).strip()
+    actual = count_report_length(candidate)
+    if actual > int(maximum):
+        return None
+    if minimum is not None and actual < int(minimum):
+        return None
+    return candidate
+
+
 def _split_table_row(line: str) -> list[str]:
     stripped = line.strip()
     if stripped.startswith("|"):

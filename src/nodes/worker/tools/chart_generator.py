@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional, Union
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.config import get_app_config
-from src.llm import invoke_llm
+from src.llm import completion_budget, invoke_llm, with_completion_budget
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -533,7 +533,7 @@ class LLMClient:
             base_url=base_url,
             model=model,
             temperature=0.3,
-            max_tokens=2000
+            max_tokens=completion_budget("chart_description")
         )
 
     def generate_chart_description(
@@ -568,11 +568,13 @@ class LLMClient:
         """
 
         try:
+            llm, budget = with_completion_budget(self.llm, "chart_description")
             response = invoke_llm(
-                self.llm,
+                llm,
                 [HumanMessage(content=prompt)],
                 node="ChartGenerator",
                 purpose="chart_description",
+                max_completion_tokens=budget,
                 json_mode=False,
                 **scope,
             )
@@ -602,11 +604,15 @@ class LLMClient:
         """
 
         try:
+            llm, budget = with_completion_budget(
+                self.llm, "chart_description_fallback"
+            )
             response = invoke_llm(
-                self.llm,
+                llm,
                 [HumanMessage(content=prompt)],
                 node="ChartGenerator",
                 purpose="chart_description_fallback",
+                max_completion_tokens=budget,
                 json_mode=False,
                 **scope,
             )
@@ -675,11 +681,13 @@ class LLMClient:
         """
 
         try:
+            llm, budget = with_completion_budget(self.llm, "table_description")
             response = invoke_llm(
-                self.llm,
+                llm,
                 [HumanMessage(content=prompt)],
                 node="ChartGenerator",
                 purpose="table_description",
+                max_completion_tokens=budget,
                 json_mode=False,
                 **scope,
             )

@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from ..state import State
-from ..llm import get_llm, invoke_llm
+from ..llm import get_llm, invoke_llm, with_completion_budget
 
 
 """
@@ -210,6 +210,7 @@ def _read_docx_content(docx_path: str) -> str:
 def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str:
     try:
         model = get_llm(config)
+        model, budget = with_completion_budget(model, "report_evaluation")
         sys_prompt = _read_prompt("../prompts/summarizer_eval.md")
         prompt = ChatPromptTemplate.from_messages([
             ("system", sys_prompt),
@@ -222,6 +223,7 @@ def _generate_report_evaluation(report_text: str, config: RunnableConfig) -> str
             config=config,
             node="Summarizer",
             purpose="report_evaluation",
+            max_completion_tokens=budget,
             json_mode=True,
         )
         return str(getattr(resp, "content", "")).strip()

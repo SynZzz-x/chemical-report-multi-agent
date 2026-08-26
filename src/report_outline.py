@@ -31,6 +31,7 @@ _SYSTEM_SECTION_TITLES = {
     "知识库依据与参考文件说明",
     "知识库文件来源与说明",
     "知识库文件清单",
+    "参考知识库文件清单",
     "参考文件与证据来源",
 }
 _REFERENCE_SECTION_TITLES = _SYSTEM_SECTION_TITLES - {"目录"}
@@ -103,9 +104,10 @@ def is_knowledge_base_file_list_section(title: str) -> bool:
     """Return whether one system section requests a file-level RAG ledger."""
 
     normalized = re.sub(r"[\s:：_-]+", "", str(title or "")).casefold()
-    return normalized == re.sub(
-        r"[\s:：_-]+", "", "知识库文件清单"
-    ).casefold()
+    return normalized in {
+        re.sub(r"[\s:：_-]+", "", marker).casefold()
+        for marker in ("知识库文件清单", "参考知识库文件清单")
+    }
 
 
 def classify_outline(sections: Sequence[Any] | None) -> list[OutlineSection]:

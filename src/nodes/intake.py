@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
-from ..llm import get_llm, invoke_llm
+from ..llm import get_llm, invoke_llm, with_completion_budget
 from ..state import State, merge_docs
 
 # ============================================================
@@ -235,6 +235,7 @@ def _normalize_canonical_intake(parsed: Dict[str, Any]) -> Dict[str, Any]:
 def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, Any]:
     """Generate one canonical representation of the current user request."""
     model = get_llm(config, json_mode=True)
+    model, budget = with_completion_budget(model, "canonical_intake_generation")
     system_template = _load_intake_prompt()
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -249,6 +250,7 @@ def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, A
         config=config,
         node="Intake",
         purpose="canonical_intake_generation",
+        max_completion_tokens=budget,
         json_mode=True,
     )
     parsed = json.loads(_extract_first_json(str(response.content)))

@@ -3,6 +3,7 @@ from src.report_validation import (
     extract_markdown_tables,
     parse_length_target,
     remove_mermaid_blocks,
+    safe_deterministic_trim,
 )
 
 
@@ -59,3 +60,32 @@ print("keep")
 
     assert "graph TD" not in cleaned
     assert 'print("keep")' in cleaned
+
+
+def test_safe_deterministic_trim_preserves_markdown_and_complete_citations():
+    duplicate = "这是一段可安全去重的过渡说明，不包含新的事实。"
+    text = f"""# 标题
+
+- 保留项目
+
+| 参数 | 影响 |
+| --- | --- |
+| 灰分 | 催化剂残留 [E13] |
+
+灰分异常可能与催化剂残留及设备磨损有关[E13]。
+
+{duplicate}
+
+{duplicate}
+"""
+    target = count_report_length(text) - count_report_length(duplicate)
+
+    trimmed = safe_deterministic_trim(text, maximum=target)
+
+    assert trimmed is not None
+    assert "# 标题" in trimmed
+    assert "- 保留项目" in trimmed
+    assert "| 灰分 | 催化剂残留 [E13] |" in trimmed
+    assert "灰分异常可能与催化剂残留及设备磨损有关[E13]。" in trimmed
+    assert "[E\n" not in trimmed
+    assert trimmed.count(duplicate) == 1

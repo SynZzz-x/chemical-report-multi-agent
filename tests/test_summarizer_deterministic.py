@@ -266,14 +266,140 @@ def test_knowledge_base_file_list_is_deterministically_aggregated(monkeypatch, t
 
     assert "## 3. 知识库文件清单" in markdown
     assert "| 文件名称 | 来源类型 | 支撑章节 | 证据条数 |" in markdown
-    assert markdown.count("| 聚乙烯生产工艺与质量控制概述 | rag |") == 1
+    assert markdown.count("| 聚乙烯生产工艺与质量控制概述.docx | rag |") == 1
     assert "引言、工艺分析" in markdown
-    assert "| 3 |" in markdown
+    assert "| 2 |" in markdown
     assert "### 证据索引" in markdown
     assert "| [E1] | rag / /srv/private" not in markdown
     assert "| [E1] |" in markdown
     assert "第1章" in markdown
     assert "/srv/private" not in markdown
+
+
+def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_path):
+    statuses = {"T1": _status("VERIFIED_PASS"), "T2": _status("VERIFIED_PASS")}
+    state = _state(statuses=statuses)
+    state["tasks"] = [
+        {**state["tasks"][0], "covers_sections": ["1. 引言"]},
+        {**state["tasks"][1], "covers_sections": ["2. 工艺分析"]},
+    ]
+    state["results"] = [
+        {
+            "task_id": "T1",
+            "text_output": "正文使用第一和第三条证据。[E1, 3] 伪造编号[E999]。",
+            "plan_revision": 1,
+            "task_revision": 1,
+            "citations": [
+                {"evidence_id": "E1", "source_type": "rag", "file_path": "/a/source_a.docx", "supporting_text": "a1"},
+                {"evidence_id": "E2", "source_type": "rag", "file_path": "/a/source_a.docx", "supporting_text": "a2"},
+                {"evidence_id": "E3", "source_type": "rag", "file_path": "/b/source_b.pdf", "supporting_text": "b"},
+                {"evidence_id": "E4", "source_type": "rag", "file_path": "/c/unused.txt", "supporting_text": "unused"},
+            ],
+        },
+        {
+            "task_id": "T2",
+            "text_output": "本节没有证据引用。",
+            "plan_revision": 1,
+            "task_revision": 1,
+            "citations": [
+                {"evidence_id": "E1", "source_type": "rag", "file_path": "/d/also_unused.docx", "supporting_text": "unused"},
+            ],
+        },
+    ]
+    state["messages"] = [
+        AIMessage(
+            content=json.dumps(
+                {
+                    "from": "Intake",
+                    "to": "Planner",
+                    "title": "报告",
+                    "sections": ["1. 引言", "2. 工艺分析", "3. 知识库文件清单"],
+                },
+                ensure_ascii=False,
+            )
+        )
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert markdown.count("| source_a.docx | rag |") == 1
+    assert markdown.count("| source_b.pdf | rag |") == 1
+    assert "unused.txt" not in markdown
+    assert "also_unused.docx" not in markdown
+    assert "E999" not in markdown.partition("## 3. 知识库文件清单")[2]
+
+
+def test_accepted_missing_figure_removes_dangling_reference_and_caption(
+    monkeypatch, tmp_path
+):
+    statuses = {
+        "T1": _status(
+            "USER_ACCEPTED_WARNING",
+            [{"code": "MISSING_FIGURE", "description": "图形无法生成"}],
+        )
+    }
+    state = _state(
+        statuses=statuses,
+        results=[
+            {
+                "task_id": "T1",
+                "text_output": (
+                    "## 引言\n\n相关因果关系见图1。\n\n另一个说明如图1所示。"
+                    "\n\n图1 聚乙烯质量影响关系\n\n其余正文保留。"
+                ),
+                "plan_revision": 1,
+                "task_revision": 1,
+                "citations": [],
+                "figures": [],
+            }
+        ],
+    )
+    state["tasks"] = [{"task_id": "T1", "task_name": "引言", "generate_figure": True}]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert result["report_status"] == "DRAFT_WITH_GAPS"
+    assert "见图1" not in markdown
+    assert "如图1所示" not in markdown
+    assert "图1 聚乙烯质量影响关系" not in markdown
+    assert "其余正文保留" in markdown
+    assert "图形缺口" in markdown
+
+
+def test_existing_figure_preserves_reference_caption_and_asset(
+    monkeypatch, tmp_path
+):
+    figure_path = tmp_path / "figure.png"
+    PILImage.new("RGB", (8, 8), color="white").save(figure_path)
+    state = _state(
+        statuses={"T1": _status("VERIFIED_PASS")},
+        results=[
+            {
+                "task_id": "T1",
+                "text_output": "## 引言\n\n相关因果关系见图1。\n\n图1 聚乙烯质量影响关系",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "citations": [],
+                "figures": [
+                    {"path": str(figure_path), "description": "图1 聚乙烯质量影响关系"}
+                ],
+            }
+        ],
+    )
+    state["tasks"] = [{"task_id": "T1", "task_name": "引言", "generate_figure": True}]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert "见图1" in markdown
+    assert "图1 聚乙烯质量影响关系" in markdown
+    assert f"]({figure_path})" in markdown
+    assert "图形缺口" not in markdown
 
 
 def test_nested_reference_projection_restores_parent_container(monkeypatch, tmp_path):

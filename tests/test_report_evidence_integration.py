@@ -93,7 +93,7 @@ def test_report_reference_projection_is_four_columns_and_hides_absolute_paths():
     )
 
     assert "| 证据编号 | 来源与支撑章节 | 定位 | 摘要 |" in table
-    assert "[E1] | 聚乙烯工艺说明（支撑章节：工艺分析） | process.docx |" in table
+    assert "[E1] | process.docx（支撑章节：工艺分析） | process.docx |" in table
     assert "/home/zsy" not in table
 
 

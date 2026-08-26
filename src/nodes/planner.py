@@ -9,7 +9,7 @@ from langgraph.types import interrupt
 from typing import Any, Dict, List
 
 from ..state import State, merge_docs
-from ..llm import get_llm, invoke_llm
+from ..llm import get_llm, invoke_llm, with_completion_budget
 from ..limits import MAX_PLAN_TASKS
 from ..report_outline import planner_outline, validate_task_coverage
 from ..rag.catalog import load_active_catalog
@@ -734,6 +734,7 @@ def _invoke_plan_generation(
 ) -> List[Dict[str, Any]]:
     try:
         model = get_llm(config, json_mode=True)
+        model, budget = with_completion_budget(model, "plan_generation")
         prompt = ChatPromptTemplate.from_messages(
             [("system", system_prompt), ("human", human_prompt)]
         )
@@ -762,6 +763,7 @@ def _invoke_plan_generation(
                 config=config,
                 node="Planner",
                 purpose="plan_generation",
+                max_completion_tokens=budget,
                 attempt=attempt,
                 json_mode=True,
             )

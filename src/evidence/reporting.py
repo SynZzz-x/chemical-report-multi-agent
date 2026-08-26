@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import ntpath
 import os
 from typing import Any
+
+from .projection import canonical_source_identity
 
 
 def _escape_cell(value: Any) -> str:
@@ -16,12 +17,11 @@ def _path_like(value: str) -> bool:
 
 
 def _safe_source_name(citation: Mapping[str, Any]) -> str:
-    title = str(citation.get("title") or "").strip()
-    file_path = str(citation.get("file_path") or "").strip()
-    if title and not _path_like(title):
-        return title
-    candidate = title or file_path
-    return ntpath.basename(candidate.rstrip("/\\")) or "未命名知识库文件"
+    if str(citation.get("source_type") or "").strip().casefold() == "web":
+        title = str(citation.get("title") or "").strip()
+        if title:
+            return title
+    return canonical_source_identity(citation) or "未命名知识库文件"
 
 
 def append_missing_figures(markdown: str, figures: Sequence[Mapping[str, Any]]) -> str:
@@ -117,9 +117,8 @@ def format_knowledge_base_file_table(
         if source_type.casefold() != "rag":
             continue
         file_path = str(citation.get("file_path") or "").strip()
-        title = str(citation.get("title") or "").strip()
         file_name = _safe_source_name(citation)
-        key = (source_type.casefold(), file_path or file_name)
+        key = (source_type.casefold(), file_name.casefold())
         entry = grouped.setdefault(
             key,
             {
@@ -129,8 +128,6 @@ def format_knowledge_base_file_table(
                 "count": 0,
             },
         )
-        if title and not _path_like(title):
-            entry["file_name"] = title
         section = str(citation.get("section_title") or "").strip()
         if section and section not in entry["sections"]:
             entry["sections"].append(section)

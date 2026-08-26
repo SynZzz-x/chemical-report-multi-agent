@@ -6,8 +6,10 @@ from copy import deepcopy
 import re
 from typing import Any, Mapping, Sequence
 
+from .projection import collect_used_evidence_ids
 
-_EVIDENCE_MARKER = re.compile(r"\[(E\d+)\]", re.IGNORECASE)
+
+_EVIDENCE_GROUP = re.compile(r"\[([^\]]*\bE\d+[^\]]*)\]", re.IGNORECASE)
 
 
 def evidence_key(task_id: str, local_id: str) -> str:
@@ -38,7 +40,27 @@ def build_display_evidence_map(
     display_map: dict[str, str] = {}
     for section in sections:
         task_id = str(section.get("task_id") or "").strip()
-        for citation in section.get("citations") or []:
+        raw_citations = [
+            citation
+            for citation in section.get("citations") or []
+            if isinstance(citation, Mapping)
+        ]
+        cited_order = collect_used_evidence_ids(
+            str(
+                section.get("text")
+                or section.get("content")
+                or section.get("text_output")
+                or ""
+            ),
+            raw_citations,
+        )
+        citations_by_id = {
+            str(citation.get("evidence_id") or "").strip().upper(): citation
+            for citation in raw_citations
+            if citation.get("evidence_id")
+        }
+        for evidence_id in cited_order:
+            citation = citations_by_id[evidence_id]
             if not isinstance(citation, Mapping):
                 continue
             key = _citation_key(task_id, citation)
@@ -48,11 +70,27 @@ def build_display_evidence_map(
 
 
 def _rewrite_markers(text: str, local_display: Mapping[str, str]) -> str:
-    def replace(match: re.Match[str]) -> str:
-        local_id = match.group(1).upper()
-        return f"[{local_display.get(local_id, local_id)}]"
+    def replace_group(match: re.Match[str]) -> str:
+        rewritten: list[str] = []
+        inherited_prefix = False
+        for raw_member in re.split(r"([,，、;；])", match.group(1)):
+            member = raw_member.strip()
+            if not member or re.fullmatch(r"[,，、;；]", member):
+                if member:
+                    rewritten.append(member)
+                continue
+            explicit = re.fullmatch(r"E\s*(\d+)", member, re.IGNORECASE)
+            inherited = re.fullmatch(r"(\d+)", member) if inherited_prefix else None
+            identifier_match = explicit or inherited
+            if identifier_match is None:
+                rewritten.append(member)
+                continue
+            inherited_prefix = True
+            local_id = f"E{int(identifier_match.group(1))}"
+            rewritten.append(local_display.get(local_id, local_id))
+        return "[" + " ".join(rewritten).replace(" ,", ",").replace(" ;", ";") + "]"
 
-    return _EVIDENCE_MARKER.sub(replace, str(text or ""))
+    return _EVIDENCE_GROUP.sub(replace_group, str(text or ""))
 
 
 def _rewrite_nested(value: Any, local_display: Mapping[str, str]) -> Any:

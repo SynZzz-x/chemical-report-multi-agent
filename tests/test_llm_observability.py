@@ -9,8 +9,9 @@ import json
 
 import pytest
 
+from src import llm as llm_module
 from src.evidence.models import EvidenceBundle, EvidenceRecord
-from src.llm import extract_token_usage, invoke_llm
+from src.llm import completion_budget, extract_token_usage, invoke_llm
 from src.nodes import intake as intake_module
 from src.nodes import planner as planner_module
 from src.nodes import verifier as verifier_module
@@ -171,12 +172,113 @@ def test_invoke_llm_preserves_omitted_config_call_shape():
     assert runnable.calls == [("input", {})]
 
 
+def test_completion_budgets_are_purpose_aware_for_costly_generation_paths():
+    task_budget = completion_budget(
+        "task_generation", task_description="撰写不超过1200字的章节。"
+    )
+    rewrite_budget = completion_budget(
+        "length_rewrite", task_description="将正文压缩到不超过800字。"
+    )
+    graph_budget = completion_budget("concept_graph_extraction")
+
+    assert task_budget == 3200
+    assert rewrite_budget == 1800
+    assert graph_budget == 1200
+    assert len({task_budget, rewrite_budget, graph_budget}) == 3
+    assert completion_budget(
+        "task_generation", task_description="正文不少于500字。"
+    ) == 3200
+
+
+def test_completion_budget_reaches_bound_model_invocation():
+    captured = {}
+
+    class BindableModel:
+        model_name = "deepseek-chat"
+
+        def bind(self, **kwargs):
+            captured["bound"] = kwargs
+            return self
+
+        def invoke(self, value, **kwargs):
+            captured["invoke"] = (value, kwargs)
+            return SimpleNamespace(content="ok")
+
+    bounded, budget = llm_module.with_completion_budget(
+        BindableModel(),
+        "concept_graph_extraction",
+    )
+    invoke_llm(
+        bounded,
+        "input",
+        node="ConceptGraph",
+        purpose="concept_graph_extraction",
+        max_completion_tokens=budget,
+    )
+
+    assert captured["bound"] == {"max_tokens": 1200}
+    assert captured["invoke"] == ("input", {})
+
+
+def test_completion_budget_is_included_in_observability_metadata(caplog):
+    caplog.set_level("INFO", logger="src.llm.observability")
+    runnable = StubRunnable(response=SimpleNamespace(content="ok"))
+
+    invoke_llm(
+        runnable,
+        "input",
+        node="Worker",
+        purpose="length_rewrite",
+        max_completion_tokens=1800,
+    )
+
+    assert "max_completion_tokens=1800" in caplog.messages[0]
+    assert "max_completion_tokens=1800" in caplog.messages[1]
+
+
+@pytest.mark.parametrize(
+    ("purpose", "description", "expected"),
+    [
+        ("task_generation", "不超过1200字。", 3200),
+        ("length_rewrite", "不超过800字。", 1800),
+        ("concept_graph_extraction", None, 1200),
+    ],
+)
+def test_llm_factory_injects_purpose_budget(
+    monkeypatch, purpose, description, expected
+):
+    captured = {}
+    monkeypatch.setattr(
+        llm_module,
+        "get_llm_settings",
+        lambda _config: {
+            "api_key": "test-key",
+            "model": "deepseek-chat",
+            "max_tokens": 99999,
+        },
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "ChatOpenAI",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(**kwargs),
+    )
+
+    llm_module.get_llm(
+        {},
+        json_mode=False,
+        purpose=purpose,
+        task_description=description,
+    )
+
+    assert captured["max_tokens"] == expected
+
+
 def test_all_phase_one_llm_call_sites_use_the_observability_taxonomy():
     expected = Counter(
         {
             ("Intake", "canonical_intake_generation"): 1,
             ("Planner", "plan_generation"): 1,
-            ("Worker", "task_generation"): 3,
+            ("Worker", "task_generation|length_rewrite"): 3,
             ("Worker", "citation_binding"): 1,
             ("Verifier", "assessment"): 1,
             ("Verifier", "assessment_contract_repair"): 1,
@@ -205,7 +307,13 @@ def test_all_phase_one_llm_call_sites_use_the_observability_taxonomy():
                 continue
             keywords = {keyword.arg: keyword.value for keyword in node.keywords}
             node_name = ast.literal_eval(keywords["node"])
-            purpose = ast.literal_eval(keywords["purpose"])
+            purpose_node = keywords["purpose"]
+            purpose = (
+                "task_generation|length_rewrite"
+                if isinstance(purpose_node, ast.Name)
+                and purpose_node.id == "generation_purpose"
+                else ast.literal_eval(purpose_node)
+            )
             actual[(node_name, purpose)] += 1
 
     assert sum(actual.values()) == 16

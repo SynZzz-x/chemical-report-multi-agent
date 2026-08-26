@@ -15,7 +15,8 @@ from langchain_core.runnables import RunnableConfig
 from src.config import get_app_config
 from src.evidence.citations import extract_inline_evidence_ids
 from src.evidence_waivers import apply_evidence_gap_acceptance
-from src.llm import get_llm, invoke_llm
+from src.llm import get_llm, invoke_llm, with_completion_budget
+from src.evidence.projection import project_report_sources
 from src.nodes.synthesis import build_synthesis_context
 from src.report_validation import count_report_length, parse_length_target
 from src.state import State
@@ -214,6 +215,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 "web_allowed": effective_web_allowed(current_task, web_authorized),
             }
             model = get_llm(config, json_mode=True)
+            model, assessment_budget = with_completion_budget(model, "assessment")
             chain = ChatPromptTemplate.from_messages([("system", template)]) | model
             response = invoke_llm(
                 chain,
@@ -236,7 +238,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "format_instructions": format_instructions,
                 },
                 node="Verifier",
-                purpose="assessment",
+                    purpose="assessment",
+                    max_completion_tokens=assessment_budget,
                 task_id=task_id,
                 job_id=state.get("job_id"),
                 plan_revision=state.get("plan_revision"),
@@ -408,8 +411,11 @@ def _invoke_contract_repair(
             ),
         ]
     )
+    repair_model, repair_budget = with_completion_budget(
+        model, "assessment_contract_repair"
+    )
     response = invoke_llm(
-        repair_prompt | model,
+        repair_prompt | repair_model,
         {
             "schema": json.dumps(
                 VerifierAssessment.model_json_schema(),
@@ -423,6 +429,7 @@ def _invoke_contract_repair(
         config=config,
         node="Verifier",
         purpose="assessment_contract_repair",
+        max_completion_tokens=repair_budget,
         task_id=task_id,
         job_id=job_id,
         plan_revision=plan_revision,
@@ -503,6 +510,34 @@ def _deterministic_issues(state: State) -> list[dict[str, Any]]:
     actual = count_report_length(content)
     target = parse_length_target(str(task.get("task_description") or ""))
     issues: list[dict[str, Any]] = []
+    expected_sources = project_report_sources(content, result.get("citations") or [])
+    actual_sources = [
+        str(source).strip()
+        for source in result.get("report_sources") or []
+        if str(source).strip()
+    ]
+    expected_keys = {source.casefold() for source in expected_sources}
+    actual_keys = {source.casefold() for source in actual_sources}
+    if [source.casefold() for source in expected_sources] != [
+        source.casefold() for source in actual_sources
+    ]:
+        issues.append(
+            {
+                "code": "REPORT_SOURCE_INCONSISTENT",
+                "category": "CONTENT_DEFECT",
+                "description": "正文实际引用的证据来源与报告来源清单不一致。",
+                "suggestion": "仅保留由正文合法 [E编号] 确定性投影出的来源。",
+                "severity": "major",
+                "expected_sources": expected_sources,
+                "actual_sources": actual_sources,
+                "missing_sources": [
+                    source for source in expected_sources if source.casefold() not in actual_keys
+                ],
+                "unexpected_sources": [
+                    source for source in actual_sources if source.casefold() not in expected_keys
+                ],
+            }
+        )
     if target and target.get("min") is not None and actual < int(target["min"]):
         issues.append(
             {
@@ -559,7 +594,7 @@ def _deterministic_issues(state: State) -> list[dict[str, Any]]:
     ):
         issues.append(
             {
-                "code": "MISSING_FIGURE",
+                "code": "MISSING_REQUIRED_FIGURE",
                 "category": "CONTENT_DEFECT",
                 "description": "任务要求正式图形资产，但 current_result.figures 为空。",
                 "suggestion": "满足数据或证据覆盖要求后，通过正式图形生成器创建 figure asset。",

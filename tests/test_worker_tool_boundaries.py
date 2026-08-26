@@ -266,7 +266,9 @@ def test_length_rewrite_targets_safety_margin_below_hard_maximum():
         },
     )
 
-    assert "目标有效字数不超过 2300 字" in instructions
+    assert "本次缓冲目标：不超过 2300 字" in instructions
+    assert "当前正文确定性计数：3 字" in instructions
+    assert "硬性范围：最低 2000 字，最高 2500 字" in instructions
     assert "硬上限 2500 字" in instructions
 
 
@@ -291,6 +293,46 @@ def test_length_rewrite_safety_margin_uses_shared_runtime_config(monkeypatch):
     )
 
     assert "目标有效字数不超过 2250 字" in instructions
+
+
+def test_short_length_rewrite_never_triggers_generic_detail_retry(monkeypatch):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
+
+    class Model:
+        model_name = "deepseek-chat"
+
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, _messages, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(content="短篇改写结果。", tool_calls=[])
+
+    model = Model()
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3)
+    node.llm_client = model
+
+    content, _, _ = node._execute_tool_loop(
+        model,
+        [],
+        [],
+        {
+            "task_id": "T1",
+            "task_description": "不超过50字。",
+            "_llm_purpose": "length_rewrite",
+            "_length_rewrite_source_result": {"text_output": "原始正文。"},
+        },
+    )
+
+    assert content == "短篇改写结果。"
+    assert model.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -542,6 +584,54 @@ def test_concept_graph_uses_sufficient_internal_rag_without_public_web(monkeypat
     assert coverage.status == "sufficient"
     assert evidence.records[0].source_type == "rag"
     assert graph_result == {"success": True, "record_count": 1}
+
+
+def test_concept_graph_semantic_generation_is_bounded_per_task_revision(monkeypatch):
+    provider_events = []
+    node = _concept_graph_node(monkeypatch, provider_events)
+    semantic_calls = []
+
+    class GraphTool:
+        def execute(self, task, evidence, output_dir):
+            semantic_calls.append((task["task_id"], task["_task_revision"]))
+            return {"success": False, "error": "semantic validation failed"}
+
+    monkeypatch.setattr(
+        "src.nodes.worker.tools.concept_graph_tool.ConceptGraphTool", GraphTool
+    )
+    task = {
+        "task_id": "T3",
+        "task_name": "RAG graph",
+        "_task_revision": 2,
+        "_concept_graph_attempts": {},
+        "use_web": False,
+        "visualization": {
+            "kind": "causal",
+            "required_concepts": ["alpha", "beta"],
+        },
+    }
+    rag_call = {
+        "tool": "chemical_knowledge_base_tool",
+        "success": True,
+        "parameters": {"query": "alpha beta"},
+        "full_result": {
+            "evidence": [
+                {
+                    "title": "Internal document",
+                    "source": "/job/internal.pdf",
+                    "content": "alpha influences beta",
+                }
+            ]
+        },
+    }
+
+    first = node._prepare_concept_graph(task, [rag_call])[2]
+    second = node._prepare_concept_graph(task, [rag_call])[2]
+
+    assert first["success"] is False
+    assert second["success"] is False
+    assert second["semantic_attempt_skipped"] is True
+    assert semantic_calls == [("T3", 2)]
 
 
 def test_rag_is_prefetched_before_autonomous_tool_selection(monkeypatch, capsys):

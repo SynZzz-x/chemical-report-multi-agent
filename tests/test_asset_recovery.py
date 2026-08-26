@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from src.nodes import asset_recovery as asset_recovery_module
+from src.concept_graph.attempts import concept_graph_attempt_key
 
 
 def _state(*, task=None, result=None, issues=None):
@@ -197,6 +198,50 @@ def test_failed_causal_figure_recovery_keeps_original_result(monkeypatch):
     assert update["workflow_action"] == "RETRY_VERIFIER"
     assert update["current_result"] == original
     assert update["asset_recovery_error"] == "graph validation failed"
+
+
+def test_asset_recovery_never_repeats_completed_concept_graph_semantic_attempt(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        asset_recovery_module,
+        "ConceptGraphTool",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("asset recovery must not repeat semantic extraction")
+        ),
+    )
+    state = _state(
+        task={
+            "generate_figure": True,
+            "visualization": {
+                "kind": "causal",
+                "required_concepts": ["反应温度", "熔融指数"],
+            },
+        },
+        result={
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "source_type": "rag",
+                    "title": "工艺说明",
+                    "supporting_text": "反应温度升高会提高熔融指数。",
+                    "file_path": "/srv/process.docx",
+                }
+            ],
+            "graph_spec": {},
+        },
+        issues=[{"code": "MISSING_FIGURE"}],
+    )
+    state["task_revisions"] = {"T2": 1}
+    state["concept_graph_attempts"] = {
+        concept_graph_attempt_key("T2", 1): 1
+    }
+
+    update = asset_recovery_module.asset_recovery(state, {})
+
+    assert update["workflow_action"] == "RETRY_VERIFIER"
+    assert update["current_result"] == state["current_result"]
+    assert "semantic attempt limit" in update["asset_recovery_error"]
 
 
 def test_multi_asset_failure_does_not_commit_partially_materialized_table(monkeypatch):

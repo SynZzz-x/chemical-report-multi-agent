@@ -89,6 +89,74 @@ def test_asset_recovery_does_not_override_evidence_recovery():
     assert decision["asset_retry_count"] == {}
 
 
+def test_length_rewrite_is_semantic_once_then_uses_deterministic_convergence():
+    duplicate = "这是一段可安全去重的过渡说明，不包含新的事实。"
+    state = recovery_state(task_id="T2")
+    state["tasks"][0]["task_description"] = "正文不超过35字。"
+    state["task_revisions"] = {"T2": 3}
+    state["current_result"]["text_output"] = (
+        f"核心结论[E1]。\n\n{duplicate}\n\n{duplicate}"
+    )
+    assessment = assessment_with("TOO_LONG", "CONTENT_DEFECT")
+
+    first = decide_recovery_action(state, assessment)
+    second = decide_recovery_action({**state, **first}, assessment)
+
+    assert first["workflow_action"] == "LENGTH_REWRITE"
+    assert first["length_rewrite_attempts"] == {"T2:length_rewrite:t3": 1}
+    assert second["workflow_action"] == "RETRY_VERIFIER"
+    assert second["length_rewrite_attempts"] == first["length_rewrite_attempts"]
+    assert second["current_result"]["text_output"].count(duplicate) == 1
+
+
+def test_failed_length_rewrite_never_schedules_a_second_semantic_call():
+    state = recovery_state(task_id="T2")
+    state["tasks"][0]["task_description"] = "正文不超过10字。"
+    state["task_revisions"] = {"T2": 1}
+    state["length_rewrite_attempts"] = {"T2:length_rewrite:t1": 1}
+    state["current_result"]["text_output"] = "不可安全截断的完整事实陈述[E1]。"
+
+    decision = decide_recovery_action(
+        state, assessment_with("TOO_LONG", "CONTENT_DEFECT")
+    )
+
+    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["length_rewrite_attempts"] == state["length_rewrite_attempts"]
+
+
+def test_prior_non_length_rework_does_not_consume_scoped_length_rewrite():
+    state = recovery_state(task_id="T2", task_retry_count={"T2": 1})
+    state["length_rewrite_attempts"] = {}
+    state["task_revisions"] = {"T2": 2}
+
+    decision = decide_recovery_action(
+        state, assessment_with("TOO_LONG", "CONTENT_DEFECT")
+    )
+
+    assert decision["workflow_action"] == "LENGTH_REWRITE"
+    assert decision["length_rewrite_attempts"] == {"T2:length_rewrite:t2": 1}
+
+
+def test_report_source_inconsistency_is_repaired_without_worker_rework():
+    state = recovery_state(task_id="T2")
+    state["current_result"]["report_sources"] = [
+        "polyethylene.docx",
+        "GB 18218-2018",
+    ]
+    assessment = assessment_with(
+        "REPORT_SOURCE_INCONSISTENT",
+        "CONTENT_DEFECT",
+        expected_sources=["polyethylene.docx"],
+        actual_sources=["polyethylene.docx", "GB 18218-2018"],
+    )
+
+    decision = decide_recovery_action(state, assessment)
+
+    assert decision["workflow_action"] == "RETRY_VERIFIER"
+    assert decision["current_result"]["report_sources"] == ["polyethylene.docx"]
+    assert decision["task_retry_count"] == {}
+
+
 def test_asset_retry_limit_uses_asset_specific_user_blocker():
     state = recovery_state(
         task_id="T2",
@@ -446,8 +514,9 @@ def test_legacy_cursor_counter_keys_are_read_and_written_with_task_ids():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == WorkflowAction.LENGTH_REWRITE
-    assert decision["task_retry_count"] == {"T2": 2}
+    assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
+    assert decision["task_retry_count"] == {"T2": 1}
+    assert decision["length_rewrite_attempts"] == {"T2:length_rewrite:t1": 1}
 
 
 @pytest.mark.parametrize(

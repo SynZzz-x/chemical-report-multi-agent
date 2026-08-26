@@ -253,6 +253,104 @@ def test_preflight_517_chars_against_500_max_routes_length_rewrite(monkeypatch):
     assert decision["workflow_action"] == "LENGTH_REWRITE"
 
 
+def test_preflight_report_source_inconsistency_skips_semantic_verifier(monkeypatch):
+    state = _state()
+    state["current_result"].update(
+        {
+            "text_output": "工艺结论。[E1]",
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "source_type": "rag",
+                    "file_path": "/knowledge/polyethylene.docx",
+                }
+            ],
+            "report_sources": ["polyethylene.docx", "GB 18218-2018"],
+        }
+    )
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source preflight failure must bypass semantic verifier"
+        ),
+    )
+
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+
+    assert update["assessment"]["status"] == "FAILED"
+    issue = next(
+        item
+        for item in update["assessment"]["issues"]
+        if item["code"] == "REPORT_SOURCE_INCONSISTENT"
+    )
+    assert issue["expected_sources"] == ["polyethylene.docx"]
+    assert issue["actual_sources"] == ["polyethylene.docx", "GB 18218-2018"]
+    assert issue["missing_sources"] == []
+    assert issue["unexpected_sources"] == ["GB 18218-2018"]
+
+
+def test_preflight_missing_report_sources_is_repaired_deterministically(monkeypatch):
+    state = _state()
+    state["current_result"].update(
+        {
+            "text_output": "工艺结论。[E1]",
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "source_type": "rag",
+                    "file_path": "/knowledge/polyethylene.docx",
+                }
+            ],
+        }
+    )
+    state["current_result"].pop("report_sources", None)
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "missing report_sources must bypass semantic verifier"
+        ),
+    )
+
+    verifier_update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+    decision = decide_recovery_action(
+        {**state, **verifier_update}, verifier_update["assessment"]
+    )
+
+    assert verifier_update["assessment"]["issues"][0]["code"] == (
+        "REPORT_SOURCE_INCONSISTENT"
+    )
+    assert decision["workflow_action"] == "RETRY_VERIFIER"
+    assert decision["current_result"]["report_sources"] == ["polyethylene.docx"]
+
+
+def test_preflight_missing_required_figure_skips_semantic_verifier(monkeypatch):
+    state = _state()
+    state["tasks"][0]["generate_figure"] = True
+    state["current_result"].update({"figures": [], "evidence_coverage": {}})
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "missing required figure must bypass semantic verifier"
+        ),
+    )
+
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+
+    assert update["assessment"]["status"] == "FAILED"
+    assert [issue["code"] for issue in update["assessment"]["issues"]] == [
+        "MISSING_REQUIRED_FIGURE"
+    ]
+
+
 def test_valid_preflight_calls_semantic_verifier_once(monkeypatch):
     state = _state()
     state["tasks"][0]["task_description"] = "正文不超过500字。"

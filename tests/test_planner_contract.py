@@ -1114,6 +1114,7 @@ def test_initial_planner_keeps_reference_review_as_content(monkeypatch):
         "5. 知识库依据与参考文件说明",
         "5. 知识库文件来源与说明",
         "5. 知识库文件清单",
+        "5. 参考知识库文件清单",
         "5. 参考文件与证据来源",
     ],
 )
@@ -1235,6 +1236,7 @@ def test_initial_planner_rejects_task_spanning_multiple_containers(monkeypatch):
         (["1.2 编制依据", "1.1 报告目的"], "outline order"),
         (["1.1 报告目的"], "missing"),
         (["1.1 报告目的", "参考文献与知识库引用"], "system-generated"),
+        (["1.1 报告目的", "参考知识库文件清单"], "system-generated"),
     ],
 )
 def test_initial_planner_rejects_invalid_outline_coverage(
@@ -1254,6 +1256,7 @@ def test_initial_planner_rejects_invalid_outline_coverage(
                     "1.1 报告目的",
                     "1.2 编制依据",
                     "参考文献与知识库引用",
+                    "参考知识库文件清单",
                 ]
             ),
             {},

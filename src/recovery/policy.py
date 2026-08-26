@@ -20,6 +20,7 @@ from src.report_acceptance import (
     derive_report_status,
     record_section_status,
 )
+from src.report_validation import parse_length_target, safe_deterministic_trim
 from src.tool_capabilities import public_web_runtime_available
 from src.task_contract import effective_web_allowed
 
@@ -77,6 +78,7 @@ _CONTENT_CODES = {
     "FORMAT_ERROR",
     "INCOMPLETE_CONTENT",
     "MISSING_FIGURE",
+    "MISSING_REQUIRED_FIGURE",
     "MISSING_TABLE",
     "TOO_SHORT",
     "TOO_LONG",
@@ -84,8 +86,13 @@ _CONTENT_CODES = {
     "SCOPE_VIOLATION",
     "UNSUPPORTED_RECOMMENDATION",
     "REQUIREMENT_MISSING",
+    "REPORT_SOURCE_INCONSISTENT",
 }
-_ASSET_ISSUE_CODES = {"MISSING_FIGURE", "MISSING_TABLE"}
+_ASSET_ISSUE_CODES = {
+    "MISSING_FIGURE",
+    "MISSING_REQUIRED_FIGURE",
+    "MISSING_TABLE",
+}
 _VERIFIER_CODES = {
     "ASSESSMENT_CONTRACT_ERROR",
     "LLM_ERROR",
@@ -590,6 +597,12 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
     task_patch_count = _counter_update(state, "task_patch_count")
     verifier_retry_count = _counter_update(state, "verifier_retry_count")
     job_patch_count = int(state.get("job_patch_count", 0) or 0)
+    legacy_length_attempts = "length_rewrite_attempts" not in state
+    length_rewrite_attempts = {
+        str(key): int(value or 0)
+        for key, value in (state.get("length_rewrite_attempts") or {}).items()
+        if str(key).strip()
+    }
     update: Dict[str, Any] = {
         "task_retry_count": task_retry_count,
         "asset_retry_count": asset_retry_count,
@@ -597,6 +610,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         "task_patch_count": task_patch_count,
         "verifier_retry_count": verifier_retry_count,
         "job_patch_count": job_patch_count,
+        "length_rewrite_attempts": length_rewrite_attempts,
         "pending_user_action": {},
         "verification_warnings": list(state.get("verification_warnings") or []),
     }
@@ -703,6 +717,23 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         category = IssueCategory.CONTENT_DEFECT
 
     if category is IssueCategory.CONTENT_DEFECT:
+        if issue_codes == {"REPORT_SOURCE_INCONSISTENT"}:
+            source_issue = next(
+                issue
+                for issue in assessment.get("issues") or []
+                if isinstance(issue, Mapping)
+                and str(issue.get("code") or "").strip().upper()
+                == "REPORT_SOURCE_INCONSISTENT"
+            )
+            current_result = dict(state.get("current_result") or {})
+            current_result["report_sources"] = [
+                str(source).strip()
+                for source in source_issue.get("expected_sources") or []
+                if str(source).strip()
+            ]
+            update["current_result"] = current_result
+            update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
+            return update
         if _asset_only_issues(assessment) and state.get("current_result"):
             retries = asset_retry_count.get(task_id, 0)
             if retries < MAX_ASSET_RETRIES:
@@ -747,14 +778,48 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             )
             return update
 
-        retries = task_retry_count.get(task_id, 0)
+        length_only = bool(issue_codes) and issue_codes <= {"TOO_SHORT", "TOO_LONG"}
+        if length_only:
+            task_revision = int(
+                (state.get("task_revisions") or {}).get(task_id, 1) or 1
+            )
+            attempt_key = f"{task_id}:length_rewrite:t{task_revision}"
+            if (
+                legacy_length_attempts
+                and attempt_key not in length_rewrite_attempts
+                and task_retry_count.get(task_id, 0) > 0
+            ):
+                # Legacy checkpoints only persisted the shared content counter.
+                # Treat an existing retry as already consuming the semantic rewrite.
+                length_rewrite_attempts[attempt_key] = 1
+            if int(length_rewrite_attempts.get(attempt_key, 0) or 0) < 1:
+                length_rewrite_attempts[attempt_key] = 1
+                task_retry_count[task_id] = task_retry_count.get(task_id, 0) + 1
+                update["workflow_action"] = WorkflowAction.LENGTH_REWRITE.value
+                return update
+            if issue_codes == {"TOO_LONG"}:
+                target = parse_length_target(str(task.get("task_description") or ""))
+                if target and target.get("max") is not None:
+                    current_result = dict(state.get("current_result") or {})
+                    content_field = (
+                        "content" if current_result.get("content") is not None else "text_output"
+                    )
+                    trimmed = safe_deterministic_trim(
+                        str(current_result.get(content_field) or ""),
+                        maximum=int(target["max"]),
+                        minimum=target.get("min"),
+                    )
+                    if trimmed is not None:
+                        current_result[content_field] = trimmed
+                        update["current_result"] = current_result
+                        update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
+                        return update
+            retries = MAX_CONTENT_RETRIES
+        else:
+            retries = task_retry_count.get(task_id, 0)
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
-            update["workflow_action"] = (
-                WorkflowAction.LENGTH_REWRITE.value
-                if issue_codes and issue_codes <= {"TOO_SHORT", "TOO_LONG"}
-                else WorkflowAction.REWORK.value
-            )
+            update["workflow_action"] = WorkflowAction.REWORK.value
             return update
 
         warning = _content_retry_warning(

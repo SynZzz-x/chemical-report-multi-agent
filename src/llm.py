@@ -16,6 +16,65 @@ from .config import get_llm_settings, missing_key_message
 logger = logging.getLogger("src.llm.observability")
 
 
+_PURPOSE_COMPLETION_BUDGETS = {
+    "canonical_intake_generation": 1200,
+    "plan_generation": 3500,
+    "assessment": 1600,
+    "assessment_contract_repair": 900,
+    "concept_graph_extraction": 1200,
+    "citation_binding": 1600,
+    "report_synthesis": 4000,
+    "report_evaluation": 800,
+    "plan_patch": 1800,
+    "feedback_analysis": 1000,
+    "chart_description": 1000,
+    "chart_description_fallback": 800,
+    "table_description": 800,
+}
+
+
+def _maximum_length(description: str | None) -> int | None:
+    text = str(description or "").replace(",", "").replace("，", "")
+    if re.search(r"(?:不少于|至少)\s*\d+\s*(?:个)?字", text):
+        return None
+    range_match = re.search(r"\d+\s*(?:-|–|—|~|～|至|到)\s*(\d+)\s*(?:个)?字", text)
+    if range_match:
+        return int(range_match.group(1))
+    maximum_match = re.search(r"(?:不超过|至多|最多|压缩到不超过)\s*(\d+)\s*(?:个)?字", text)
+    if maximum_match:
+        return int(maximum_match.group(1))
+    approximate = re.search(r"(?:约\s*)?(\d+)\s*(?:个)?字(?:左右)?", text)
+    return int(approximate.group(1)) if approximate else None
+
+
+def completion_budget(purpose: str, *, task_description: str | None = None) -> int:
+    """Return a bounded output-token budget for one semantic purpose."""
+
+    normalized = str(purpose or "").strip()
+    maximum = _maximum_length(task_description)
+    if normalized == "task_generation":
+        return max(1200, min(4096, (maximum * 2 + 800) if maximum else 3200))
+    if normalized == "length_rewrite":
+        return max(800, min(2400, (maximum * 3 // 2 + 600) if maximum else 1800))
+    return _PURPOSE_COMPLETION_BUDGETS.get(normalized, 2048)
+
+
+def with_completion_budget(
+    runnable: Any, purpose: str, *, task_description: str | None = None
+) -> tuple[Any, int]:
+    """Bind a budget to direct model/binding runnables without altering chains."""
+
+    budget = completion_budget(purpose, task_description=task_description)
+    binder = getattr(runnable, "bind", None)
+    if (
+        callable(binder)
+        and _model_name(runnable) != "-"
+        and not isinstance(getattr(runnable, "steps", None), (list, tuple))
+    ):
+        return binder(max_tokens=budget), budget
+    return runnable, budget
+
+
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -90,6 +149,7 @@ def invoke_llm(
     plan_revision: int | None = None,
     task_revision: int | None = None,
     json_mode: bool | None = None,
+    max_completion_tokens: int | None = None,
 ) -> Any:
     """Invoke an LLM runnable with metadata-only request observability."""
     config_map = _mapping(config)
@@ -97,6 +157,8 @@ def invoke_llm(
     configurable = _mapping(config_map.get("configurable"))
     resolved_job_id = job_id or metadata.get("job_id") or configurable.get("thread_id")
     thread_id = configurable.get("thread_id") or metadata.get("thread_id")
+    if max_completion_tokens is None:
+        max_completion_tokens = completion_budget(purpose)
     call_id = uuid.uuid4().hex
     common = (
         f"call_id={_log_value(call_id)} "
@@ -110,6 +172,7 @@ def invoke_llm(
         f"attempt={_log_value(attempt)} "
         f"iteration={_log_value(iteration)} "
         f"model={_log_value(_model_name(runnable))} "
+        f"max_completion_tokens={_log_value(max_completion_tokens)} "
         f"json_mode={str(json_mode).lower() if json_mode is not None else '-'}"
     )
     logger.info("LLM_CALL_START %s", common)
@@ -143,7 +206,13 @@ def invoke_llm(
     return response
 
 
-def get_llm(config: RunnableConfig, json_mode: bool = True) -> ChatOpenAI:
+def get_llm(
+    config: RunnableConfig,
+    json_mode: bool = True,
+    *,
+    purpose: str | None = None,
+    task_description: str | None = None,
+) -> ChatOpenAI:
     """Create a ChatOpenAI-compatible client from runtime configuration."""
     configurable = config.get("configurable", {}) if config else {}
     settings = get_llm_settings(configurable)
@@ -154,6 +223,10 @@ def get_llm(config: RunnableConfig, json_mode: bool = True) -> ChatOpenAI:
     model_kwargs = {}
     if json_mode:
         model_kwargs["response_format"] = {"type": "json_object"}
+    if purpose:
+        settings["max_tokens"] = completion_budget(
+            purpose, task_description=task_description
+        )
 
     return ChatOpenAI(
         api_key=api_key,

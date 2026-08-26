@@ -11,8 +11,9 @@ from typing import Any, Mapping, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..evidence.projection import project_report_sources
 from ..evidence.identity import normalize_sections_evidence
-from ..llm import get_llm, invoke_llm
+from ..llm import get_llm, invoke_llm, with_completion_budget
 from ..report_acceptance import is_admitted_section_entry
 from ..report_acceptance import (
     USER_ACCEPTED_GAP,
@@ -392,6 +393,9 @@ def synthesis(
     if context["accepted_sections"]:
         try:
             model = get_llm(config or {}, json_mode=False)
+            model, synthesis_budget = with_completion_budget(
+                model, "report_synthesis"
+            )
         except Exception as exc:
             model_error = str(exc)
             logger.exception("Synthesis model initialization failed: task=%s", task_id)
@@ -404,6 +408,7 @@ def synthesis(
                     config=config or {},
                     node="Synthesis",
                     purpose="report_synthesis",
+                    max_completion_tokens=synthesis_budget,
                     task_id=task_id,
                     attempt=attempts,
                     plan_revision=state.get("plan_revision"),
@@ -455,6 +460,7 @@ def synthesis(
         "tables": [],
         "figures": [],
         "sources_used": sources_used,
+        "report_sources": project_report_sources(content, citations),
         "figures_generated": 0,
         "word_count": count_report_length(content),
         "plan_revision": _revision(state.get("plan_revision")),
