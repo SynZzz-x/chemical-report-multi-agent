@@ -88,22 +88,43 @@ class FailureClass(str, Enum):
     DEGRADABLE_QUALITY = "DEGRADABLE_QUALITY"
     USER_DECISION_REQUIRED = "USER_DECISION_REQUIRED"
     FATAL_SYSTEM = "FATAL_SYSTEM"
+
+
+class FailureAction(str, Enum):
+    COMMIT = "COMMIT"
+    RETRY_VERIFIER = "RETRY_VERIFIER"
+    RETRY_TASK = "RETRY_TASK"
+    REPAIR_CONTRACT = "REPAIR_CONTRACT"
+    RECOVER_EVIDENCE = "RECOVER_EVIDENCE"
+    RECOVER_ASSET = "RECOVER_ASSET"
+    PATCH_PLAN = "PATCH_PLAN"
+    COMMIT_WITH_WARNING = "COMMIT_WITH_WARNING"
+    REGISTER_BLOCKER = "REGISTER_BLOCKER"
+    FAIL_JOB = "FAIL_JOB"
 ```
 
-`FailureDecision` is serialized to a plain dictionary in LangGraph State. It
-contains:
+`FailureAction` is the policy-level action vocabulary. Existing
+`WorkflowAction` values remain graph routing adapters until all consumers have
+migrated; recovery nodes must not invent additional actions.
 
-- `failure_class`
-- `subtype`
-- `reason`
-- `task_id`
-- `action`
-- `retryable`
-- `repair_attempt`
-- `repair_budget`
-- `user_blocker`
-- `hard_requirement_ids`
-- `metadata`
+`FailureDecision` is serialized to a plain dictionary in LangGraph State with
+this exact shape:
+
+```python
+class FailureDecision(TypedDict):
+    failure_class: str          # FailureClass value
+    subtype: str                # stable uppercase subtype
+    reason: str                 # bounded, user-safe explanation
+    task_id: str | None
+    action: str                 # FailureAction value
+    retryable: bool
+    repair_attempt: int
+    repair_budget: int
+    user_blocker: bool
+    requirement_ids: list[str]
+    hard_requirement_ids: list[str]
+    metadata: dict[str, JSONValue]
+```
 
 Verifier continues to judge whether a result satisfies its task. It does not
 choose recovery actions or user interruption. DecisionPolicy is the sole owner
@@ -111,6 +132,20 @@ of failure classification and workflow action.
 
 The old `IssueCategory` remains as an assessment compatibility input during
 migration. It is not the authority for new workflow decisions.
+
+The allowed action matrix is closed:
+
+| Decision | Allowed `FailureAction` |
+|---|---|
+| successful assessment | `COMMIT` |
+| `RETRYABLE_EXECUTION` | `RETRY_VERIFIER`, `RETRY_TASK`, `RECOVER_EVIDENCE` |
+| `REPAIRABLE_CONTRACT` | `REPAIR_CONTRACT`, `RECOVER_ASSET`, `PATCH_PLAN` |
+| `DEGRADABLE_QUALITY` | `COMMIT_WITH_WARNING` |
+| `USER_DECISION_REQUIRED` | `REGISTER_BLOCKER` |
+| `FATAL_SYSTEM` | `FAIL_JOB` |
+
+Any other class/action pair is a State contract error. `PATCH_PLAN` is valid
+only for the plan-defect subtypes listed in Section 6.
 
 ## 4. Requirement contract
 
@@ -124,7 +159,15 @@ Intake creates a serializable requirement registry. Each record contains:
     "text": "必须使用用户提供的质量控制规程",
     "severity": "hard",
     "kind": "resource",
-    "source": "explicit_user_constraint",
+    "status": "active",
+    "contract_revision": 1,
+    "provenance": {
+        "origin": "explicit_user",
+        "source_message_id": "msg-123",
+        "source_field": "constraints",
+        "source_index": 0,
+        "derivation": "deterministic_explicit_marker",
+    },
 }
 ```
 
@@ -138,14 +181,49 @@ goals, recommended length, nonessential visualizations, and inferred planner
 preferences default to soft. An explicit maximum or minimum is hard only when
 the user frames it as mandatory; otherwise it remains a soft target.
 
+`provenance.origin` is one of `explicit_user`, `intake_inferred`,
+`legacy_reconstructed`, or `legacy_task_contract`. Planner is not a permitted
+requirement provenance because it may link requirements but may not invent
+them. `source_message_id`, `source_field`, and `source_index` identify the
+authoritative input without relying on later free-text matching. The
+`derivation` value records the deterministic rule used to assign severity.
+
 Planner model tasks gain a required `requirement_ids` list. Validation rejects
 unknown IDs. Synthesis tasks may reference report-wide IDs. Legacy tasks with
-no field normalize to an empty list; this means no requirement may be invented
-as hard during checkpoint recovery.
+no field link only to requirements that can be recovered from explicit
+structural task fields; otherwise they normalize to an empty list. Missing
+linkage never authorizes issue-prose matching or invention of a hard
+requirement.
 
 Verifier issues may include `requirement_ids`. Deterministic checks attach IDs
 from the active task. DecisionPolicy resolves severity through the registry,
 not issue prose.
+
+### Minimum task dependency contract
+
+Requirement linkage and task dependency are separate contracts. Requirement
+overlap must never be used to infer execution dependency.
+
+Every newly generated Planner task contains:
+
+```python
+{
+    "requirement_ids": ["REQ-001"],
+    "depends_on_task_ids": ["T1"],
+}
+```
+
+`depends_on_task_ids` is a unique list of existing task IDs. It cannot contain
+the task itself, must reference tasks in the same plan, and the complete plan
+must be acyclic. Initial plans require dependencies to point to earlier tasks.
+Replacement plans are topologically validated before commit. A synthesis task
+must explicitly depend on every task result it consumes.
+
+A dependency is satisfied only when the upstream task has a terminal
+`COMMITTED` or `DEGRADED` outcome. An upstream user blocker leaves the dependency
+unsatisfied. The deterministic runnable-task helper scans for tasks whose
+explicit dependencies are satisfied; it never substitutes shared requirement
+IDs for dependency edges.
 
 ## 5. Failure classification and actions
 
@@ -160,6 +238,14 @@ is reclassified according to available fallback:
 - core execution/state cannot proceed → `FATAL_SYSTEM`.
 
 System retries never create a business blocker by themselves.
+
+Verifier invocation or assessment-contract failure receives the existing one
+bounded verifier retry. If deterministic preflight already found an actionable
+contract issue, that issue continues through ordinary policy without requiring
+semantic verification. Otherwise, exhaustion of the semantic Verifier is
+classified as `FATAL_SYSTEM / VERIFIER_UNAVAILABLE` with action `FAIL_JOB`.
+Unverified semantic content is neither degraded nor committed, and Verifier
+exhaustion never becomes `USER_DECISION_REQUIRED`.
 
 ### REPAIRABLE_CONTRACT
 
@@ -205,6 +291,24 @@ exception type, component, operation, and safe bounded context without secrets
 or raw LLM content. UI and CLI show an actionable system error and never show a
 business blocker form.
 
+Fatal ownership has two explicit layers:
+
+- Graph-level DecisionPolicy owns failures represented inside a valid
+  checkpoint State, including bounded core model/tool exhaustion, an invalid
+  but readable State contract, and Verifier exhaustion. It writes
+  `fatal_system_error`, selects `FAIL_JOB`, and routes to the existing Exit
+  lifecycle without creating a blocker.
+- Runner-level handling in `app.py` and `run.py` owns failures that prevent the
+  graph from producing or persisting a valid decision, including checkpoint
+  read/write failure, SQLite corruption, stream/runtime exceptions escaping a
+  node, and Store projection failure. It marks the job failed when projection
+  is available and surfaces a safe diagnostic. It must not inject a fabricated
+  graph blocker or resume the graph after the fatal exception.
+
+If the persistence backend itself is unavailable, runner-level diagnostics are
+reported to UI/CLI/logs only; the implementation must not claim that the fatal
+record was checkpointed.
+
 ## 6. Recovery component boundaries
 
 EvidenceRecovery remains an execution helper that constructs one bounded local
@@ -235,12 +339,131 @@ State gains these serializable fields:
 - `failure_decision`
 - `degraded_issue_registry`
 - `pending_user_blockers`
+- `blocker_resolution_registry`
 - `resolved_user_blocker_ids`
+- `task_outcome_registry`
 - `fatal_system_error`
 
+Registry items have these exact schemas:
+
+```python
+class RequirementProvenance(TypedDict):
+    origin: str                 # explicit_user | intake_inferred |
+                                # legacy_reconstructed | legacy_task_contract
+    source_message_id: str | None
+    source_field: str
+    source_index: int
+    derivation: str
+
+
+class RequirementRecord(TypedDict):
+    requirement_id: str
+    text: str
+    severity: str               # hard | soft
+    kind: str
+    status: str                 # active | modified | withdrawn
+    contract_revision: int
+    provenance: RequirementProvenance
+
+
+class RepairAttemptRecord(TypedDict):
+    repair_type: str
+    attempt: int
+    budget: int
+    outcome: str
+    diagnostic_code: str | None
+
+
+class DegradedIssueRecord(TypedDict):
+    issue_id: str
+    task_id: str
+    task_revision: int
+    failure_class: str          # DEGRADABLE_QUALITY
+    subtype: str
+    reason: str
+    affected_claims: list[str]
+    affected_requirement_ids: list[str]
+    attempted_repairs: list[RepairAttemptRecord]
+    final_fallback: str
+    status: str                 # active | superseded
+    metadata: dict[str, JSONValue]
+
+
+class UserBlockerRecord(TypedDict):
+    blocker_id: str
+    status: str                 # pending | retry_pending | resolved | cancelled
+    task_id: str
+    requirement_ids: list[str]
+    affected_task_ids: list[str]
+    reason: str
+    required_user_action: str
+    available_options: list[str]
+    attempted_repairs: list[RepairAttemptRecord]
+    metadata: dict[str, JSONValue]
+
+
+class RequirementModification(TypedDict):
+    requirement_id: str
+    operation: str              # update | withdraw
+    previous_text: str
+    new_text: str | None
+    previous_severity: str
+    new_severity: str | None
+    previous_contract_revision: int
+    new_contract_revision: int
+
+
+class BlockerResolutionRecord(TypedDict):
+    resolution_id: str
+    blocker_id: str
+    action: str                 # UPLOAD_RESOURCES | MODIFY_REQUIREMENT |
+                                # APPROVE_EXCEPTION | CANCEL_JOB
+    status: str                 # applied | retry_pending | rejected
+    resource_ids: list[str]
+    requirement_modification: RequirementModification | None
+    affected_task_ids: list[str]
+    contract_revision: int
+    metadata: dict[str, JSONValue]
+
+
+class TaskOutcomeRecord(TypedDict):
+    task_id: str
+    status: str                 # pending | running | committed | degraded |
+                                # blocked_dependency | blocked_user
+    dependency_ids: list[str]
+    blocker_ids: list[str]
+    task_revision: int
+
+
+class FatalSystemError(TypedDict):
+    failure_id: str
+    failure_class: str          # FATAL_SYSTEM
+    subtype: str
+    origin: str                 # graph | runner
+    component: str
+    operation: str
+    task_id: str | None
+    diagnostic_code: str
+    retryable: bool             # always False for the final fatal record
+    metadata: dict[str, JSONValue]
+```
+
+The State containers are exact: `requirement_registry` and
+`degraded_issue_registry` are ordered lists; `pending_user_blockers` and
+`blocker_resolution_registry` are ordered lists; `resolved_user_blocker_ids` is
+a stable-deduplicated list of strings; `task_outcome_registry` is a dictionary
+keyed by task ID; `failure_decision` is one `FailureDecision` or `{}`; and
+`fatal_system_error` is one `FatalSystemError` or `{}`.
+
 Degradation IDs are derived from task ID, task revision, subtype, and affected
-requirement IDs. Blocker IDs use the same stable scope. Upsert-by-ID prevents
-duplicate warnings or blockers after retry/resume.
+requirement IDs. A blocker ID is derived from job scope, task ID, subtype,
+sorted requirement IDs, and any canonical missing-resource identity. It never
+contains `task_revision`, `plan_revision`, retry count, or repair attempt, so
+the same unresolved contract problem upserts across task rewrites. Task
+revision remains metadata on the failure/attempt rather than blocker identity.
+`resolution_id` is derived from blocker ID plus the canonical action payload.
+Upsert-by-ID prevents duplicate warnings, blockers, or resolutions after
+retry/resume.
 
 Existing `accepted_evidence_gaps`, `accepted_gap_fingerprints`,
 `pending_user_action`, retry counters, and patch history are not removed. Old
@@ -251,13 +474,12 @@ workflow does not add ordinary accepted-evidence-gap records.
 
 When DecisionPolicy produces `USER_DECISION_REQUIRED`, it records the blocker,
 marks the current section blocked, and advances to the next task that can run
-without the missing hard prerequisite. Because the current planner has no
-dependency graph, continuation is conservative:
-
-- tasks with no overlap with the blocker requirement IDs continue;
-- synthesis/report-wide tasks may execute only from committed inputs but final
-  admission remains blocked;
-- tasks sharing affected hard requirement IDs remain blocked without execution.
+without the missing hard prerequisite. The runnable-task helper follows only
+`depends_on_task_ids`: a task continues when every dependency is committed or
+degraded; a task with a blocked dependency becomes `blocked_dependency`.
+Requirement overlap is used only to report affected contract scope, never to
+make scheduling decisions. `affected_task_ids` is the deterministic transitive
+closure of the blocker task through explicit dependency edges.
 
 A deterministic admission helper runs when the current graph would otherwise
 route to Summarizer. If unresolved blockers exist, it routes to the existing
@@ -269,6 +491,40 @@ IDs are persisted; unresolved blockers may be shown again only after a partial
 submission, never as duplicate records. Resuming never re-executes committed
 tasks.
 
+### Blocker resolution and affected-task resume
+
+Resolution is an explicit state transition, not a synonym for accepting an
+issue:
+
+- `UPLOAD_RESOURCES` ingests only the submitted resources, records their stable
+  resource IDs, changes the blocker to `retry_pending`, and schedules the
+  blocker task plus its explicit transitive dependents for re-execution. The
+  blocker becomes `resolved` only after the originating hard requirement passes
+  verification.
+- `MODIFY_REQUIREMENT` creates a new contract revision and appends the prior
+  requirement record to modification history. The stable requirement ID is
+  retained when text/severity changes; removal marks it `withdrawn`. Planner
+  revalidates task linkage and dependency edges against the new contract before
+  affected tasks resume. Only the explicitly affected task and its dependency
+  descendants are invalidated.
+- `APPROVE_EXCEPTION` is available only when the original contract explicitly
+  allows human approval/waiver. It records a user-authored hard-requirement
+  exception, resolves the blocker, and converts affected terminal output to a
+  visible warning. It is not the replacement for ordinary evidence-gap
+  acceptance.
+- `CANCEL_JOB` records the resolution and terminates the job without admitting
+  a report.
+
+Applying the same canonical resolution twice is idempotent through
+`resolution_id`. A conflicting second resolution is rejected rather than
+silently overwriting contract history. Unrelated committed/degraded tasks retain
+their results and revisions. Affected committed tasks are invalidated only when
+their input dependency or linked requirement actually changed. The scheduler
+selects the earliest affected task whose dependencies are again terminal; its
+descendants resume in dependency order. After verification, resolved blocker
+IDs are removed from pending projection but retained in the resolution audit
+registry.
+
 ## 9. UI behavior
 
 The blocker UI renders only `USER_DECISION_REQUIRED` entries. A consolidated
@@ -279,6 +535,10 @@ Available actions are determined per blocker:
 - adjust requirement only when contract modification is valid;
 - explicit approval only when the original requirement demands approval;
 - retry is not offered for internal transient/system failures.
+
+The legacy UI action `ADJUST_REQUIREMENT` is a compatibility alias for the
+canonical resolution action `MODIFY_REQUIREMENT`; persisted new resolution
+records always use the canonical action.
 
 Ordinary degradation appears as nonblocking warning/status text. The existing
 radio-based action selector pattern is retained for each real blocker. Legacy
@@ -301,13 +561,40 @@ user-approved incomplete drafts.
 the job/UI/history projection. No SQLite schema change is required because new
 LangGraph values are plain JSON/checkpoint-serializable structures.
 
-Every reader uses default-empty normalization for new fields. Compatibility
-tests cover old checkpoints with no requirement, failure, degradation, or
-blocker registries. Existing cursor-keyed retry counters continue to normalize
-to task IDs. Completed results, warnings, blockers, and resolutions are upserted
-by stable identity during resume.
+Every reader uses explicit compatibility normalization for new fields.
 
-Persistence exceptions outside graph execution are classified for UI/job
+For a legacy checkpoint without `requirement_registry`, normalization follows
+this order:
+
+1. Reconstruct canonical requirements from the latest persisted
+   `INTAKE_SUMMARY` when available. Assign deterministic `LEGACY-REQ-*` IDs,
+   persist them on the first successful state transition, and use provenance
+   `legacy_reconstructed`.
+2. Only unambiguous explicit hard markers and named mandatory user resources
+   reconstruct as hard. Other reconstructed requirements default to soft.
+3. If Intake authority is unavailable, create narrowly scoped
+   `LEGACY-TASK-*` requirements only for structural obligations already encoded
+   in task fields, such as a named `use_resources` entry or explicit
+   `generate_figure=True`. Provenance is `legacy_task_contract`. Semantic issue
+   prose is never used to invent a hard requirement.
+4. If neither source exists, use an empty registry. Existing committed results,
+   accepted waivers, and resolved blockers remain valid; a new issue cannot be
+   escalated to hard solely because legacy context is missing.
+
+For legacy tasks without `depends_on_task_ids`, preserve the historical serial
+contract by assigning each nonsynthesis task a dependency on the immediately
+preceding task and assigning synthesis a dependency on all preceding report
+tasks. This conservative chain prevents previously sequential work from being
+treated as newly independent. New Planner output must always carry explicit
+dependencies.
+
+Compatibility tests cover checkpoints with no requirement, dependency,
+failure, degradation, outcome, or blocker registries. Existing cursor-keyed
+retry counters continue to normalize to task IDs. Completed results, warnings,
+blockers, and resolutions are upserted by stable identity during resume.
+
+Persistence exceptions outside graph execution are runner-level
+`FATAL_SYSTEM`, as defined in Section 5. They are classified for UI/job
 projection when possible. If the checkpoint database itself is unavailable,
 the diagnostic is surfaced without pretending it was saved to the broken
 database.
@@ -356,18 +643,33 @@ coverage includes:
 12. degradation warnings appear in final report and UI;
 13. structured decision logs contain the required metadata and no sensitive
     bodies;
-14. the complete pre-existing suite remains green.
+14. new plans reject missing/unknown/cyclic dependencies and runtime scheduling
+    follows explicit dependency edges rather than requirement overlap;
+15. legacy plans receive conservative serial dependencies;
+16. legacy checkpoints reconstruct only authoritative requirements and never
+    promote issue prose to hard constraints;
+17. the same blocker across task revisions retains one blocker ID;
+18. upload, requirement modification, approval, duplicate resolution, and
+    affected-task resume follow the state transitions in Section 8;
+19. semantic Verifier exhaustion becomes `FATAL_SYSTEM /
+    VERIFIER_UNAVAILABLE`, not degradation or Human;
+20. graph-level fatal and runner-level persistence/stream fatal paths produce
+    their respective safe diagnostics without blocker forms;
+21. all registry records satisfy the exact schemas in Section 7;
+22. the complete pre-existing suite remains green.
 
 ## 14. Delivery sequence
 
 Implementation is split into independently testable phases:
 
 1. failure taxonomy and compatibility normalization;
-2. requirement registry and Planner requirement linkage;
+2. requirement registry, provenance, and Planner requirement/dependency
+   linkage;
 3. DecisionPolicy mapping and bounded terminal outcomes;
 4. degradation registry and local Evidence/Asset recovery boundaries;
 5. PlanPatcher route narrowing;
-6. consolidated blocker admission and resume;
+6. consolidated blocker admission, canonical resolution, and dependency-based
+   affected-task resume;
 7. UI and Summarizer projections;
 8. fatal-system handling, observability, compatibility tests, and documentation;
 9. full regression and branch integration.
