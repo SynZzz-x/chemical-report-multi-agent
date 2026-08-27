@@ -124,6 +124,22 @@ def test_update_patch_preserves_unaffected_results_and_cursor_progress():
     assert update["plan_revision"] == 2
 
 
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "EVIDENCE_GAP",
+        "MISSING_FIGURE",
+        "TOO_LONG",
+        "INVALID_CITATION_ID",
+        "FORMAT_ERROR",
+        "LLM_ERROR",
+    ],
+)
+def test_plan_patch_rejects_non_plan_failure_reason_codes(reason_code):
+    with pytest.raises(PatchValidationError, match="plan-defect reason_code"):
+        validate_plan_patch(patch_state(), update_patch(reason_code=reason_code))
+
+
 def test_update_patch_rejects_accepted_task_without_any_partial_mutation():
     state = patch_state(cursor=1, accepted_ids=["T1"])
     before = deepcopy(state)

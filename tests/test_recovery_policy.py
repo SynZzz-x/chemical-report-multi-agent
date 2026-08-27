@@ -768,7 +768,6 @@ def test_only_explicit_auto_fixable_codes_are_local_plan_defects():
     for code in (
         "CONTRADICTORY_REQUIREMENTS",
         "REQUIREMENTS_CONFLICT",
-        "UNEXECUTABLE_TASK",
         "BAD_PLAN",
         "INVALID_PLAN",
     ):
@@ -782,6 +781,7 @@ def test_only_explicit_auto_fixable_codes_are_local_plan_defects():
         "INVALID_TASK_ORDER",
         "MISSING_DEPENDENCY",
         "TASK_GRANULARITY",
+        "UNEXECUTABLE_TASK",
     ):
         assert (
             classify_assessment(assessment_with(code, None), state)

@@ -1,5 +1,6 @@
 from src.failure_semantics import FailureAction, FailureClass
 from src.recovery.policy import MAX_ASSET_RETRIES, decide_recovery_action
+import pytest
 
 
 def _state(
@@ -160,3 +161,50 @@ def test_issue_text_cannot_promote_unlinked_soft_requirement_to_hard():
 
     assert update["failure_decision"]["hard_requirement_ids"] == []
     assert update["failure_decision"]["failure_class"] == FailureClass.DEGRADABLE_QUALITY
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "MISSING_TASK",
+        "MISSING_DEPENDENCY",
+        "INVALID_TASK_ORDER",
+        "UNEXECUTABLE_TASK",
+        "TASK_CONFLICT",
+        "INVALID_TASK_DECOMPOSITION",
+    ],
+)
+def test_stable_plan_defects_alone_route_to_plan_patcher(code):
+    state = _state(code=code)
+    assessment = {
+        "status": "FAILED",
+        "issues": [{"code": code, "category": "LOCAL_PLAN_DEFECT"}],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["workflow_action"] == "PLAN_PATCH"
+    assert update["failure_decision"]["action"] == FailureAction.PATCH_PLAN
+
+
+@pytest.mark.parametrize(
+    "code,category",
+    [
+        ("EVIDENCE_GAP", "EVIDENCE_GAP"),
+        ("MISSING_FIGURE", "CONTENT_DEFECT"),
+        ("TOO_LONG", "CONTENT_DEFECT"),
+        ("INVALID_CITATION_ID", "EVIDENCE_GAP"),
+        ("FORMAT_ERROR", "CONTENT_DEFECT"),
+        ("LLM_ERROR", "VERIFIER_FAILURE"),
+    ],
+)
+def test_non_plan_failures_never_route_to_plan_patcher(code, category):
+    state = _state(code=code)
+    assessment = {
+        "status": "FAILED",
+        "issues": [{"code": code, "category": category}],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["workflow_action"] != "PLAN_PATCH"

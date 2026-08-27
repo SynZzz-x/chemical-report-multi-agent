@@ -10,7 +10,7 @@ from src.limits import MAX_PLAN_TASKS
 from src.task_contract import synthesis_semantic_error, task_allows_web
 from src.tool_names import canonical_tool_name
 
-from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES
+from .policy import MAX_JOB_PATCHES, MAX_TASK_PATCHES, PLAN_PATCH_SUBTYPES
 
 
 class PatchValidationError(ValueError):
@@ -507,7 +507,11 @@ def _validated_patch(state: Mapping[str, Any], patch: Mapping[str, Any]) -> Dict
     if base_plan_revision != plan_revision:
         raise PatchValidationError("base_plan_revision does not match the current plan")
 
-    reason_code = _require_nonempty_string(patch, "reason_code")
+    reason_code = _require_nonempty_string(patch, "reason_code").upper()
+    if reason_code not in PLAN_PATCH_SUBTYPES:
+        raise PatchValidationError(
+            f"reason_code must be a stable plan-defect reason_code: {reason_code}"
+        )
     reason = _require_nonempty_string(patch, "reason")
     expected_resolution = _require_nonempty_string(patch, "expected_resolution")
     resource_aliases = _resource_aliases(state)
