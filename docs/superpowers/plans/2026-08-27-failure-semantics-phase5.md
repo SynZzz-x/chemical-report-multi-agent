@@ -1,6 +1,6 @@
 # Failure Semantics vNext — Phase 5 Implementation Plan
 
-**Status:** In progress  
+**Status:** Completed
 **Scope:** PlanPatcher route narrowing.
 
 ## TDD sequence

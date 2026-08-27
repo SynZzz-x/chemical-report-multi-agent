@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from enum import Enum
 from hashlib import sha256
+import logging
 from os.path import basename
 from typing import Any, Dict, List
 
@@ -13,6 +14,7 @@ from src.failure_semantics import (
     FailureAction,
     FailureClass,
     validate_failure_action_pair,
+    normalize_failure_state,
 )
 from src.failure_registry import build_degraded_issue, upsert_degraded_issue
 from src.blocker_registry import (
@@ -21,6 +23,7 @@ from src.blocker_registry import (
     runnable_task_ids,
     upsert_user_blocker,
 )
+from src.requirements import reconstruct_legacy_requirements
 from src.evidence_waivers import (
     is_waivable_evidence_gap,
     matching_evidence_gap_acceptance,
@@ -37,6 +40,9 @@ from src.report_acceptance import (
 from src.report_validation import parse_length_target, safe_deterministic_trim
 from src.tool_capabilities import public_web_runtime_available
 from src.task_contract import effective_web_allowed
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowAction(str, Enum):
@@ -286,6 +292,38 @@ def _set_decision(
     update["failure_decision"] = canonical
     if canonical["failure_class"] == FailureClass.USER_DECISION_REQUIRED.value:
         _register_user_blocker(update, state, assessment, canonical)
+    degraded_issue_id = next(
+        (
+            str(issue.get("issue_id") or "")
+            for issue in reversed(update.get("degraded_issue_registry") or [])
+            if isinstance(issue, Mapping) and issue.get("status") == "active"
+        ),
+        "-",
+    )
+    blocker_id = next(
+        (
+            str(blocker.get("blocker_id") or "")
+            for blocker in reversed(update.get("pending_user_blockers") or [])
+            if isinstance(blocker, Mapping)
+            and str(blocker.get("status") or "") in {"pending", "retry_pending"}
+        ),
+        "-",
+    )
+    logger.info(
+        "FAILURE_POLICY_DECISION task_id=%s failure_class=%s subtype=%s "
+        "policy_action=%s repair_attempt=%s repair_budget=%s "
+        "degraded_issue_id=%s blocker_id=%s requirement_id=%s hard_or_soft=%s",
+        canonical.get("task_id") or "-",
+        canonical.get("failure_class") or "-",
+        canonical.get("subtype") or "-",
+        canonical.get("action") or "-",
+        canonical.get("repair_attempt", 0),
+        canonical.get("repair_budget", 0),
+        degraded_issue_id,
+        blocker_id,
+        ",".join(canonical.get("requirement_ids") or []) or "-",
+        "hard" if canonical.get("hard_requirement_ids") else "soft",
+    )
     return update
 
 
@@ -1134,6 +1172,10 @@ def _fatal_verifier_update(
 
 def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) -> Dict[str, Any]:
     """Choose a bounded recovery action without invoking models or graph nodes."""
+    had_requirement_registry = isinstance(state.get("requirement_registry"), list)
+    state = normalize_failure_state(state)
+    if not had_requirement_registry:
+        state["requirement_registry"] = reconstruct_legacy_requirements(state)
     task_id = _current_task_id(state)
     task_retry_count = _counter_update(state, "task_retry_count")
     asset_retry_count = _counter_update(state, "asset_retry_count")
@@ -1158,6 +1200,16 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         "pending_user_action": {},
         "failure_decision": {},
         "fatal_system_error": {},
+        "requirement_registry": deepcopy(state.get("requirement_registry") or []),
+        "degraded_issue_registry": deepcopy(state.get("degraded_issue_registry") or []),
+        "pending_user_blockers": deepcopy(state.get("pending_user_blockers") or []),
+        "blocker_resolution_registry": deepcopy(
+            state.get("blocker_resolution_registry") or []
+        ),
+        "resolved_user_blocker_ids": list(
+            state.get("resolved_user_blocker_ids") or []
+        ),
+        "task_outcome_registry": deepcopy(state.get("task_outcome_registry") or {}),
         "verification_warnings": list(state.get("verification_warnings") or []),
     }
 

@@ -41,6 +41,7 @@ from src.control_messages import (
     validate_blocker_submission,
 )
 from src.graph import WorkFlow, WorkFlowAuto
+from src.fatal_errors import build_fatal_system_error
 from src.job_store import JobStore, interrupt_from_snapshot
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
@@ -73,7 +74,14 @@ try:
     PERSISTENCE = _open_persistence()
     JOBS = JobStore(PERSISTENCE.store)
 except Exception as exc:
-    st.error(f"无法初始化 LangGraph SQLite 持久化：{exc}")
+    fatal = build_fatal_system_error(
+        exc,
+        origin="runner",
+        component="SQLitePersistence",
+        operation="open",
+        task_id=None,
+    )
+    st.error(f"无法初始化持久化服务（诊断码：{fatal['diagnostic_code']}）。")
     st.stop()
 
 
@@ -507,23 +515,31 @@ def _message_id(message: Any, node: str, content: str) -> str:
 def _recover_stream_failure(
     app: Any,
     config: dict[str, Any],
-    fallback_interrupt: Any | None,
-) -> None:
-    try:
-        snapshot = app.get_state(config)
-        recovered_interrupt = interrupt_from_snapshot(snapshot)
-    except Exception:
-        recovered_interrupt = fallback_interrupt
-
+    error: BaseException,
+) -> dict[str, Any]:
+    fatal = build_fatal_system_error(
+        error,
+        origin="runner",
+        component="StreamlitRunner",
+        operation="graph_stream",
+        task_id=None,
+        metadata={"job_id": str(_scope().get("job_id") or "")},
+    )
     st.session_state["last_run_failed"] = True
-    st.session_state["pending_interrupt"] = recovered_interrupt
-    if recovered_interrupt is not None:
-        _update_job(
-            status="waiting",
-            pending_interrupt=recovered_interrupt,
-        )
-    else:
-        _update_job(status="failed", pending_interrupt=None)
+    st.session_state["pending_interrupt"] = None
+    _update_job(
+        status="failed",
+        pending_interrupt=None,
+        fatal_system_error=fatal,
+    )
+    logger.error(
+        "RUNNER_FATAL failure_id=%s component=%s operation=%s error_type=%s",
+        fatal["failure_id"],
+        fatal["component"],
+        fatal["operation"],
+        fatal["subtype"],
+    )
+    return fatal
 
 
 def _safe_stream_updates(
@@ -536,12 +552,12 @@ def _safe_stream_updates(
     try:
         yield from app.stream(stream_input, config, stream_mode="updates")
     except RuntimeError as exc:
-        _recover_stream_failure(app, config, fallback_interrupt)
-        st.error(str(exc))
+        fatal = _recover_stream_failure(app, config, exc)
+        st.error(f"系统执行失败（诊断码：{fatal['diagnostic_code']}）。")
         st.info(missing_key_message("DEEPSEEK_API_KEY"))
     except Exception as exc:
-        _recover_stream_failure(app, config, fallback_interrupt)
-        st.exception(exc)
+        fatal = _recover_stream_failure(app, config, exc)
+        st.error(f"系统执行失败（诊断码：{fatal['diagnostic_code']}）。")
 
 
 def _handle_interrupt(update: dict[str, Any]) -> bool:

@@ -1,6 +1,6 @@
 # Failure Semantics vNext — Phase 3 Implementation Plan
 
-**Status:** In progress  
+**Status:** Completed
 **Scope:** DecisionPolicy mapping and bounded terminal outcomes only.
 
 ## Goal

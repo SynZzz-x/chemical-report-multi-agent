@@ -338,9 +338,6 @@ def build_consolidated_blocker_resume_payload(
         if action == "ADJUST_REQUIREMENT":
             action = "MODIFY_REQUIREMENT"
         text = str(submission.get("text") or "").strip()
-        error = validate_blocker_submission(action, text, len(docs))
-        if error:
-            raise ValueError(error)
         resolution: dict[str, Any] = {
             "blocker_id": blocker_id,
             "action": action,
@@ -358,6 +355,9 @@ def build_consolidated_blocker_resume_payload(
                 or str(doc.get("original_name") or doc.get("name") or "").strip()
                 in selected_names
             ]
+            error = validate_blocker_submission(action, text, len(selected_docs))
+            if error:
+                raise ValueError(error)
             resolution["resource_ids"] = [
                 str(
                     doc.get("file_id")
@@ -375,6 +375,9 @@ def build_consolidated_blocker_resume_payload(
                 ).strip()
             ]
         elif action == "MODIFY_REQUIREMENT":
+            error = validate_blocker_submission(action, text, len(docs))
+            if error:
+                raise ValueError(error)
             requirement_id = str(submission.get("requirement_id") or "").strip()
             if not requirement_id:
                 raise ValueError("调整要求必须关联 requirement_id。")
@@ -382,6 +385,10 @@ def build_consolidated_blocker_resume_payload(
                 "requirement_id": requirement_id,
                 "new_text": text,
             }
+        else:
+            error = validate_blocker_submission(action, text, len(docs))
+            if error:
+                raise ValueError(error)
         resolutions.append(resolution)
     return {
         "message_id": str(message_id),

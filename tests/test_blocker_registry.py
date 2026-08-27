@@ -158,12 +158,18 @@ def test_requirement_modification_retains_id_and_increments_contract_revision():
 
 def test_approval_requires_explicit_contract_authority():
     state = _state()
+    state["pending_user_blockers"][0]["available_options"].insert(
+        -1, "APPROVE_EXCEPTION"
+    )
     blocker_id = state["pending_user_blockers"][0]["blocker_id"]
 
     with pytest.raises(ValueError, match="does not allow approval"):
         apply_blocker_resolution(state, blocker_id=blocker_id, action="APPROVE_EXCEPTION")
 
     allowed = _state(requirement=_requirement(allow_exception=True))
+    allowed["pending_user_blockers"][0]["available_options"].insert(
+        -1, "APPROVE_EXCEPTION"
+    )
     update = apply_blocker_resolution(allowed, blocker_id=blocker_id, action="APPROVE_EXCEPTION")
     assert update["pending_user_blockers"][0]["status"] == "resolved"
     assert update["resolved_user_blocker_ids"] == [blocker_id]
@@ -192,6 +198,26 @@ def test_duplicate_resolution_is_idempotent_and_conflict_is_rejected():
             blocker_id=blocker_id,
             action="MODIFY_REQUIREMENT",
             requirement_update={"requirement_id": "REQ-001", "new_text": "changed"},
+        )
+
+
+def test_resolution_cannot_escape_blocker_action_or_requirement_scope():
+    state = _state()
+    blocker_id = state["pending_user_blockers"][0]["blocker_id"]
+
+    with pytest.raises(ValueError, match="not available"):
+        apply_blocker_resolution(
+            state, blocker_id=blocker_id, action="APPROVE_EXCEPTION"
+        )
+    with pytest.raises(ValueError, match="outside blocker scope"):
+        apply_blocker_resolution(
+            state,
+            blocker_id=blocker_id,
+            action="MODIFY_REQUIREMENT",
+            requirement_update={
+                "requirement_id": "REQ-OTHER",
+                "new_text": "not allowed",
+            },
         )
 
 

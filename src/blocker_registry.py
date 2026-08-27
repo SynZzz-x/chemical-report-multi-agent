@@ -125,7 +125,13 @@ def build_user_blocker(
         "affected_task_ids": [str(value) for value in affected_task_ids],
         "reason": str(reason),
         "required_user_action": normalized_subtype,
-        "available_options": list(dict.fromkeys(_strings(available_options))),
+        "available_options": list(
+            dict.fromkeys(
+                str(option).strip()
+                for option in available_options
+                if str(option).strip()
+            )
+        ),
         "attempted_repairs": deepcopy(attempted_repairs),
         "metadata": dict(metadata or {}),
     }
@@ -237,7 +243,14 @@ def apply_blocker_resolution(
     if blocker_index is None:
         raise ValueError(f"unknown blocker: {blocker_id}")
     blocker = blockers[blocker_index]
+    available_options = {
+        str(option).upper() for option in blocker.get("available_options") or []
+    }
+    if normalized_action not in available_options:
+        raise ValueError("resolution action is not available for this blocker")
     normalized_resources = _strings(resource_ids)
+    if normalized_action == "UPLOAD_RESOURCES" and not normalized_resources:
+        raise ValueError("UPLOAD_RESOURCES requires at least one resource")
     canonical_update = dict(requirement_update or {})
     resolution_id = _digest(
         "resolution-",
@@ -267,6 +280,11 @@ def apply_blocker_resolution(
         or [1]
     )
     if normalized_action == "MODIFY_REQUIREMENT":
+        requested_requirement_id = str(
+            canonical_update.get("requirement_id") or ""
+        ).strip()
+        if requested_requirement_id not in set(blocker.get("requirement_ids") or []):
+            raise ValueError("requirement modification is outside blocker scope")
         requirements, modification, contract_revision = _requirement_modification(
             requirements, canonical_update
         )

@@ -1,6 +1,6 @@
 # Failure Semantics vNext — Phase 4 Implementation Plan
 
-**Status:** In progress  
+**Status:** Completed
 **Scope:** Degradation registry and local Evidence/Asset recovery boundaries.
 
 ## TDD sequence

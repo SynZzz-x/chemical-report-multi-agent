@@ -1,6 +1,6 @@
 # Failure Semantics vNext — Phase 6 Implementation Plan
 
-**Status:** In progress  
+**Status:** Completed
 **Scope:** Consolidated blocker admission, canonical resolution, and explicit
 dependency-based affected-task resume.
 

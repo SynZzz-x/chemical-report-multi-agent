@@ -1,5 +1,7 @@
 # Failure Semantics Phase 2 Implementation Plan
 
+**Status:** Completed
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Persist canonical requirement provenance and require every new Planner task to declare requirement linkage and explicit task dependencies.

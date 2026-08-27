@@ -9,6 +9,7 @@ from typing import Any
 from langgraph.types import Command
 
 from src.graph import WorkFlow, WorkFlowAuto
+from src.fatal_errors import build_fatal_system_error
 from src.config import (
     configure_langsmith_from_env,
     get_local_user_id,
@@ -171,7 +172,24 @@ def main():
         ]
     )
 
-    persistence = SQLitePersistence.open()
+    try:
+        persistence = SQLitePersistence.open()
+    except Exception as exc:
+        fatal = build_fatal_system_error(
+            exc,
+            origin="runner",
+            component="SQLitePersistence",
+            operation="open",
+            task_id=None,
+            metadata={"job_id": thread_id},
+        )
+        logger.error(
+            "RUNNER_FATAL failure_id=%s diagnostic_code=%s error_type=%s",
+            fatal["failure_id"],
+            fatal["diagnostic_code"],
+            fatal["subtype"],
+        )
+        return
     try:
         jobs = JobStore(persistence.store)
         existing_job = jobs.get_job(user_id, thread_id)
@@ -269,44 +287,38 @@ def main():
         if is_interrupted:
             logger.info(f"[System] Restored pending interrupt: {last_interrupt_value}")
 
-        def recover_after_failure(previous_interrupt):
+        def recover_after_failure(error: BaseException):
             nonlocal is_interrupted, last_interrupt_value
-
-            recovered_snapshot = None
-            try:
-                recovered_snapshot = app.get_state(config)
-                recovered = interrupt_from_snapshot(recovered_snapshot)
-            except Exception as state_exc:
-                logger.error(
-                    f"[Recovery Error] Could not reload checkpoint state: {state_exc}"
-                )
-                recovered = (
-                    last_interrupt_value
-                    if is_interrupted
-                    else previous_interrupt
-                )
-
-            is_interrupted = recovered is not None
-            last_interrupt_value = recovered
+            fatal = build_fatal_system_error(
+                error,
+                origin="runner",
+                component="CLIRunner",
+                operation="graph_stream",
+                task_id=None,
+                metadata={"job_id": thread_id},
+            )
+            is_interrupted = False
+            last_interrupt_value = None
             if not job_record_created:
+                logger.error(
+                    "RUNNER_FATAL failure_id=%s diagnostic_code=%s error_type=%s",
+                    fatal["failure_id"],
+                    fatal["diagnostic_code"],
+                    fatal["subtype"],
+                )
                 return
 
             try:
-                if is_interrupted:
-                    persist_projection(
-                        recovered_snapshot,
-                        status="waiting",
-                        pending_interrupt=last_interrupt_value,
-                    )
-                else:
-                    persist_projection(
-                        recovered_snapshot,
-                        status="failed",
-                        pending_interrupt=None,
-                    )
+                persist_projection(
+                    None,
+                    status="failed",
+                    pending_interrupt=None,
+                    fatal_system_error=fatal,
+                )
             except Exception as store_exc:
                 logger.error(
-                    f"[Persistence Error] Could not save failure state: {store_exc}"
+                    "[Persistence Error] Could not save runner fatal state: error_type=%s",
+                    type(store_exc).__name__,
                 )
 
         while True:
@@ -321,11 +333,6 @@ def main():
             if not user_input:
                 continue
 
-            previous_interrupt = (
-                last_interrupt_value
-                if is_interrupted
-                else None
-            )
             user_ui_message = {
                 "id": f"cli_user_{uuid.uuid4().hex}",
                 "role": "user",
@@ -421,12 +428,12 @@ def main():
                             f"\n[System] Interrupted! Value: {last_interrupt_value}"
                         )
             except RuntimeError as exc:
-                recover_after_failure(previous_interrupt)
-                logger.error(f"\n[Config Error] {exc}")
+                recover_after_failure(exc)
+                logger.error("[Config Error] error_type=%s", type(exc).__name__)
                 logger.error(missing_key_message("DEEPSEEK_API_KEY"))
             except Exception as exc:
-                recover_after_failure(previous_interrupt)
-                logger.error(f"\n[Error] {exc}")
+                recover_after_failure(exc)
+                logger.error("[Runner Error] error_type=%s", type(exc).__name__)
             else:
                 completed_snapshot = None
                 try:
