@@ -13,6 +13,7 @@ from src.failure_semantics import (
     FailureClass,
     validate_failure_action_pair,
 )
+from src.failure_registry import build_degraded_issue, upsert_degraded_issue
 from src.evidence_waivers import (
     is_waivable_evidence_gap,
     matching_evidence_gap_acceptance,
@@ -717,6 +718,56 @@ def _commit_degraded_result(
         )
     ]
     warnings.append(warning)
+    subtype = _assessment_subtype(assessment, warning_code)
+    requirement_ids, _ = _requirement_scope(state, assessment)
+    affected_claims = [
+        claim
+        for issue in assessment.get("issues") or []
+        if isinstance(issue, Mapping)
+        for claim in issue.get("affected_claims") or []
+    ]
+    if subtype in _EVIDENCE_CODES:
+        repair_type = FailureAction.RECOVER_EVIDENCE.value
+        attempt = _normalise_counter(state.get("evidence_recovery_count"), state).get(
+            task_id, 0
+        )
+        budget = MAX_EVIDENCE_RECOVERIES
+    elif subtype in _ASSET_ISSUE_CODES:
+        repair_type = FailureAction.RECOVER_ASSET.value
+        attempt = _normalise_counter(state.get("asset_retry_count"), state).get(
+            task_id, 0
+        )
+        budget = MAX_ASSET_RETRIES
+    elif subtype in {"TOO_SHORT", "TOO_LONG"}:
+        repair_type = FailureAction.REPAIR_CONTRACT.value
+        attempt = 1
+        budget = 1
+    else:
+        repair_type = FailureAction.RETRY_TASK.value
+        attempt = _normalise_counter(state.get("task_retry_count"), state).get(
+            task_id, 0
+        )
+        budget = MAX_CONTENT_RETRIES
+    task_revision = _normalise_counter(state.get("task_revisions"), state).get(
+        task_id, 1
+    )
+    degraded_record = build_degraded_issue(
+        task_id=task_id,
+        task_revision=task_revision,
+        subtype=subtype,
+        affected_claims=affected_claims,
+        affected_requirement_ids=requirement_ids,
+        attempted_repairs=[
+            {
+                "repair_type": repair_type,
+                "attempt": attempt,
+                "budget": budget,
+                "outcome": "exhausted",
+                "diagnostic_code": subtype,
+            }
+        ],
+        final_fallback="commit_supported_content_with_warning",
+    )
     statuses = record_section_status(
         state,
         ACCEPT_WITH_WARNING,
@@ -730,6 +781,9 @@ def _commit_degraded_result(
             "verification_warning": warning,
             "verification_warnings": warnings,
             "pending_user_action": {},
+            "degraded_issue_registry": upsert_degraded_issue(
+                state.get("degraded_issue_registry") or [], degraded_record
+            ),
             "section_status": statuses,
             "report_status": derive_report_status(state.get("tasks") or [], statuses),
         }
