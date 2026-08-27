@@ -4,6 +4,16 @@ from typing import Annotated, Any, Dict, List, Literal, TypedDict
 
 from langgraph.graph.message import BaseMessage, add_messages
 
+from .failure_semantics import (
+    BlockerResolutionRecord,
+    DegradedIssueRecord,
+    FailureDecision,
+    FatalSystemError,
+    RequirementRecord,
+    TaskOutcomeRecord,
+    UserBlockerRecord,
+)
+
 
 def merge_docs(
     existing: List[Dict[str, Any]] | None,
@@ -122,6 +132,17 @@ class State(TypedDict, total=False):
     full_replan_reason: str
     full_replan_candidate_tasks: List[Dict[str, Any]]
     task_id_registry: List[str]
+
+    # Recovery vNext compatibility fields. State remains total=False so legacy
+    # checkpoints may omit them and normalize through failure_semantics.
+    requirement_registry: List[RequirementRecord]
+    failure_decision: FailureDecision
+    degraded_issue_registry: List[DegradedIssueRecord]
+    pending_user_blockers: List[UserBlockerRecord]
+    blocker_resolution_registry: List[BlockerResolutionRecord]
+    resolved_user_blocker_ids: List[str]
+    task_outcome_registry: Dict[str, TaskOutcomeRecord]
+    fatal_system_error: FatalSystemError
 
 
 class ConfigSchema(TypedDict, total=False):

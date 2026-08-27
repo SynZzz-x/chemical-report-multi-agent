@@ -1,7 +1,7 @@
 # Failure Semantics / Recovery vNext Design
 
 **Date:** 2026-08-27
-**Status:** Approved direction, pending written-spec review
+**Status:** Approved for implementation
 
 ## 1. Goal and scope
 
