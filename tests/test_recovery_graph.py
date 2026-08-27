@@ -135,7 +135,7 @@ def test_length_policy_creates_structured_execution_feedback():
     assert update["worker_state"]["retained"] is True
 
 
-def test_retry_exhaustion_routes_to_user_input_instead_of_continuing():
+def test_soft_retry_exhaustion_commits_warning_and_continues():
     state = graph_state(
         task_retry_count={"T2": 2},
         assessment={
@@ -146,10 +146,11 @@ def test_retry_exhaustion_routes_to_user_input_instead_of_continuing():
 
     update = decision_policy(state, {})
 
-    assert update["workflow_action"] == "NEEDS_USER_INPUT"
-    assert route_policy({**state, **update}) == "NEEDS_USER_INPUT"
+    assert update["workflow_action"] == "NEXT"
+    assert route_policy({**state, **update}) == "NEXT"
     assert update["section_status"]["T2"]["status"] == "ACCEPT_WITH_WARNING"
     assert [result["task_id"] for result in state["results"]] == ["T1"]
+    assert [result["task_id"] for result in update["results"]] == ["T1", "T2"]
 
 
 def test_evidence_recovery_builds_query_and_honors_task_web_gate():
@@ -1573,12 +1574,13 @@ def test_synthesis_contract_exhaustion_never_routes_to_synthesis_rewrite():
 
     update = decision_policy(state, {})
 
-    assert update["workflow_action"] == "NEEDS_USER_INPUT"
-    assert route_policy({**state, **update}) == "NEEDS_USER_INPUT"
+    assert update["workflow_action"] == "FATAL_SYSTEM"
+    assert route_policy({**state, **update}) == "FATAL_SYSTEM"
     assert update["task_retry_count"] == {"T3": 1}
     assert update["verifier_retry_count"] == {"T3": 2}
     assert "worker_state" not in update
-    assert update["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+    assert update["pending_user_action"] == {}
+    assert update["fatal_system_error"]["subtype"] == "VERIFIER_UNAVAILABLE"
 
 
 def test_legacy_mixed_synthesis_contract_error_only_retries_verifier():

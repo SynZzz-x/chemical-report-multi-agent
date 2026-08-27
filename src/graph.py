@@ -162,6 +162,7 @@ class WorkFlowBase(StateGraph):
                     "PLAN_PATCH": "PlanPatcher",
                     "NEEDS_USER_INPUT": "NeedsUserInput",
                     "RETRY_VERIFIER": "Verifier",
+                    "FATAL_SYSTEM": "Exit",
                 },
             )
 

@@ -31,6 +31,8 @@ def recovery_state(
                 "use_rag": use_rag,
                 "use_web": False,
                 "use_resources": task_resources or [],
+                "requirement_ids": ["REQ-001"],
+                "depends_on_task_ids": [],
             }
         ],
         "cursor": 0,
@@ -45,6 +47,23 @@ def recovery_state(
         "asset_retry_count": dict(asset_retry_count or {}),
         "job_patch_count": job_patch_count,
         "verification_warnings": [],
+        "requirement_registry": [
+            {
+                "requirement_id": "REQ-001",
+                "text": "测试中的显式硬约束",
+                "severity": "hard",
+                "kind": "test_contract",
+                "status": "active",
+                "contract_revision": 1,
+                "provenance": {
+                    "origin": "explicit_user",
+                    "source_message_id": "test-message",
+                    "source_field": "constraints",
+                    "source_index": 0,
+                    "derivation": "test_fixture",
+                },
+            }
+        ],
     }
 
 
@@ -235,7 +254,7 @@ def test_evidence_gap_without_authorized_retrieval_requires_user_input_immediate
     assert "未授权可执行的证据检索能力" in decision["pending_user_action"]["guidance"]
 
 
-def test_verifier_failure_blocker_never_offers_ambiguous_next_action():
+def test_verifier_failure_exhaustion_is_fatal_without_blocker_actions():
     state = recovery_state(
         task_id="T1",
         verifier_retry_count={"T1": 1},
@@ -246,12 +265,9 @@ def test_verifier_failure_blocker_never_offers_ambiguous_next_action():
         assessment_with("LLM_ERROR", "VERIFIER_FAILURE"),
     )
 
-    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
-    assert decision["pending_user_action"]["accepted_choices"] == [
-        "RETRY_VERIFIER",
-        "DONE",
-    ]
-    assert "NEXT" not in decision["pending_user_action"]["accepted_choices"]
+    assert decision["workflow_action"] == "FATAL_SYSTEM"
+    assert decision["pending_user_action"] == {}
+    assert decision["fatal_system_error"]["subtype"] == "VERIFIER_UNAVAILABLE"
 
 
 def test_exhausted_verifier_execution_failure_precedes_semantic_assessment():
@@ -277,18 +293,16 @@ def test_exhausted_verifier_execution_failure_precedes_semantic_assessment():
         assessment_with("TOO_SHORT", "CONTENT_DEFECT"),
     )
 
-    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["workflow_action"] == "FATAL_SYSTEM"
     assert decision["task_retry_count"] == {"T1": 1}
     assert decision["asset_retry_count"] == {"T1": 1}
     assert decision["evidence_recovery_count"] == {"T1": 1}
     assert decision["task_patch_count"] == {"T1": 1}
     assert decision["job_patch_count"] == 2
-    assert decision["pending_user_action"]["issues"][0]["code"] == (
+    assert decision["pending_user_action"] == {}
+    assert decision["fatal_system_error"]["diagnostic_code"] == (
         "VERIFIER_UNAVAILABLE"
     )
-    assert "自动校验器本身未能产生合法校验结果" in decision[
-        "pending_user_action"
-    ]["guidance"]
 
 
 def test_content_and_waivable_evidence_gap_can_be_explicitly_accepted_as_draft():
@@ -341,7 +355,7 @@ def test_content_and_integrity_issue_cannot_be_accepted_as_draft(integrity_code)
     "integrity_code",
     ["INVALID_CITATION_ID", "MISSING_INLINE_CITATION", "SOURCE_UNSUPPORTED"],
 )
-def test_verifier_failure_and_integrity_issue_cannot_be_accepted_as_draft(
+def test_verifier_failure_and_integrity_issue_is_fatal_without_draft_action(
     integrity_code,
 ):
     state = recovery_state(
@@ -355,11 +369,9 @@ def test_verifier_failure_and_integrity_issue_cannot_be_accepted_as_draft(
 
     decision = decide_recovery_action(state, assessment)
 
-    assert decision["pending_user_action"]["category"] == "VERIFIER_FAILURE"
-    assert "ACCEPT_AS_DRAFT" not in decision["pending_user_action"][
-        "accepted_choices"
-    ]
-    assert "带风险草稿" not in decision["pending_user_action"]["guidance"]
+    assert decision["workflow_action"] == "FATAL_SYSTEM"
+    assert decision["pending_user_action"] == {}
+    assert decision["failure_decision"]["subtype"] == "VERIFIER_UNAVAILABLE"
 
 
 def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeypatch):
@@ -592,7 +604,7 @@ def test_numeric_string_that_is_a_real_task_id_is_not_treated_as_a_cursor():
         (
             "verifier_retry_count",
             assessment_with("ASSESSMENT_CONTRACT_ERROR", "VERIFIER_FAILURE"),
-            WorkflowAction.NEEDS_USER_INPUT,
+            WorkflowAction.FATAL_SYSTEM,
         ),
     ],
 )

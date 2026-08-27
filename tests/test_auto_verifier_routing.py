@@ -407,7 +407,7 @@ def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
         "contract_attempts": 2,
     }
     assert update["verifier_retry_count"] == {"T1": 1}
-    assert decision["workflow_action"] == "NEEDS_USER_INPUT"
+    assert decision["workflow_action"] == "FATAL_SYSTEM"
     assert decision["task_retry_count"] == state["task_retry_count"]
     assert decision["asset_retry_count"] == state["asset_retry_count"]
     assert decision["evidence_recovery_count"] == state["evidence_recovery_count"]
@@ -415,10 +415,8 @@ def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
     assert decision["job_patch_count"] == state["job_patch_count"]
     assert "results" not in decision
     assert "worker_state" not in decision
-    assert decision["pending_user_action"]["category"] == "VERIFIER_FAILURE"
-    assert "自动校验器本身未能产生合法校验结果" in decision[
-        "pending_user_action"
-    ]["guidance"]
+    assert decision["pending_user_action"] == {}
+    assert decision["fatal_system_error"]["subtype"] == "VERIFIER_UNAVAILABLE"
 
 
 def test_contract_validation_logs_exclude_invalid_input_values(
@@ -1130,8 +1128,8 @@ def test_verifier_service_failures_retry_verifier_once_then_require_user_input(
     assert first["workflow_action"] == "RETRY_VERIFIER"
     assert first["verifier_retry_count"] == {"T1": 1}
     assert first["task_retry_count"] == {"T1": 1}
-    assert second["workflow_action"] == "NEEDS_USER_INPUT"
-    assert second["pending_user_action"]["category"] == "VERIFIER_FAILURE"
+    assert second["workflow_action"] == "FATAL_SYSTEM"
+    assert second["pending_user_action"] == {}
     assert second["task_retry_count"] == {"T1": 1}
     assert "results" not in second
     assert state["results"] == original_results
@@ -1175,7 +1173,7 @@ def test_assessment_contract_error_never_consumes_worker_content_retries():
     assert sanitized["issues"][0]["category"] == "VERIFIER_FAILURE"
     assert first["workflow_action"] == "RETRY_VERIFIER"
     assert first["task_retry_count"] == state["task_retry_count"]
-    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["workflow_action"] == "FATAL_SYSTEM"
     assert second["task_retry_count"] == state["task_retry_count"]
 
 
@@ -1216,7 +1214,7 @@ def test_malformed_assessment_collections_use_bounded_verifier_retry_only(
     ]
     assert first["workflow_action"] == "RETRY_VERIFIER"
     assert first["task_retry_count"] == state["task_retry_count"]
-    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["workflow_action"] == "FATAL_SYSTEM"
     assert second["task_retry_count"] == state["task_retry_count"]
 
 
@@ -1265,7 +1263,7 @@ def test_malformed_assessment_elements_fail_the_entire_contract(
     assert sanitized["issues"][0]["category"] == "VERIFIER_FAILURE"
     assert first["workflow_action"] == "RETRY_VERIFIER"
     assert first["task_retry_count"] == state["task_retry_count"]
-    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert second["workflow_action"] == "FATAL_SYSTEM"
     assert second["task_retry_count"] == state["task_retry_count"]
 
 

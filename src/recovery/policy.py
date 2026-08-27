@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from enum import Enum
+from hashlib import sha256
 from os.path import basename
 from typing import Any, Dict, List
 
+from src.failure_semantics import (
+    FailureAction,
+    FailureClass,
+    validate_failure_action_pair,
+)
 from src.evidence_waivers import (
     is_waivable_evidence_gap,
     matching_evidence_gap_acceptance,
@@ -38,6 +44,7 @@ class WorkflowAction(str, Enum):
     RETRY_VERIFIER = "RETRY_VERIFIER"
     LENGTH_REWRITE = "LENGTH_REWRITE"
     SYNTHESIS_REWRITE = "SYNTHESIS_REWRITE"
+    FATAL_SYSTEM = "FATAL_SYSTEM"
 
 
 class IssueCategory(str, Enum):
@@ -163,6 +170,103 @@ def _current_task_id(state: Dict[str, Any]) -> str:
     if task_id is not None:
         return str(task_id)
     return str(int(state.get("cursor", 0) or 0))
+
+
+def _assessment_subtype(assessment: Mapping[str, Any], default: str) -> str:
+    for issue in assessment.get("issues") or []:
+        if not isinstance(issue, Mapping):
+            continue
+        code = str(issue.get("code") or "").strip().upper()
+        if code:
+            return code
+    return default
+
+
+def _requirement_scope(
+    state: Mapping[str, Any], assessment: Mapping[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Resolve severity from explicit task/registry linkage, never issue prose."""
+
+    task_requirement_ids = {
+        str(requirement_id).strip()
+        for requirement_id in _current_task(state).get("requirement_ids") or []
+        if str(requirement_id).strip()
+    }
+    issue_requirement_ids = {
+        str(requirement_id).strip()
+        for issue in assessment.get("issues") or []
+        if isinstance(issue, Mapping)
+        for requirement_id in issue.get("requirement_ids") or []
+        if str(requirement_id).strip()
+    }
+    affected = (
+        task_requirement_ids & issue_requirement_ids
+        if issue_requirement_ids
+        else task_requirement_ids
+    )
+    active_registry = {
+        str(requirement.get("requirement_id") or "").strip(): requirement
+        for requirement in state.get("requirement_registry") or []
+        if isinstance(requirement, Mapping)
+        and str(requirement.get("requirement_id") or "").strip()
+        and str(requirement.get("status") or "active") == "active"
+    }
+    requirement_ids = sorted(
+        requirement_id
+        for requirement_id in affected
+        if requirement_id in active_registry
+    )
+    hard_requirement_ids = [
+        requirement_id
+        for requirement_id in requirement_ids
+        if str(active_registry[requirement_id].get("severity") or "soft") == "hard"
+    ]
+    return requirement_ids, hard_requirement_ids
+
+
+def _failure_decision(
+    state: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    *,
+    failure_class: FailureClass,
+    action: FailureAction,
+    subtype: str | None = None,
+    repair_attempt: int = 0,
+    repair_budget: int = 0,
+    retryable: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    validate_failure_action_pair(failure_class, action)
+    requirement_ids, hard_requirement_ids = _requirement_scope(state, assessment)
+    normalized_subtype = subtype or _assessment_subtype(assessment, "UNKNOWN")
+    return {
+        "failure_class": failure_class.value,
+        "subtype": normalized_subtype,
+        "reason": normalized_subtype,
+        "task_id": _current_task_id(dict(state)),
+        "action": action.value,
+        "retryable": retryable,
+        "repair_attempt": repair_attempt,
+        "repair_budget": repair_budget,
+        "user_blocker": failure_class is FailureClass.USER_DECISION_REQUIRED,
+        "requirement_ids": requirement_ids,
+        "hard_requirement_ids": hard_requirement_ids,
+        "metadata": dict(metadata or {}),
+    }
+
+
+def _set_decision(
+    update: Dict[str, Any],
+    state: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    **decision: Any,
+) -> Dict[str, Any]:
+    update["failure_decision"] = _failure_decision(
+        state,
+        assessment,
+        **decision,
+    )
+    return update
 
 
 def _normalise_counter(counter: Any, state: Dict[str, Any]) -> Dict[str, int]:
@@ -588,6 +692,102 @@ def _content_retry_warning(
     }
 
 
+def _commit_degraded_result(
+    update: Dict[str, Any],
+    state: Dict[str, Any],
+    assessment: Dict[str, Any],
+    *,
+    warning_code: str,
+) -> Dict[str, Any]:
+    """Commit a supported partial result as a terminal non-Human outcome."""
+
+    task_id = _current_task_id(state)
+    warning = {
+        "code": warning_code,
+        "category": FailureClass.DEGRADABLE_QUALITY.value,
+        "task_id": task_id,
+        "issues": list(assessment.get("issues") or []),
+    }
+    warnings = [
+        existing
+        for existing in update.get("verification_warnings") or []
+        if not (
+            str(existing.get("code") or "") == warning_code
+            and str(existing.get("task_id") or "") == task_id
+        )
+    ]
+    warnings.append(warning)
+    statuses = record_section_status(
+        state,
+        ACCEPT_WITH_WARNING,
+        accepted_by="system",
+        issues=assessment.get("issues") or [],
+    )
+    update.update(
+        {
+            "workflow_action": _continuation_action(state).value,
+            "results": commit_current_result(state),
+            "verification_warning": warning,
+            "verification_warnings": warnings,
+            "pending_user_action": {},
+            "section_status": statuses,
+            "report_status": derive_report_status(state.get("tasks") or [], statuses),
+        }
+    )
+    return _set_decision(
+        update,
+        state,
+        assessment,
+        failure_class=FailureClass.DEGRADABLE_QUALITY,
+        action=FailureAction.COMMIT_WITH_WARNING,
+        retryable=False,
+    )
+
+
+def _fatal_verifier_update(
+    update: Dict[str, Any],
+    state: Dict[str, Any],
+    assessment: Dict[str, Any],
+) -> Dict[str, Any]:
+    task_id = _current_task_id(state)
+    identity = "|".join(
+        (
+            str(state.get("_job_id") or ""),
+            task_id,
+            "VERIFIER_UNAVAILABLE",
+            "Verifier",
+            "assessment",
+        )
+    )
+    update.update(
+        {
+            "workflow_action": "FATAL_SYSTEM",
+            "pending_user_action": {},
+            "fatal_system_error": {
+                "failure_id": "fatal-" + sha256(identity.encode("utf-8")).hexdigest()[:24],
+                "failure_class": FailureClass.FATAL_SYSTEM.value,
+                "subtype": "VERIFIER_UNAVAILABLE",
+                "origin": "graph",
+                "component": "Verifier",
+                "operation": "assessment",
+                "task_id": task_id,
+                "diagnostic_code": "VERIFIER_UNAVAILABLE",
+                "retryable": False,
+                "metadata": {},
+            },
+        }
+    )
+    return _set_decision(
+        update,
+        state,
+        assessment,
+        failure_class=FailureClass.FATAL_SYSTEM,
+        action=FailureAction.FAIL_JOB,
+        subtype="VERIFIER_UNAVAILABLE",
+        retryable=False,
+    )
+
+
 def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) -> Dict[str, Any]:
     """Choose a bounded recovery action without invoking models or graph nodes."""
     task_id = _current_task_id(state)
@@ -612,6 +812,8 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         "job_patch_count": job_patch_count,
         "length_rewrite_attempts": length_rewrite_attempts,
         "pending_user_action": {},
+        "failure_decision": {},
+        "fatal_system_error": {},
         "verification_warnings": list(state.get("verification_warnings") or []),
     }
 
@@ -638,28 +840,22 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if bool(verifier_failure.get("retryable")) and retries < MAX_VERIFIER_RETRIES:
             verifier_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-            return update
-        statuses = record_section_status(
+            return _set_decision(
+                update,
+                state,
+                failure_assessment,
+                failure_class=FailureClass.RETRYABLE_EXECUTION,
+                action=FailureAction.RETRY_VERIFIER,
+                subtype="VERIFIER_UNAVAILABLE",
+                repair_attempt=retries + 1,
+                repair_budget=MAX_VERIFIER_RETRIES,
+                retryable=True,
+            )
+        return _fatal_verifier_update(
+            update,
             state,
-            BLOCKED,
-            accepted_by="system",
-            issues=failure_assessment["issues"],
+            failure_assessment,
         )
-        update.update(
-            {
-                "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
-                "pending_user_action": _pending_user_action(
-                    IssueCategory.VERIFIER_FAILURE,
-                    state,
-                    failure_assessment,
-                ),
-                "section_status": statuses,
-                "report_status": derive_report_status(
-                    state.get("tasks") or [], statuses
-                ),
-            }
-        )
-        return update
 
     if str(assessment.get("status") or "").upper() == "PASS":
         accepted_gap = matching_evidence_gap_acceptance(state)
@@ -702,7 +898,17 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if retries < MAX_VERIFIER_RETRIES:
             verifier_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.RETRYABLE_EXECUTION,
+                action=FailureAction.RETRY_VERIFIER,
+                repair_attempt=retries + 1,
+                repair_budget=MAX_VERIFIER_RETRIES,
+                retryable=True,
+            )
+        return _fatal_verifier_update(update, state, assessment)
 
     if is_synthesis and category in {
         IssueCategory.CONTENT_DEFECT,
@@ -712,7 +918,16 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.SYNTHESIS_REWRITE.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.RETRYABLE_EXECUTION,
+                action=FailureAction.RETRY_TASK,
+                repair_attempt=retries + 1,
+                repair_budget=MAX_CONTENT_RETRIES,
+                retryable=True,
+            )
         # Synthesis never falls through into ordinary evidence recovery.
         category = IssueCategory.CONTENT_DEFECT
 
@@ -733,40 +948,45 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             ]
             update["current_result"] = current_result
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.REPAIRABLE_CONTRACT,
+                action=FailureAction.REPAIR_CONTRACT,
+                repair_attempt=1,
+                repair_budget=1,
+            )
         if _asset_only_issues(assessment) and state.get("current_result"):
             retries = asset_retry_count.get(task_id, 0)
             if retries < MAX_ASSET_RETRIES:
                 asset_retry_count[task_id] = retries + 1
                 update["workflow_action"] = WorkflowAction.ASSET_RECOVERY.value
-                return update
-
-            warning = {
-                "code": "ASSET_RETRY_LIMIT_REACHED",
-                "category": IssueCategory.CONTENT_DEFECT.value,
-                "task_id": task_id,
-                "issues": list(assessment.get("issues") or []),
-            }
-            warnings = [
-                existing
-                for existing in update["verification_warnings"]
-                if not (
-                    existing.get("code") == "ASSET_RETRY_LIMIT_REACHED"
-                    and str(existing.get("task_id")) == task_id
+                return _set_decision(
+                    update,
+                    state,
+                    assessment,
+                    failure_class=FailureClass.REPAIRABLE_CONTRACT,
+                    action=FailureAction.RECOVER_ASSET,
+                    repair_attempt=retries + 1,
+                    repair_budget=MAX_ASSET_RETRIES,
                 )
-            ]
-            warnings.append(warning)
+
+            _, hard_requirement_ids = _requirement_scope(state, assessment)
+            if not hard_requirement_ids:
+                return _commit_degraded_result(
+                    update,
+                    state,
+                    assessment,
+                    warning_code="ASSET_RETRY_LIMIT_REACHED",
+                )
+
             statuses = record_section_status(
-                state,
-                ACCEPT_WITH_WARNING,
-                accepted_by="system",
-                issues=assessment.get("issues") or [],
+                state, BLOCKED, accepted_by="system", issues=assessment.get("issues") or []
             )
             update.update(
                 {
                     "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
-                    "verification_warning": warning,
-                    "verification_warnings": warnings,
                     "pending_user_action": _pending_user_action(
                         category, state, assessment
                     ),
@@ -776,7 +996,13 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                     ),
                 }
             )
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.USER_DECISION_REQUIRED,
+                action=FailureAction.REGISTER_BLOCKER,
+            )
 
         length_only = bool(issue_codes) and issue_codes <= {"TOO_SHORT", "TOO_LONG"}
         if length_only:
@@ -796,7 +1022,15 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 length_rewrite_attempts[attempt_key] = 1
                 task_retry_count[task_id] = task_retry_count.get(task_id, 0) + 1
                 update["workflow_action"] = WorkflowAction.LENGTH_REWRITE.value
-                return update
+                return _set_decision(
+                    update,
+                    state,
+                    assessment,
+                    failure_class=FailureClass.REPAIRABLE_CONTRACT,
+                    action=FailureAction.REPAIR_CONTRACT,
+                    repair_attempt=1,
+                    repair_budget=1,
+                )
             if issue_codes == {"TOO_LONG"}:
                 target = parse_length_target(str(task.get("task_description") or ""))
                 if target and target.get("max") is not None:
@@ -813,14 +1047,40 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                         current_result[content_field] = trimmed
                         update["current_result"] = current_result
                         update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-                        return update
+                        return _set_decision(
+                            update,
+                            state,
+                            assessment,
+                            failure_class=FailureClass.REPAIRABLE_CONTRACT,
+                            action=FailureAction.REPAIR_CONTRACT,
+                            repair_attempt=1,
+                            repair_budget=1,
+                        )
             retries = MAX_CONTENT_RETRIES
         else:
             retries = task_retry_count.get(task_id, 0)
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.REWORK.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.RETRYABLE_EXECUTION,
+                action=FailureAction.RETRY_TASK,
+                repair_attempt=retries + 1,
+                repair_budget=MAX_CONTENT_RETRIES,
+                retryable=True,
+            )
+
+        _, hard_requirement_ids = _requirement_scope(state, assessment)
+        if not hard_requirement_ids:
+            return _commit_degraded_result(
+                update,
+                state,
+                assessment,
+                warning_code="CONTENT_RETRY_LIMIT_REACHED",
+            )
 
         warning = _content_retry_warning(
             update["verification_warnings"], task_id, assessment
@@ -848,7 +1108,13 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 ),
             }
         )
-        return update
+        return _set_decision(
+            update,
+            state,
+            assessment,
+            failure_class=FailureClass.USER_DECISION_REQUIRED,
+            action=FailureAction.REGISTER_BLOCKER,
+        )
 
     if category is IssueCategory.EVIDENCE_GAP:
         recoveries = evidence_recovery_count.get(task_id, 0)
@@ -858,13 +1124,38 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         ):
             evidence_recovery_count[task_id] = recoveries + 1
             update["workflow_action"] = WorkflowAction.EVIDENCE_RECOVERY.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.RETRYABLE_EXECUTION,
+                action=FailureAction.RECOVER_EVIDENCE,
+                repair_attempt=recoveries + 1,
+                repair_budget=MAX_EVIDENCE_RECOVERIES,
+                retryable=True,
+            )
+        _, hard_requirement_ids = _requirement_scope(state, assessment)
+        if not hard_requirement_ids:
+            return _commit_degraded_result(
+                update,
+                state,
+                assessment,
+                warning_code="EVIDENCE_RECOVERY_EXHAUSTED",
+            )
 
     if category is IssueCategory.LOCAL_PLAN_DEFECT:
         patches = task_patch_count.get(task_id, 0)
         if patches < MAX_TASK_PATCHES and job_patch_count < MAX_JOB_PATCHES:
             update["workflow_action"] = WorkflowAction.PLAN_PATCH.value
-            return update
+            return _set_decision(
+                update,
+                state,
+                assessment,
+                failure_class=FailureClass.REPAIRABLE_CONTRACT,
+                action=FailureAction.PATCH_PLAN,
+                repair_attempt=patches + 1,
+                repair_budget=MAX_TASK_PATCHES,
+            )
 
     blocking_status = (
         EXTERNAL_BLOCKER
@@ -887,4 +1178,10 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             ),
         }
     )
-    return update
+    return _set_decision(
+        update,
+        state,
+        assessment,
+        failure_class=FailureClass.USER_DECISION_REQUIRED,
+        action=FailureAction.REGISTER_BLOCKER,
+    )
