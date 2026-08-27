@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from enum import Enum
 from hashlib import sha256
 from os.path import basename
@@ -14,6 +15,12 @@ from src.failure_semantics import (
     validate_failure_action_pair,
 )
 from src.failure_registry import build_degraded_issue, upsert_degraded_issue
+from src.blocker_registry import (
+    affected_task_closure,
+    build_user_blocker,
+    runnable_task_ids,
+    upsert_user_blocker,
+)
 from src.evidence_waivers import (
     is_waivable_evidence_gap,
     matching_evidence_gap_acceptance,
@@ -46,6 +53,7 @@ class WorkflowAction(str, Enum):
     LENGTH_REWRITE = "LENGTH_REWRITE"
     SYNTHESIS_REWRITE = "SYNTHESIS_REWRITE"
     FATAL_SYSTEM = "FATAL_SYSTEM"
+    CANCEL_JOB = "CANCEL_JOB"
 
 
 class IssueCategory(str, Enum):
@@ -270,12 +278,286 @@ def _set_decision(
     assessment: Mapping[str, Any],
     **decision: Any,
 ) -> Dict[str, Any]:
-    update["failure_decision"] = _failure_decision(
+    canonical = _failure_decision(
         state,
         assessment,
         **decision,
     )
+    update["failure_decision"] = canonical
+    if canonical["failure_class"] == FailureClass.USER_DECISION_REQUIRED.value:
+        _register_user_blocker(update, state, assessment, canonical)
     return update
+
+
+def _tasks_with_legacy_dependencies(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Use the conservative historical serial contract for old checkpoints."""
+
+    normalized: list[dict[str, Any]] = []
+    prior_ids: list[str] = []
+    for raw in state.get("tasks") or []:
+        task = dict(raw)
+        task_id = str(task.get("task_id") or "")
+        if not isinstance(task.get("depends_on_task_ids"), list):
+            task["depends_on_task_ids"] = (
+                list(prior_ids)
+                if str(task.get("task_type") or "") == "synthesis"
+                else ([prior_ids[-1]] if prior_ids else [])
+            )
+        normalized.append(task)
+        if task_id:
+            prior_ids.append(task_id)
+    return normalized
+
+
+def _register_user_blocker(
+    update: Dict[str, Any],
+    state: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> None:
+    task_id = str(decision.get("task_id") or _current_task_id(dict(state)))
+    subtype = str(decision.get("subtype") or "HARD_CONTRACT_BLOCKED")
+    tasks = _tasks_with_legacy_dependencies(state)
+    affected = affected_task_closure(tasks, task_id)
+    missing_resource_id = next(
+        (
+            str(
+                issue.get("resource_id")
+                or issue.get("resource_name")
+                or issue.get("missing_resource")
+                or ""
+            ).strip()
+            for issue in assessment.get("issues") or []
+            if isinstance(issue, Mapping)
+            and str(
+                issue.get("resource_id")
+                or issue.get("resource_name")
+                or issue.get("missing_resource")
+                or ""
+            ).strip()
+        ),
+        None,
+    )
+    options = ["MODIFY_REQUIREMENT", "CANCEL_JOB"]
+    if subtype in _EVIDENCE_CODES or subtype == "MISSING_RESOURCE":
+        options.insert(0, "UPLOAD_RESOURCES")
+    requirement_ids = list(decision.get("hard_requirement_ids") or [])
+    requirements = {
+        str(requirement.get("requirement_id") or ""): requirement
+        for requirement in state.get("requirement_registry") or []
+        if isinstance(requirement, Mapping)
+    }
+    if any(
+        str(requirements.get(requirement_id, {}).get("kind") or "")
+        in {"human_approval", "waiver"}
+        for requirement_id in requirement_ids
+    ):
+        options.insert(-1, "APPROVE_EXCEPTION")
+    task_revision = _normalise_counter(state.get("task_revisions"), dict(state)).get(
+        task_id, 1
+    )
+    record = build_user_blocker(
+        job_scope=str(
+            state.get("_job_id")
+            or state.get("job_id")
+            or state.get("thread_id")
+            or "legacy-job"
+        ),
+        task_id=task_id,
+        subtype=subtype,
+        requirement_ids=requirement_ids,
+        affected_task_ids=affected,
+        missing_resource_id=missing_resource_id,
+        reason=subtype,
+        attempted_repairs=[
+            {
+                "repair_type": str(decision.get("action") or ""),
+                "attempt": int(decision.get("repair_attempt", 0) or 0),
+                "budget": int(decision.get("repair_budget", 0) or 0),
+                "outcome": "exhausted",
+                "diagnostic_code": subtype,
+            }
+        ],
+        available_options=options,
+        metadata={
+            "task_revision": task_revision,
+            "plan_revision": int(state.get("plan_revision", 1) or 1),
+        },
+    )
+    blockers = upsert_user_blocker(
+        state.get("pending_user_blockers") or [], record
+    )
+    outcomes = deepcopy(dict(state.get("task_outcome_registry") or {}))
+    result_ids = {
+        str(result.get("task_id") or "")
+        for result in state.get("results") or []
+        if isinstance(result, Mapping)
+    }
+    degraded_task_ids = {
+        str(issue.get("task_id") or "")
+        for issue in state.get("degraded_issue_registry") or []
+        if isinstance(issue, Mapping) and issue.get("status") == "active"
+    }
+    revisions = _normalise_counter(state.get("task_revisions"), dict(state))
+    for task in tasks:
+        candidate_id = str(task.get("task_id") or "")
+        existing = dict(outcomes.get(candidate_id) or {})
+        status = str(existing.get("status") or "pending")
+        if candidate_id in result_ids:
+            status = "degraded" if candidate_id in degraded_task_ids else "committed"
+        if candidate_id == task_id:
+            status = "blocked_user"
+        elif candidate_id in affected:
+            status = "blocked_dependency"
+        blocker_ids = list(existing.get("blocker_ids") or [])
+        if candidate_id in affected and record["blocker_id"] not in blocker_ids:
+            blocker_ids.append(record["blocker_id"])
+        outcomes[candidate_id] = {
+            "task_id": candidate_id,
+            "status": status,
+            "dependency_ids": list(task.get("depends_on_task_ids") or []),
+            "blocker_ids": blocker_ids,
+            "task_revision": revisions.get(candidate_id, 1),
+        }
+    update["pending_user_blockers"] = blockers
+    update["task_outcome_registry"] = outcomes
+    if isinstance(update.get("pending_user_action"), dict):
+        update["pending_user_action"]["blocker_id"] = record["blocker_id"]
+    runnable = runnable_task_ids(tasks, outcomes)
+    if runnable:
+        next_task_id = runnable[0]
+        next_index = next(
+            index
+            for index, task in enumerate(tasks)
+            if str(task.get("task_id") or "") == next_task_id
+        )
+        update["cursor"] = max(0, next_index - 1)
+        update["workflow_action"] = WorkflowAction.NEXT.value
+        update["pending_user_action"] = {}
+    elif len(
+        [
+            blocker
+            for blocker in blockers
+            if str(blocker.get("status") or "") in {"pending", "retry_pending"}
+        ]
+    ) > 1:
+        unresolved = [
+            deepcopy(blocker)
+            for blocker in blockers
+            if str(blocker.get("status") or "") in {"pending", "retry_pending"}
+        ]
+        update["pending_user_action"] = {
+            "category": "CONSOLIDATED_BLOCKERS",
+            "task_id": task_id,
+            "blocker_id": record["blocker_id"],
+            "blockers": unresolved,
+            "guidance": "请逐项处理以下未解决的硬性要求。",
+            "accepted_choices": [],
+        }
+
+
+def _terminal_scheduler_update(
+    state: Mapping[str, Any], *, terminal_status: str
+) -> Dict[str, Any]:
+    """Route after a terminal task using only explicit dependency outcomes."""
+
+    tasks = _tasks_with_legacy_dependencies(state)
+    task_id = _current_task_id(dict(state))
+    revisions = _normalise_counter(state.get("task_revisions"), dict(state))
+    outcomes = deepcopy(dict(state.get("task_outcome_registry") or {}))
+    result_ids = {
+        str(result.get("task_id") or "")
+        for result in state.get("results") or []
+        if isinstance(result, Mapping)
+    }
+    for task in tasks:
+        candidate_id = str(task.get("task_id") or "")
+        existing = dict(outcomes.get(candidate_id) or {})
+        status = str(existing.get("status") or "pending")
+        if candidate_id in result_ids and status == "pending":
+            status = "committed"
+        outcomes[candidate_id] = {
+            "task_id": candidate_id,
+            "status": status,
+            "dependency_ids": list(task.get("depends_on_task_ids") or []),
+            "blocker_ids": list(existing.get("blocker_ids") or []),
+            "task_revision": revisions.get(candidate_id, 1),
+        }
+    if task_id in outcomes:
+        outcomes[task_id]["status"] = terminal_status
+
+    blockers = deepcopy(list(state.get("pending_user_blockers") or []))
+    resolved_ids = list(dict.fromkeys(state.get("resolved_user_blocker_ids") or []))
+    newly_resolved: set[str] = set()
+    for blocker in blockers:
+        if (
+            str(blocker.get("task_id") or "") == task_id
+            and str(blocker.get("status") or "") == "retry_pending"
+        ):
+            blocker["status"] = "resolved"
+            blocker_id = str(blocker.get("blocker_id") or "")
+            newly_resolved.add(blocker_id)
+            if blocker_id and blocker_id not in resolved_ids:
+                resolved_ids.append(blocker_id)
+    if newly_resolved:
+        for outcome in outcomes.values():
+            outcome["blocker_ids"] = [
+                blocker_id
+                for blocker_id in outcome.get("blocker_ids") or []
+                if blocker_id not in newly_resolved
+            ]
+            if (
+                outcome.get("status") == "blocked_dependency"
+                and not outcome["blocker_ids"]
+            ):
+                outcome["status"] = "pending"
+
+    transition: Dict[str, Any] = {
+        "task_outcome_registry": outcomes,
+        "pending_user_blockers": blockers,
+        "resolved_user_blocker_ids": resolved_ids,
+    }
+    runnable = runnable_task_ids(tasks, outcomes)
+    if runnable:
+        next_task_id = runnable[0]
+        next_index = next(
+            index
+            for index, task in enumerate(tasks)
+            if str(task.get("task_id") or "") == next_task_id
+        )
+        transition.update(
+            {
+                "workflow_action": WorkflowAction.NEXT.value,
+                "cursor": max(0, next_index - 1),
+                "pending_user_action": {},
+            }
+        )
+        return transition
+    unresolved = [
+        blocker
+        for blocker in blockers
+        if str(blocker.get("status") or "") == "pending"
+    ]
+    if unresolved:
+        transition.update(
+            {
+                "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
+                "pending_user_action": {
+                    "category": "CONSOLIDATED_BLOCKERS",
+                    "blockers": deepcopy(unresolved),
+                    "guidance": "请逐项处理以下未解决的硬性要求。",
+                    "accepted_choices": [],
+                },
+            }
+        )
+        return transition
+    transition.update(
+        {
+            "workflow_action": WorkflowAction.DONE.value,
+            "pending_user_action": {},
+        }
+    )
+    return transition
 
 
 def _normalise_counter(counter: Any, state: Dict[str, Any]) -> Dict[str, int]:
@@ -784,7 +1066,6 @@ def _commit_degraded_result(
     )
     update.update(
         {
-            "workflow_action": _continuation_action(state).value,
             "results": commit_current_result(state),
             "verification_warning": warning,
             "verification_warnings": warnings,
@@ -796,6 +1077,7 @@ def _commit_degraded_result(
             "report_status": derive_report_status(state.get("tasks") or [], statuses),
         }
     )
+    update.update(_terminal_scheduler_update(state, terminal_status="degraded"))
     return _set_decision(
         update,
         state,
@@ -928,12 +1210,12 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             accepted_by="user" if accepted_gap is not None else "verifier",
             issues=(accepted_gap or {}).get("issues") or [],
         )
-        update["workflow_action"] = _continuation_action(state).value
         update["results"] = commit_current_result(state)
         update["section_status"] = statuses
         update["report_status"] = derive_report_status(
             state.get("tasks") or [], statuses
         )
+        update.update(_terminal_scheduler_update(state, terminal_status="committed"))
         return update
 
     category = classify_assessment(assessment, state)

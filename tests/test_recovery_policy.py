@@ -223,7 +223,7 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
     assert second["pending_user_action"]["category"] == "EVIDENCE_GAP"
     assert second["pending_user_action"]["blocker_status"] == "ACTIVE"
-    assert second["pending_user_action"]["blocker_id"].startswith("T2:p")
+    assert second["pending_user_action"]["blocker_id"].startswith("blocker-")
     assert second["pending_user_action"]["accepted_choices"] == [
         "UPLOAD_RESOURCES",
         "AUTHORIZE_WEB",

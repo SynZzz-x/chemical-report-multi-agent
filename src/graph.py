@@ -163,6 +163,7 @@ class WorkFlowBase(StateGraph):
                     "NEEDS_USER_INPUT": "NeedsUserInput",
                     "RETRY_VERIFIER": "Verifier",
                     "FATAL_SYSTEM": "Exit",
+                    "CANCEL_JOB": "Exit",
                 },
             )
 
@@ -204,6 +205,7 @@ class WorkFlowBase(StateGraph):
                     "RETRY_VERIFIER": "Verifier",
                     "NEXT": "Planner",
                     "DONE": "Summarizer",
+                    "CANCEL_JOB": "Exit",
                 },
             )
         else:

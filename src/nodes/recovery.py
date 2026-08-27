@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from src.control_messages import blocker_action_spec
+from src.blocker_registry import apply_blocker_resolution
 from src.evidence_waivers import (
     record_evidence_gap_acceptance,
     split_waivable_evidence_gaps,
@@ -684,6 +685,95 @@ def needs_user_input(
 ) -> dict[str, Any]:
     """Interrupt with a concrete blocker and route the incremental resume safely."""
     pending = deepcopy(state.get("pending_user_action") or {})
+    consolidated_blockers = [
+        deepcopy(blocker)
+        for blocker in pending.get("blockers") or state.get("pending_user_blockers") or []
+        if isinstance(blocker, dict)
+        and str(blocker.get("status") or "") == "pending"
+    ]
+    if consolidated_blockers and (
+        str(pending.get("category") or "") == "CONSOLIDATED_BLOCKERS"
+        or len(consolidated_blockers) > 1
+    ):
+        payload = {
+            "type": "needs_user_input",
+            "category": "CONSOLIDATED_BLOCKERS",
+            "guidance_text": str(
+                pending.get("guidance") or "请逐项处理以下未解决的硬性要求。"
+            ),
+            "blockers": consolidated_blockers,
+        }
+        resumed = interrupt(payload)
+        submissions = (
+            resumed.get("resolutions")
+            if isinstance(resumed, dict) and isinstance(resumed.get("resolutions"), list)
+            else []
+        )
+        transition_state: dict[str, Any] = dict(state)
+        for submission in submissions:
+            if not isinstance(submission, dict):
+                continue
+            canonical_action = str(submission.get("action") or "").upper()
+            if canonical_action == "ADJUST_REQUIREMENT":
+                canonical_action = "MODIFY_REQUIREMENT"
+            resolution_update = apply_blocker_resolution(
+                transition_state,
+                blocker_id=str(submission.get("blocker_id") or ""),
+                action=canonical_action,
+                resource_ids=submission.get("resource_ids") or [],
+                requirement_update=submission.get("requirement_update"),
+                metadata={"source": "needs_user_input"},
+            )
+            transition_state = {**transition_state, **resolution_update}
+
+        update_keys = {
+            "results",
+            "task_revisions",
+            "requirement_registry",
+            "pending_user_blockers",
+            "blocker_resolution_registry",
+            "resolved_user_blocker_ids",
+            "task_outcome_registry",
+            "resume_task_id",
+            "cancel_job",
+        }
+        update = {
+            key: deepcopy(transition_state.get(key))
+            for key in update_keys
+            if key in transition_state
+        }
+        if transition_state.get("cancel_job"):
+            update["workflow_action"] = WorkflowAction.CANCEL_JOB.value
+            update["pending_user_action"] = {}
+            return update
+        resume_task_id = str(transition_state.get("resume_task_id") or "")
+        if resume_task_id:
+            tasks = list(state.get("tasks") or [])
+            update["cursor"] = next(
+                index
+                for index, task in enumerate(tasks)
+                if str(task.get("task_id") or "") == resume_task_id
+            )
+            update["workflow_action"] = WorkflowAction.REWORK.value
+            update["pending_user_action"] = {}
+            return update
+        still_pending = [
+            blocker
+            for blocker in transition_state.get("pending_user_blockers") or []
+            if str(blocker.get("status") or "") == "pending"
+        ]
+        if still_pending:
+            update["workflow_action"] = WorkflowAction.NEEDS_USER_INPUT.value
+            update["pending_user_action"] = {
+                "category": "CONSOLIDATED_BLOCKERS",
+                "blockers": deepcopy(still_pending),
+                "guidance": "请继续处理尚未解决的硬性要求。",
+                "accepted_choices": [],
+            }
+            return update
+        update["workflow_action"] = _continuation_action(state).value
+        update["pending_user_action"] = {}
+        return update
     category = str(pending.get("category") or "EXTERNAL_BLOCKER")
     task_id = str(pending.get("task_id") or _current_task_id(state))
     issues: list[dict[str, Any]] = []

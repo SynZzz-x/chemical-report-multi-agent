@@ -208,3 +208,74 @@ def test_non_plan_failures_never_route_to_plan_patcher(code, category):
     update = decide_recovery_action(state, assessment)
 
     assert update["workflow_action"] != "PLAN_PATCH"
+
+
+def test_hard_blocker_registration_continues_independent_task():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="hard")
+    state["tasks"] = [
+        {**state["tasks"][0], "task_id": "T1", "depends_on_task_ids": []},
+        {**state["tasks"][0], "task_id": "T2", "depends_on_task_ids": [], "requirement_ids": []},
+        {**state["tasks"][0], "task_id": "T3", "depends_on_task_ids": ["T1"], "requirement_ids": []},
+    ]
+    state["evidence_recovery_count"] = {"T1": 1}
+    state["task_revisions"] = {"T1": 1, "T2": 1, "T3": 1}
+
+    update = decide_recovery_action(state, _assessment("EVIDENCE_GAP"))
+
+    assert update["workflow_action"] == "NEXT"
+    assert update["cursor"] == 0
+    assert update["pending_user_action"] == {}
+    assert len(update["pending_user_blockers"]) == 1
+    assert update["task_outcome_registry"]["T1"]["status"] == "blocked_user"
+    assert update["task_outcome_registry"]["T2"]["status"] == "pending"
+    assert update["task_outcome_registry"]["T3"]["status"] == "blocked_dependency"
+
+
+def test_second_independent_blocker_produces_one_consolidated_admission_payload():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="hard")
+    state["tasks"] = [
+        {**state["tasks"][0], "task_id": "T1", "depends_on_task_ids": []},
+        {**state["tasks"][0], "task_id": "T2", "depends_on_task_ids": []},
+    ]
+    state["task_revisions"] = {"T1": 1, "T2": 1}
+    state["evidence_recovery_count"] = {"T1": 1, "T2": 1}
+    first = decide_recovery_action(state, _assessment("EVIDENCE_GAP"))
+    second_state = {
+        **state,
+        **first,
+        "cursor": 1,
+        "current_result": {"task_id": "T2", "text_output": "T2 partial"},
+    }
+
+    second = decide_recovery_action(second_state, _assessment("EVIDENCE_GAP"))
+
+    assert second["workflow_action"] == "NEEDS_USER_INPUT"
+    assert len(second["pending_user_blockers"]) == 2
+    assert second["pending_user_action"]["category"] == "CONSOLIDATED_BLOCKERS"
+    assert len(second["pending_user_action"]["blockers"]) == 2
+
+
+def test_summarizer_admission_stops_after_independent_work_if_blocker_remains():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="hard")
+    state["tasks"] = [
+        {**state["tasks"][0], "task_id": "T1", "depends_on_task_ids": []},
+        {**state["tasks"][0], "task_id": "T2", "depends_on_task_ids": [], "requirement_ids": []},
+    ]
+    state["task_revisions"] = {"T1": 1, "T2": 1}
+    state["evidence_recovery_count"] = {"T1": 1}
+    blocked = decide_recovery_action(state, _assessment("EVIDENCE_GAP"))
+    independent_state = {
+        **state,
+        **blocked,
+        "cursor": 1,
+        "current_result": {"task_id": "T2", "text_output": "verified T2"},
+    }
+
+    admitted = decide_recovery_action(
+        independent_state, {"status": "PASS", "issues": []}
+    )
+
+    assert admitted["workflow_action"] == "NEEDS_USER_INPUT"
+    assert admitted["pending_user_action"]["category"] == "CONSOLIDATED_BLOCKERS"
+    assert len(admitted["pending_user_action"]["blockers"]) == 1
+    assert [result["task_id"] for result in admitted["results"]] == ["T2"]
