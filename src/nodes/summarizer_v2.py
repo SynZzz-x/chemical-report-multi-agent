@@ -86,14 +86,33 @@ _ORPHAN_FIGURE_CAPTION = re.compile(
 )
 
 
-def _degrade_accepted_missing_figure(text: str) -> str:
+def _degrade_accepted_missing_figure(
+    text: str, *, accepted_by_system: bool = False
+) -> str:
     """Remove references to an accepted-but-absent figure in this section only."""
 
     cleaned = _DANGLING_FIGURE_SENTENCE.sub("", str(text or ""))
     cleaned = _ORPHAN_FIGURE_CAPTION.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    note = "> 图形缺口：用户已接受本节缺少正式图形资产，相关图号引用已移除。"
+    note = (
+        "> 图形缺口：系统已记录可选图形资产缺失，相关图号引用已移除。"
+        if accepted_by_system
+        else "> 图形缺口：用户已接受本节缺少正式图形资产，相关图号引用已移除。"
+    )
     return f"{cleaned}\n\n{note}" if cleaned else note
+
+
+def _active_asset_degradation(
+    state: State, task_id: str, asset_kind: str
+) -> bool:
+    accepted_codes = _ACCEPTED_MISSING_ASSET_CODES.get(asset_kind, frozenset())
+    return any(
+        isinstance(issue, Mapping)
+        and str(issue.get("task_id") or "") == task_id
+        and str(issue.get("status") or "") == "active"
+        and str(issue.get("subtype") or "").upper() in accepted_codes
+        for issue in state.get("degraded_issue_registry") or []
+    )
 
 
 def find_title(state: State) -> str:
@@ -317,7 +336,10 @@ def _ordered_sections(
         accepted_missing_table = (
             missing_required_table
             and not invalid_tables
-            and _user_accepted_missing_asset(status_entry, "table")
+            and (
+                _user_accepted_missing_asset(status_entry, "table")
+                or _active_asset_degradation(state, task_id, "table")
+            )
         )
         if accepted_missing_table:
             logger.info(
@@ -383,7 +405,10 @@ def _ordered_sections(
             and not invalid_figures
             and not missing_figure_paths
             and not invalid_figure_content
-            and _user_accepted_missing_asset(status_entry, "figure")
+            and (
+                _user_accepted_missing_asset(status_entry, "figure")
+                or _active_asset_degradation(state, task_id, "figure")
+            )
         )
         if accepted_missing_figure:
             logger.info(
@@ -426,7 +451,12 @@ def _ordered_sections(
             continue
         section_text = str(result.get("text_output") or result.get("content") or "")
         if accepted_missing_figure:
-            section_text = _degrade_accepted_missing_figure(section_text)
+            section_text = _degrade_accepted_missing_figure(
+                section_text,
+                accepted_by_system=_active_asset_degradation(
+                    state, task_id, "figure"
+                ),
+            )
         sections.append(
             {
                 "task_id": task_id,
@@ -529,7 +559,26 @@ def _draft_warning(state: State) -> str:
         ]
         detail = "；".join(descriptions) or "用户接受该章节当前缺口"
         lines.append(f"> - {task_names.get(str(task_id), str(task_id))}：{detail}")
-    return "\n".join(lines)
+    blocks = ["\n".join(lines)] if len(lines) > 3 else []
+    active_degradations = [
+        issue
+        for issue in state.get("degraded_issue_registry") or []
+        if isinstance(issue, Mapping) and issue.get("status") == "active"
+    ]
+    if active_degradations:
+        degradation_lines = [
+            "> **系统记录的交付限制**",
+            ">",
+            "> 以下限制已按软要求降级处理，并未被描述为用户批准或问题已解决：",
+        ]
+        for issue in active_degradations:
+            task_id = str(issue.get("task_id") or "")
+            subtype = str(issue.get("subtype") or "DEGRADABLE_QUALITY")
+            degradation_lines.append(
+                f"> - {task_names.get(task_id, task_id)}：{subtype}"
+            )
+        blocks.append("\n".join(degradation_lines))
+    return "\n\n".join(blocks)
 
 
 def _deduplicate_citations(sections: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

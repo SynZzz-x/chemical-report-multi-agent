@@ -31,8 +31,10 @@ from src.config import get_cache_root, get_local_user_id, missing_key_message
 from src.control_messages import (
     blocker_action_spec,
     blocker_choices,
+    blocker_forms,
     blocker_guidance,
     build_blocker_resume_payload,
+    build_consolidated_blocker_resume_payload,
     build_resume_payload,
     is_displayable_assistant_message,
     is_displayable_ui_message,
@@ -602,6 +604,98 @@ def _handle_interrupt(update: dict[str, Any]) -> bool:
 
 def _render_pending_resume_submission() -> dict[str, Any] | None:
     payload = st.session_state.get("pending_interrupt")
+    forms = blocker_forms(payload)
+    if forms:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        widget_scope = (
+            f"{st.session_state['active_job_id']}_"
+            f"{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]}"
+        )
+        blockers_by_id = {
+            str(blocker.get("blocker_id") or ""): blocker
+            for blocker in payload.get("blockers") or []
+            if isinstance(blocker, dict)
+        }
+        submissions: list[dict[str, Any]] = []
+        all_files: list[Any] = []
+        complete = True
+        for index, form in enumerate(forms, start=1):
+            blocker_id = form["blocker_id"]
+            st.markdown(f"**阻塞项 {index}**：{form.get('reason') or blocker_id}")
+            action = str(
+                st.radio(
+                    f"选择阻塞项 {index} 的处理方式",
+                    options=form["options"],
+                    index=None,
+                    format_func=lambda value: blocker_action_spec(value).get(
+                        "label", value
+                    ),
+                    key=f"blocker_action_{widget_scope}_{blocker_id}",
+                )
+                or ""
+            )
+            if not action:
+                complete = False
+                continue
+            spec = blocker_action_spec(action)
+            text = str(spec.get("default_text") or "")
+            files: list[Any] = []
+            if spec.get("requires_text"):
+                text = st.text_area(
+                    f"输入阻塞项 {index} 调整后的任务要求",
+                    key=f"blocker_text_{widget_scope}_{blocker_id}",
+                )
+            if spec.get("requires_documents"):
+                files = list(
+                    st.file_uploader(
+                        f"为阻塞项 {index} 上传补充资料",
+                        type=["csv", "pdf", "docx", "txt", "md"],
+                        accept_multiple_files=True,
+                        key=f"blocker_files_{widget_scope}_{blocker_id}",
+                    )
+                    or []
+                )
+                all_files.extend(files)
+            blocker = blockers_by_id.get(blocker_id) or {}
+            submissions.append(
+                {
+                    "blocker_id": blocker_id,
+                    "action": action,
+                    "text": text,
+                    "requirement_id": str(
+                        next(iter(blocker.get("requirement_ids") or []), "")
+                    ),
+                    "document_count": len(files),
+                    "file_names": [str(getattr(file, "name", "")) for file in files],
+                }
+            )
+        if not complete:
+            st.caption("请为每个阻塞项主动选择一个处理方式。")
+            return None
+        if not st.button(
+            "提交全部阻塞项处理方式",
+            type="primary",
+            use_container_width=True,
+            key=f"blocker_submit_{widget_scope}_all",
+        ):
+            return None
+        for submission in submissions:
+            error = validate_blocker_submission(
+                submission["action"],
+                submission["text"],
+                int(submission.get("document_count", 0) or 0),
+            )
+            if error:
+                st.warning(error)
+                return None
+        return {
+            "consolidated": True,
+            "resolutions": submissions,
+            "text": "已提交全部硬性阻塞项的处理方式。",
+            "files": all_files,
+            "action": "",
+        }
+
     choices = blocker_choices(payload)
     if not choices:
         return None
@@ -943,18 +1037,24 @@ if blocker_submission is not None or chat_value:
         user_text = str(blocker_submission.get("text") or "")
         uploaded_files = list(blocker_submission.get("files") or [])
         resume_action = str(blocker_submission.get("action") or "")
+        consolidated_resolutions = list(
+            blocker_submission.get("resolutions") or []
+        )
     elif isinstance(chat_value, str):
         user_text = chat_value
         uploaded_files = []
         resume_action = ""
+        consolidated_resolutions = []
     elif isinstance(chat_value, dict):
         user_text = str(chat_value.get("text") or "")
         uploaded_files = list(chat_value.get("files") or [])
         resume_action = ""
+        consolidated_resolutions = []
     else:
         user_text = str(getattr(chat_value, "text", "") or "")
         uploaded_files = list(getattr(chat_value, "files", []) or [])
         resume_action = ""
+        consolidated_resolutions = []
 
     new_docs = _save_uploaded_files(uploaded_files) if uploaded_files else []
     existing_values = _snapshot_values()
@@ -1019,7 +1119,13 @@ if blocker_submission is not None or chat_value:
         # Interrupt 的用户反馈由被恢复的节点写入 messages。app.py 只负责
         # 传递本轮 resume 数据，避免同一条 HumanMessage 被写入两次。
         resume_payload = (
-            build_blocker_resume_payload(
+            build_consolidated_blocker_resume_payload(
+                consolidated_resolutions,
+                message_id=human_message_id,
+                docs=new_docs,
+            )
+            if consolidated_resolutions
+            else build_blocker_resume_payload(
                 text=graph_text,
                 message_id=human_message_id,
                 docs=new_docs,

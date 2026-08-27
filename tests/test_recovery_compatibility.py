@@ -1051,6 +1051,86 @@ def test_blocker_choices_preserve_all_evidence_gap_actions():
     ]
 
 
+def test_consolidated_blocker_forms_preserve_identity_and_canonical_actions():
+    from src.control_messages import blocker_forms
+
+    payload = {
+        "type": "needs_user_input",
+        "category": "CONSOLIDATED_BLOCKERS",
+        "blockers": [
+            {
+                "blocker_id": "blocker-1",
+                "reason": "MISSING_RESOURCE",
+                "available_options": [
+                    "UPLOAD_RESOURCES",
+                    "MODIFY_REQUIREMENT",
+                    "CANCEL_JOB",
+                ],
+            },
+            {
+                "blocker_id": "blocker-2",
+                "reason": "EXPLICIT_APPROVAL",
+                "available_options": ["APPROVE_EXCEPTION", "CANCEL_JOB"],
+            },
+        ],
+    }
+
+    assert blocker_forms(payload) == [
+        {
+            "blocker_id": "blocker-1",
+            "reason": "MISSING_RESOURCE",
+            "options": ["UPLOAD_RESOURCES", "MODIFY_REQUIREMENT", "CANCEL_JOB"],
+        },
+        {
+            "blocker_id": "blocker-2",
+            "reason": "EXPLICIT_APPROVAL",
+            "options": ["APPROVE_EXCEPTION", "CANCEL_JOB"],
+        },
+    ]
+
+
+def test_canonical_blocker_actions_have_safe_ui_contracts():
+    from src.control_messages import blocker_action_spec
+
+    assert blocker_action_spec("MODIFY_REQUIREMENT")["requires_text"] is True
+    assert blocker_action_spec("APPROVE_EXCEPTION")["requires_text"] is False
+    assert blocker_action_spec("CANCEL_JOB")["label"] == "取消整个任务"
+
+
+def test_consolidated_resume_payload_is_blocker_keyed_and_requires_every_action():
+    from src.control_messages import build_consolidated_blocker_resume_payload
+
+    payload = build_consolidated_blocker_resume_payload(
+        [
+            {
+                "blocker_id": "blocker-1",
+                "action": "MODIFY_REQUIREMENT",
+                "text": "文件改为可选",
+                "requirement_id": "REQ-001",
+            },
+            {
+                "blocker_id": "blocker-2",
+                "action": "APPROVE_EXCEPTION",
+                "text": "",
+            },
+        ],
+        message_id="m1",
+        docs=[],
+    )
+
+    assert payload["resolutions"] == [
+        {
+            "blocker_id": "blocker-1",
+            "action": "MODIFY_REQUIREMENT",
+            "requirement_update": {
+                "requirement_id": "REQ-001",
+                "new_text": "文件改为可选",
+            },
+        },
+        {"blocker_id": "blocker-2", "action": "APPROVE_EXCEPTION"},
+    ]
+
+
 def test_blocker_action_specs_define_direct_submission_requirements():
     from src.control_messages import blocker_action_spec
 
@@ -1229,13 +1309,23 @@ def test_streamlit_blocker_selector_is_an_unselected_radio():
         and node.func.attr == "selectbox"
     ]
 
-    assert len(radio_calls) == 1
+    assert len(radio_calls) == 2
     assert selectbox_calls == []
-    keywords = {keyword.arg: keyword.value for keyword in radio_calls[0].keywords}
-    assert isinstance(keywords["options"], ast.Name)
-    assert keywords["options"].id == "choices"
-    assert isinstance(keywords["index"], ast.Constant)
-    assert keywords["index"].value is None
+    for radio_call in radio_calls:
+        keywords = {keyword.arg: keyword.value for keyword in radio_call.keywords}
+        assert isinstance(keywords["index"], ast.Constant)
+        assert keywords["index"].value is None
+    assert any(
+        isinstance(
+            {keyword.arg: keyword.value for keyword in radio_call.keywords}["options"],
+            ast.Name,
+        )
+        and {keyword.arg: keyword.value for keyword in radio_call.keywords}[
+            "options"
+        ].id
+        == "choices"
+        for radio_call in radio_calls
+    )
 
 
 def test_shared_display_consumer_hides_controls_without_calling_stale_alias():

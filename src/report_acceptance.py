@@ -15,7 +15,7 @@ EXTERNAL_BLOCKER = "EXTERNAL_BLOCKER"
 READY_FOR_FINAL = "READY_FOR_FINAL"
 DRAFT_WITH_GAPS = "DRAFT_WITH_GAPS"
 
-_DRAFT_STATUSES = {USER_ACCEPTED_GAP, USER_ACCEPTED_WARNING}
+_DRAFT_STATUSES = {USER_ACCEPTED_GAP, USER_ACCEPTED_WARNING, ACCEPT_WITH_WARNING}
 def is_admitted_section_entry(entry: Mapping[str, Any] | None) -> bool:
     """Return whether one section status has a valid acceptance actor."""
 
@@ -26,6 +26,8 @@ def is_admitted_section_entry(entry: Mapping[str, Any] | None) -> bool:
     if status == VERIFIED_PASS:
         return accepted_by in {"verifier", "user"}
     if status in _DRAFT_STATUSES:
+        if status == ACCEPT_WITH_WARNING:
+            return accepted_by == "system"
         return accepted_by == "user"
     return False
 

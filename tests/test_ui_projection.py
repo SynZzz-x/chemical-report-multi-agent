@@ -27,6 +27,23 @@ def test_decision_policy_summary_renders_recovery_action():
     )
 
 
+def test_decision_policy_summary_projects_degradation_without_blocker_wording():
+    from src.ui_projection import summarize_step
+
+    summary = summarize_step(
+        "DecisionPolicy",
+        {
+            "workflow_action": "NEXT",
+            "failure_decision": {
+                "failure_class": "DEGRADABLE_QUALITY",
+                "subtype": "MISSING_FIGURE",
+            },
+        },
+    )
+
+    assert summary == "已记录非阻塞交付限制：MISSING_FIGURE"
+
+
 def test_streamlit_consumer_uses_shared_summary_projection():
     source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
 

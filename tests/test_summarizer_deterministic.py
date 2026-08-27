@@ -402,6 +402,59 @@ def test_existing_figure_preserves_reference_caption_and_asset(
     assert "图形缺口" not in markdown
 
 
+def test_system_asset_degradation_is_deliverable_with_visible_non_user_warning(
+    monkeypatch, tmp_path
+):
+    state = _state(
+        statuses={
+            "T1": {
+                **_status("ACCEPT_WITH_WARNING"),
+                "accepted_by": "system",
+                "issues": [{"code": "MISSING_FIGURE"}],
+            }
+        },
+        results=[
+            {
+                "task_id": "T1",
+                "text_output": "正文如图1所示。\n\n图1 可选关系图\n\n保留结论。",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "citations": [],
+                "figures": [],
+            }
+        ],
+    )
+    state["tasks"] = [{"task_id": "T1", "task_name": "引言", "generate_figure": True}]
+    state["degraded_issue_registry"] = [
+        {
+            "issue_id": "degraded-1",
+            "task_id": "T1",
+            "task_revision": 1,
+            "failure_class": "DEGRADABLE_QUALITY",
+            "subtype": "MISSING_FIGURE",
+            "reason": "MISSING_FIGURE",
+            "affected_claims": [],
+            "affected_requirement_ids": [],
+            "attempted_repairs": [],
+            "final_fallback": "commit_supported_content_with_warning",
+            "status": "active",
+            "metadata": {},
+        }
+    ]
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+
+    assert result["report_status"] == "DRAFT_WITH_GAPS"
+    assert "系统记录的交付限制" in markdown
+    assert "MISSING_FIGURE" in markdown
+    assert "用户明确接受" not in markdown
+    assert "如图1所示" not in markdown
+    assert "图1 可选关系图" not in markdown
+    assert "保留结论" in markdown
+
+
 def test_nested_reference_projection_restores_parent_container(monkeypatch, tmp_path):
     statuses = {
         "T1": _status("VERIFIED_PASS"),

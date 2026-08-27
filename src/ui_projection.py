@@ -31,6 +31,13 @@ def summarize_step(node: str, delta: dict[str, Any]) -> str:
             return f"审核状态：{status}，问题类型：{','.join(categories)}"
         return f"审核状态：{status}"
     if node == "DecisionPolicy":
+        decision = delta.get("failure_decision") or {}
+        failure_class = str(decision.get("failure_class") or "")
+        subtype = str(decision.get("subtype") or "")
+        if failure_class == "DEGRADABLE_QUALITY":
+            return f"已记录非阻塞交付限制：{subtype or 'DEGRADABLE_QUALITY'}"
+        if failure_class == "FATAL_SYSTEM":
+            return f"系统错误：{subtype or 'FATAL_SYSTEM'}"
         action = str(delta.get("workflow_action") or "待定")
         return f"恢复动作：{action}"
     if node == "Summarizer":

@@ -710,12 +710,63 @@ def needs_user_input(
             else []
         )
         transition_state: dict[str, Any] = dict(state)
+        resumed_docs = list(resumed.get("docs") or []) if isinstance(resumed, dict) else []
         for submission in submissions:
             if not isinstance(submission, dict):
                 continue
             canonical_action = str(submission.get("action") or "").upper()
             if canonical_action == "ADJUST_REQUIREMENT":
                 canonical_action = "MODIFY_REQUIREMENT"
+            if canonical_action == "UPLOAD_RESOURCES":
+                selected_resource_ids = {
+                    str(resource_id)
+                    for resource_id in submission.get("resource_ids") or []
+                }
+                selected_docs = [
+                    doc
+                    for doc in resumed_docs
+                    if isinstance(doc, dict)
+                    and str(
+                        doc.get("file_id")
+                        or doc.get("resource_id")
+                        or doc.get("path")
+                        or ""
+                    )
+                    in selected_resource_ids
+                ]
+                if selected_docs:
+                    _ingest_uploaded_evidence(selected_docs)
+                    existing_docs = list(transition_state.get("docs") or [])
+                    transition_state["docs"] = existing_docs + [
+                        doc for doc in selected_docs if doc not in existing_docs
+                    ]
+                    blocker = next(
+                        (
+                            item
+                            for item in transition_state.get("pending_user_blockers") or []
+                            if str(item.get("blocker_id") or "")
+                            == str(submission.get("blocker_id") or "")
+                        ),
+                        {},
+                    )
+                    blocker_task_id = str(blocker.get("task_id") or "")
+                    tasks = deepcopy(transition_state.get("tasks") or [])
+                    for index, task in enumerate(tasks):
+                        if str(task.get("task_id") or "") != blocker_task_id:
+                            continue
+                        task = dict(task)
+                        task["use_rag"] = True
+                        task["use_resources"] = list(
+                            dict.fromkeys(
+                                list(task.get("use_resources") or [])
+                                + [
+                                    str(doc.get("path") or doc.get("file_id") or "")
+                                    for doc in selected_docs
+                                ]
+                            )
+                        )
+                        tasks[index] = task
+                    transition_state["tasks"] = tasks
             resolution_update = apply_blocker_resolution(
                 transition_state,
                 blocker_id=str(submission.get("blocker_id") or ""),
@@ -736,6 +787,8 @@ def needs_user_input(
             "task_outcome_registry",
             "resume_task_id",
             "cancel_job",
+            "docs",
+            "tasks",
         }
         update = {
             key: deepcopy(transition_state.get(key))

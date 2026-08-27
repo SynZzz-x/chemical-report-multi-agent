@@ -455,7 +455,7 @@ def test_content_retry_limit_requires_explicit_user_acceptance_without_committin
     )
     assert decision["workflow_action"] == "NEEDS_USER_INPUT"
     assert "results" not in decision
-    assert decision["section_status"]["T2"]["status"] == "ACCEPT_WITH_WARNING"
+    assert decision["section_status"]["T2"]["status"] == "BLOCKED"
     assert decision["pending_user_action"]["accepted_choices"] == [
         "REWORK",
         "ADJUST_REQUIREMENT",

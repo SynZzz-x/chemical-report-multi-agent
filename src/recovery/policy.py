@@ -1434,7 +1434,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             warnings = [*warnings, warning]
         statuses = record_section_status(
             state,
-            ACCEPT_WITH_WARNING,
+            BLOCKED,
             accepted_by="system",
             issues=assessment.get("issues") or [],
         )

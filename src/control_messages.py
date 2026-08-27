@@ -68,6 +68,27 @@ BLOCKER_ACTION_SPECS: dict[str, dict[str, Any]] = {
         "requires_text": True,
         "requires_documents": False,
     },
+    "MODIFY_REQUIREMENT": {
+        "label": "调整任务要求",
+        "button_label": "提交新要求",
+        "default_text": "",
+        "requires_text": True,
+        "requires_documents": False,
+    },
+    "APPROVE_EXCEPTION": {
+        "label": "批准明确约定的例外",
+        "button_label": "批准并继续",
+        "default_text": "批准该硬性要求中预先约定的人工例外。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
+    "CANCEL_JOB": {
+        "label": "取消整个任务",
+        "button_label": "确认取消任务",
+        "default_text": "取消整个任务。",
+        "requires_text": False,
+        "requires_documents": False,
+    },
     "UPLOAD_RESOURCES": {
         "label": "上传补充资料",
         "button_label": "上传并继续",
@@ -190,6 +211,35 @@ def blocker_choices(payload: Any) -> list[str]:
     ]
 
 
+def blocker_forms(payload: Any) -> list[dict[str, Any]]:
+    """Project consolidated blockers into stable UI form contracts."""
+
+    if not isinstance(payload, dict) or payload.get("type") != "needs_user_input":
+        return []
+    if str(payload.get("category") or "") != "CONSOLIDATED_BLOCKERS":
+        return []
+    forms: list[dict[str, Any]] = []
+    for blocker in payload.get("blockers") or []:
+        if not isinstance(blocker, dict):
+            continue
+        blocker_id = str(blocker.get("blocker_id") or "").strip()
+        if not blocker_id:
+            continue
+        options = [
+            str(option).strip()
+            for option in blocker.get("available_options") or []
+            if str(option).strip()
+        ]
+        forms.append(
+            {
+                "blocker_id": blocker_id,
+                "reason": str(blocker.get("reason") or "").strip(),
+                "options": list(dict.fromkeys(options)),
+            }
+        )
+    return forms
+
+
 def blocker_action_spec(action: str) -> dict[str, Any]:
     """Return a copy of the UI contract for one blocker action."""
 
@@ -267,3 +317,74 @@ def build_blocker_resume_payload(
         message_id=message_id,
         action=selected,
     )
+
+
+def build_consolidated_blocker_resume_payload(
+    submissions: list[dict[str, Any]],
+    *,
+    message_id: str,
+    docs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build canonical blocker-keyed resolutions for a consolidated interrupt."""
+
+    resolutions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for submission in submissions:
+        blocker_id = str(submission.get("blocker_id") or "").strip()
+        action = str(submission.get("action") or "").strip().upper()
+        if not blocker_id or blocker_id in seen:
+            raise ValueError("每个 blocker 必须且只能提交一次处理方式。")
+        seen.add(blocker_id)
+        if action == "ADJUST_REQUIREMENT":
+            action = "MODIFY_REQUIREMENT"
+        text = str(submission.get("text") or "").strip()
+        error = validate_blocker_submission(action, text, len(docs))
+        if error:
+            raise ValueError(error)
+        resolution: dict[str, Any] = {
+            "blocker_id": blocker_id,
+            "action": action,
+        }
+        if action == "UPLOAD_RESOURCES":
+            selected_names = {
+                str(name).strip()
+                for name in submission.get("file_names") or []
+                if str(name).strip()
+            }
+            selected_docs = [
+                doc
+                for doc in docs
+                if not selected_names
+                or str(doc.get("original_name") or doc.get("name") or "").strip()
+                in selected_names
+            ]
+            resolution["resource_ids"] = [
+                str(
+                    doc.get("file_id")
+                    or doc.get("resource_id")
+                    or doc.get("path")
+                    or ""
+                ).strip()
+                for doc in selected_docs
+                if isinstance(doc, dict)
+                and str(
+                    doc.get("file_id")
+                    or doc.get("resource_id")
+                    or doc.get("path")
+                    or ""
+                ).strip()
+            ]
+        elif action == "MODIFY_REQUIREMENT":
+            requirement_id = str(submission.get("requirement_id") or "").strip()
+            if not requirement_id:
+                raise ValueError("调整要求必须关联 requirement_id。")
+            resolution["requirement_update"] = {
+                "requirement_id": requirement_id,
+                "new_text": text,
+            }
+        resolutions.append(resolution)
+    return {
+        "message_id": str(message_id),
+        "docs": list(docs),
+        "resolutions": resolutions,
+    }
