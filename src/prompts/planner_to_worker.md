@@ -4,12 +4,13 @@
 # Output Contract
 只输出一个 JSON Object，不使用 Markdown 代码块，不输出解释文字。顶层只能包含 `tasks`。
 
-每个任务必须且只能包含以下 12 个字段，不得增加或省略字段：
+每个任务必须且只能包含以下 14 个字段，不得增加或省略字段：
 
 ```text
 task_id, task_name, task_description, task_type,
 use_rag, use_web, query, use_resources,
-generate_figure, generate_table, visualization, covers_sections
+generate_figure, generate_table, visualization, covers_sections,
+requirement_ids, depends_on_task_ids
 ```
 
 - `task_id`：必须从 `T1` 开始严格连续编号，即 `T1`、`T2`、...、`Tn`。
@@ -18,6 +19,8 @@ generate_figure, generate_table, visualization, covers_sections
 - `use_rag`、`use_web`、`generate_figure`、`generate_table`：必须是 Boolean，不得使用字符串代替。
 - `use_resources`：String Array，只能填写“可用资源”中真实存在的资源名称。
 - `covers_sections`：String Array，列出该任务负责的一个或多个正文章节；元素必须逐字取自“建议章节”中 `kind=content` 的 `section`，并保持原顺序。
+- `requirement_ids`：String Array，只能引用“需求合同”中真实存在的 requirement_id；Planner 不得创造 requirement。
+- `depends_on_task_ids`：String Array，只表达真实执行依赖，不得用共同 requirement 代替 dependency。初始计划只能引用当前任务之前的 task_id；无依赖时必须为 `[]`。
 - `use_rag=true` 表示当前任务在生成正文前，需要从知识库获取尚未提供给该任务的新事实、专业依据、案例、参数、文件内容或来源证据；此时 `query` 必须是非空检索词。
 - `use_rag=false` 表示本任务不执行知识库检索，此时 `query` 必须为 `""`。
 - `generate_figure=false` 时，`visualization` 必须为 null。
@@ -43,6 +46,8 @@ generate_figure, generate_table, visualization, covers_sections
 15. “全文基于知识库”或“要求可追溯引用”不等于需要独立的知识库说明章节。除非用户明确要求，或“建议章节”中明确包含，否则不得自行创建“知识库依据与说明”“知识库文件及引用说明”等任务；证据应在对应业务章节就地使用，来源清单由后续报告链路统一整理。
 16. “知识目录”只提供已索引知识资源的文件级摘要、主题和能力，用于判断 `use_rag` 及编写 `query`。知识目录不是当前 Job 附件，其中的条目不能填写到 `use_resources`；`use_resources` 只能引用“可用资源”中真实存在的名称。
 17. 不得把主题相关自动升级为“必然存在细粒度因果关系、具体控制范围或定量依据”。当用户没有明确要求必须取得确定结论，而目录又未明确显示相应证据能力时，应把任务写成调查目标：找到证据则形成结论，未找到则准确报告可追溯的证据缺口；不得虚构结论。用户明确要求必须由证据支持的硬性结论时，应保留该硬性要求，不能用缺口披露替代。
+18. 每项用户需求只能通过 `requirement_ids` 引用“需求合同”中的稳定 ID；不得根据任务文本新增、改写或猜测 requirement。多个任务引用同一 requirement 不代表它们相互依赖。
+19. `depends_on_task_ids` 只描述当前任务生成所必需的上游任务结果。依赖必须显式、无环且仅指向前置任务。`synthesis` 必须列出其消费的全部前置任务；普通独立章节不得为了顺序美观而虚构依赖。
 
 # Input
 - 标题：{title}
@@ -54,6 +59,7 @@ generate_figure, generate_table, visualization, covers_sections
 - 知识目录：{knowledge_catalog}
 - 文档长度：{doc_length}
 - 约束条件：{constraints}
+- 需求合同：{requirements}
 - 写作风格：{style}
 - 输出格式：{output_format}
 - 公开网络授权：{web_authorized}
@@ -73,7 +79,9 @@ generate_figure, generate_table, visualization, covers_sections
       "generate_figure": false,
       "generate_table": true,
       "visualization": null,
-      "covers_sections": ["2.1 章节名称", "2.2 相邻章节名称"]
+      "covers_sections": ["2.1 章节名称", "2.2 相邻章节名称"],
+      "requirement_ids": ["REQ-001"],
+      "depends_on_task_ids": []
     }}
   ]
 }}

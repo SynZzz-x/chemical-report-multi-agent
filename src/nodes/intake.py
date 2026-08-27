@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -11,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
 from ..llm import get_llm, invoke_llm, with_completion_budget
+from ..requirements import build_requirement_registry
 from ..state import State, merge_docs
 
 # ============================================================
@@ -171,6 +173,28 @@ def extract_current_request(state: State) -> Dict[str, Any]:
     }
 
 
+def _latest_human_message_id(messages: List[Any]) -> str | None:
+    """Return the stable ID of the current persisted user message, if present."""
+
+    for message in reversed(messages or []):
+        if isinstance(message, dict):
+            role = str(message.get("role") or message.get("type") or "").casefold()
+            message_id = message.get("id")
+        else:
+            role = str(
+                getattr(message, "type", None) or getattr(message, "role", None) or ""
+            ).casefold()
+            additional = getattr(message, "additional_kwargs", {}) or {}
+            message_id = getattr(message, "id", None) or (
+                additional.get("id") if isinstance(additional, dict) else None
+            )
+        if role not in {"human", "user"}:
+            continue
+        normalized = str(message_id or "").strip()
+        return normalized or None
+    return None
+
+
 def _load_intake_prompt() -> str:
     base_dir = os.path.dirname(__file__)
     path = os.path.join(base_dir, "../prompts/intake_to_planner.md")
@@ -263,8 +287,10 @@ def build_task_spec(
     parsed_request: Dict[str, Any],
     resources: List[Dict[str, Any]],
     metadata: Dict[str, Any] | None = None,
+    requirement_registry: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """生成发送给 Planner 的结构化 INTAKE_SUMMARY。"""
+    requirements = deepcopy(requirement_registry or [])
     content = {
         "from": "Intake",
         "to": "Planner",
@@ -282,11 +308,13 @@ def build_task_spec(
         "core_content": parsed_request.get("core_content"),
         "web_authorized": parsed_request.get("web_authorized") is True,
         "resources": resources,
+        "requirements": requirements,
     }
     return {
         "decision": DECISION_NEXT,
         "messages": [AIMessage(content=json.dumps(content, ensure_ascii=False))],
         "metadata": metadata or {},
+        "requirement_registry": deepcopy(requirements),
     }
 
 
@@ -321,8 +349,15 @@ def intake(state: State, config: RunnableConfig, **kwargs: Any) -> Dict[str, Any
             "metadata": metadata,
         }
 
+    requirements = build_requirement_registry(
+        parsed,
+        raw_request,
+        _latest_human_message_id(list(state.get("messages") or [])),
+    )
+
     return build_task_spec(
         parsed,
         initial.get("resources", []),
         metadata=metadata,
+        requirement_registry=requirements,
     )

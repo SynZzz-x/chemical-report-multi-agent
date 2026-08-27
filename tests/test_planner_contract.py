@@ -7,7 +7,7 @@ import textwrap
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.nodes import intake as intake_module
 from src.nodes import planner as planner_module
@@ -30,9 +30,109 @@ def _task(**overrides):
         "generate_table": False,
         "visualization": None,
         "covers_sections": [task_name],
+        "requirement_ids": [],
+        "depends_on_task_ids": [],
     }
     task.update(overrides)
     return task
+
+
+def test_generated_contract_accepts_explicit_requirement_and_dependency_fields():
+    planner_module._validate_generated_task_schema(
+        [_task(requirement_ids=["REQ-001"])],
+        {"REQ-001"},
+    )
+
+
+def test_generated_contract_rejects_unknown_requirement_id():
+    with pytest.raises(ValueError, match="unknown requirement_id"):
+        planner_module._validate_generated_task_schema(
+            [_task(requirement_ids=["REQ-404"])],
+            {"REQ-001"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("tasks", "message"),
+    [
+        (
+            [
+                _task(task_id="T1"),
+                _task(task_id="T2", depends_on_task_ids=["T404"]),
+            ],
+            "unknown dependency",
+        ),
+        ([_task(task_id="T1", depends_on_task_ids=["T1"])], "depend on itself"),
+        (
+            [
+                _task(task_id="T1", depends_on_task_ids=["T2"]),
+                _task(task_id="T2"),
+            ],
+            "earlier task",
+        ),
+    ],
+)
+def test_initial_plan_rejects_invalid_explicit_dependencies(tasks, message):
+    with pytest.raises(ValueError, match=message):
+        planner_module._validate_task_dependencies(tasks, require_prior=True)
+
+
+def test_replacement_dependency_graph_rejects_cycle():
+    tasks = [
+        _task(task_id="T1", depends_on_task_ids=["T2"]),
+        _task(task_id="T2", depends_on_task_ids=["T1"]),
+    ]
+
+    with pytest.raises(ValueError, match="cycle"):
+        planner_module._validate_task_dependencies(tasks, require_prior=False)
+
+
+def test_synthesis_explicitly_depends_on_every_consumed_prior_task():
+    tasks = [
+        _task(task_id="T1"),
+        _task(task_id="T2"),
+        _task(
+            task_id="T3",
+            task_type="synthesis",
+            use_rag=False,
+            query="",
+            depends_on_task_ids=["T1"],
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="synthesis dependencies"):
+        planner_module._validate_task_dependencies(tasks, require_prior=True)
+
+
+def test_legacy_task_contracts_preserve_serial_execution_without_requirement_overlap():
+    legacy = [
+        {"task_id": "T1", "task_type": "analysis"},
+        {"task_id": "T2", "task_type": "analysis"},
+        {"task_id": "T3", "task_type": "synthesis"},
+    ]
+
+    normalized = planner_module.normalize_legacy_task_contracts(legacy)
+
+    assert normalized == [
+        {
+            "task_id": "T1",
+            "task_type": "analysis",
+            "requirement_ids": [],
+            "depends_on_task_ids": [],
+        },
+        {
+            "task_id": "T2",
+            "task_type": "analysis",
+            "requirement_ids": [],
+            "depends_on_task_ids": ["T1"],
+        },
+        {
+            "task_id": "T3",
+            "task_type": "synthesis",
+            "requirement_ids": [],
+            "depends_on_task_ids": ["T1", "T2"],
+        },
+    ]
 
 
 def test_generated_contract_accepts_tool_free_synthesis_task():
@@ -967,6 +1067,7 @@ def test_global_knowledge_constraint_requires_some_rag_not_every_task(monkeypatc
             task_name="结论",
             task_description="归纳前述任务已形成的结论。",
             task_type="synthesis",
+            depends_on_task_ids=["T1"],
             use_rag=False,
             query="",
         ),
@@ -1288,6 +1389,7 @@ def test_initial_planner_ignores_abstract_when_matching_sections(
             task_id="T2",
             task_name="结论",
             task_type="synthesis",
+            depends_on_task_ids=["T1"],
             task_description="仅归纳已验收前文，不新增事实。",
             use_rag=False,
             query="",
@@ -1624,6 +1726,69 @@ def test_intake_propagates_output_format_with_legacy_fallback():
     assert modern_payload["output_format"] == "PDF"
     assert legacy_payload["output_format"] == "Word"
     assert modern_payload["web_authorized"] is False
+
+
+def test_intake_task_spec_persists_requirement_registry_in_state_and_message():
+    requirements = [
+        {
+            "requirement_id": "REQ-001",
+            "text": "必须使用质量规程",
+            "severity": "hard",
+            "kind": "constraint",
+            "status": "active",
+            "contract_revision": 1,
+            "provenance": {
+                "origin": "explicit_user",
+                "source_message_id": "msg-1",
+                "source_field": "constraints",
+                "source_index": 0,
+                "derivation": "deterministic_explicit_hard_marker",
+            },
+        }
+    ]
+
+    update = intake_module.build_task_spec(
+        {"title": "质量报告"},
+        [],
+        requirement_registry=requirements,
+    )
+
+    payload = json.loads(update["messages"][0].content)
+    assert update["requirement_registry"] == requirements
+    assert payload["requirements"] == requirements
+    assert update["requirement_registry"] is not requirements
+
+
+def test_intake_requirement_registry_uses_current_human_message_provenance(monkeypatch):
+    monkeypatch.setattr(
+        intake_module,
+        "llm_parse_user_need",
+        lambda *_args, **_kwargs: {
+            "is_chat": False,
+            "user_intent": "生成质量报告",
+            "task_type": "工程报告",
+            "title": "质量报告",
+            "doc_length": "不限",
+            "constraints": ["必须使用质量规程"],
+            "sections": [],
+            "core_content": [],
+            "style": "formal",
+            "output_format": "PDF",
+        },
+    )
+    state = {
+        "current_user_input": "必须使用质量规程",
+        "messages": [HumanMessage(id="msg-current", content="必须使用质量规程")],
+        "docs": [],
+    }
+
+    update = intake_module.intake(state, {})
+
+    assert update["requirement_registry"][0]["requirement_id"] == "REQ-001"
+    assert update["requirement_registry"][0]["severity"] == "hard"
+    assert update["requirement_registry"][0]["provenance"]["source_message_id"] == (
+        "msg-current"
+    )
 
 
 @pytest.mark.parametrize(

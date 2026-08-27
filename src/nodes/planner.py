@@ -37,6 +37,8 @@ _GENERATED_TASK_REQUIRED_FIELDS = {
     "generate_table",
     "visualization",
     "covers_sections",
+    "requirement_ids",
+    "depends_on_task_ids",
 }
 _GENERATED_TASK_BOOLEAN_FIELDS = {
     "use_rag",
@@ -167,6 +169,8 @@ _REPLACEMENT_TASK_FIELDS = {
     "tool_requirements",
     "visualization",
     "covers_sections",
+    "requirement_ids",
+    "depends_on_task_ids",
 }
 
 
@@ -175,6 +179,96 @@ def _validate_string_list(value: Any, field: str) -> None:
         not isinstance(item, str) or not item.strip() for item in value
     ):
         raise ValueError(f"{field} must be a list of non-empty strings")
+
+
+def _validate_unique_string_list(value: Any, field: str) -> None:
+    _validate_string_list(value, field)
+    normalized = [item.strip() for item in value]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{field} must not contain duplicates")
+
+
+def _validate_task_dependencies(
+    tasks: List[Dict[str, Any]],
+    *,
+    require_prior: bool,
+) -> None:
+    """Validate explicit task dependencies independently of requirements."""
+
+    task_ids = [str(task.get("task_id") or "").strip() for task in tasks]
+    if any(not task_id for task_id in task_ids) or len(task_ids) != len(set(task_ids)):
+        raise ValueError("task dependencies require unique non-empty task IDs")
+    known = set(task_ids)
+    positions = {task_id: index for index, task_id in enumerate(task_ids)}
+    graph: dict[str, list[str]] = {}
+    for index, task in enumerate(tasks):
+        task_id = task_ids[index]
+        dependencies = task.get("depends_on_task_ids")
+        _validate_unique_string_list(dependencies, "depends_on_task_ids")
+        normalized = [dependency.strip() for dependency in dependencies]
+        unknown = [dependency for dependency in normalized if dependency not in known]
+        if unknown:
+            raise ValueError(
+                f"unknown dependency for {task_id}: {', '.join(unknown)}"
+            )
+        if task_id in normalized:
+            raise ValueError(f"task {task_id} cannot depend on itself")
+        if require_prior and any(positions[dependency] >= index for dependency in normalized):
+            raise ValueError(f"task {task_id} dependencies must reference an earlier task")
+        if str(task.get("task_type") or "") == "synthesis":
+            expected = set(task_ids[:index])
+            if set(normalized) != expected:
+                raise ValueError(
+                    f"synthesis dependencies for {task_id} must include every prior task"
+                )
+        graph[task_id] = normalized
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(task_id: str) -> None:
+        if task_id in visiting:
+            raise ValueError("task dependency graph contains a cycle")
+        if task_id in visited:
+            return
+        visiting.add(task_id)
+        for dependency in graph[task_id]:
+            visit(dependency)
+        visiting.remove(task_id)
+        visited.add(task_id)
+
+    for task_id in task_ids:
+        visit(task_id)
+
+
+def normalize_legacy_task_contracts(
+    tasks: List[Dict[str, Any]],
+    *,
+    validate_dependencies: bool = True,
+) -> List[Dict[str, Any]]:
+    """Preserve historical serial semantics when dependency fields are absent."""
+
+    normalized: List[Dict[str, Any]] = []
+    prior_ids: list[str] = []
+    for raw_task in tasks:
+        task = dict(raw_task)
+        task_id = str(task.get("task_id") or "").strip()
+        if not isinstance(task.get("requirement_ids"), list):
+            task["requirement_ids"] = []
+        if not isinstance(task.get("depends_on_task_ids"), list):
+            task["depends_on_task_ids"] = (
+                list(prior_ids)
+                if str(task.get("task_type") or "") == "synthesis"
+                else ([prior_ids[-1]] if prior_ids else [])
+            )
+        normalized.append(task)
+        if task_id:
+            prior_ids.append(task_id)
+    if validate_dependencies and all(
+        str(task.get("task_id") or "").strip() for task in normalized
+    ):
+        _validate_task_dependencies(normalized, require_prior=False)
+    return normalized
 
 
 def _validate_required_concepts(value: Any) -> None:
@@ -241,7 +335,10 @@ def _validate_synthesis_task(task: Dict[str, Any]) -> None:
         )
 
 
-def _validate_generated_task_schema(candidate_tasks: Any) -> None:
+def _validate_generated_task_schema(
+    candidate_tasks: Any,
+    valid_requirement_ids: set[str] | None = None,
+) -> None:
     """Validate the exact model-facing task contract without legacy fields."""
     if not isinstance(candidate_tasks, list) or not candidate_tasks:
         raise ValueError("Planner tasks must be a non-empty list")
@@ -275,6 +372,20 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
             raise ValueError("query must be a string")
         _validate_string_list(task["use_resources"], "use_resources")
         _validate_string_list(task["covers_sections"], "covers_sections")
+        _validate_unique_string_list(task["requirement_ids"], "requirement_ids")
+        _validate_unique_string_list(
+            task["depends_on_task_ids"], "depends_on_task_ids"
+        )
+        valid_ids = valid_requirement_ids or set()
+        unknown_requirements = [
+            requirement_id
+            for requirement_id in task["requirement_ids"]
+            if requirement_id not in valid_ids
+        ]
+        if unknown_requirements:
+            raise ValueError(
+                "unknown requirement_id: " + ", ".join(unknown_requirements)
+            )
         if not task["covers_sections"]:
             raise ValueError("covers_sections must contain at least one section")
 
@@ -284,6 +395,7 @@ def _validate_generated_task_schema(candidate_tasks: Any) -> None:
         if visualization is None:
             continue
         _validate_visualization_contract(visualization)
+    _validate_task_dependencies(candidate_tasks, require_prior=True)
 
 
 def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
@@ -312,9 +424,15 @@ def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
             )
         if "query" in task and not isinstance(task["query"], str):
             raise ValueError("query must be a string")
-        for field in ("use_resources", "tool_requirements", "covers_sections"):
+        for field in (
+            "use_resources",
+            "tool_requirements",
+            "covers_sections",
+            "requirement_ids",
+            "depends_on_task_ids",
+        ):
             if field in task:
-                _validate_string_list(task[field], field)
+                _validate_unique_string_list(task[field], field)
         if "visualization" in task and task["visualization"] is not None:
             visualization = task["visualization"]
             legacy_policy_only = (
@@ -336,12 +454,21 @@ def _normalize_replacement_tasks(
     candidate_tasks: List[Dict[str, Any]], previous_task_ids: List[str]
 ) -> List[Dict[str, Any]]:
     """Give a replacement plan stable IDs that cannot collide with prior work."""
-    _validate_replacement_task_schema(candidate_tasks)
+    dependency_was_missing = [
+        not isinstance(task.get("depends_on_task_ids"), list)
+        for task in candidate_tasks
+    ]
+    candidates = normalize_legacy_task_contracts(
+        candidate_tasks,
+        validate_dependencies=False,
+    )
+    _validate_replacement_task_schema(candidates)
 
     normalized: List[Dict[str, Any]] = []
     used_ids = {str(task_id).strip() for task_id in previous_task_ids if str(task_id).strip()}
     next_number = _next_task_number(list(used_ids))
-    for candidate in candidate_tasks:
+    temporary_to_stable: Dict[str, str] = {}
+    for candidate in candidates:
         task = dict(candidate)
         if "tool_requirements" in task:
             canonical_requirements = [
@@ -353,15 +480,32 @@ def _normalize_replacement_tasks(
             task["tool_requirements"] = canonical_requirements
             if "spider_tool" in canonical_requirements and not task_allows_web(task):
                 raise ValueError("spider_tool requires explicit web permission")
-        task_id = str(task.get("task_id") or "").strip()
+        temporary_id = str(task.get("task_id") or "").strip()
+        task_id = temporary_id
         if not task_id or task_id in used_ids:
             while f"T{next_number}" in used_ids:
                 next_number += 1
             task_id = f"T{next_number}"
             next_number += 1
         task["task_id"] = task_id
+        if temporary_id:
+            temporary_to_stable[temporary_id] = task_id
         used_ids.add(task_id)
         normalized.append(task)
+    assigned_ids = [str(task["task_id"]) for task in normalized]
+    for index, task in enumerate(normalized):
+        if dependency_was_missing[index]:
+            task["depends_on_task_ids"] = (
+                assigned_ids[:index]
+                if str(task.get("task_type") or "") == "synthesis"
+                else ([assigned_ids[index - 1]] if index else [])
+            )
+        else:
+            task["depends_on_task_ids"] = [
+                temporary_to_stable.get(str(dependency), str(dependency))
+                for dependency in task.get("depends_on_task_ids") or []
+            ]
+    _validate_task_dependencies(normalized, require_prior=False)
     return normalized
 
 
@@ -704,7 +848,13 @@ def _parse_generated_plan_payload(
             raise ValueError("Planner tasks must be objects")
         normalized_tasks.append(dict(raw_task))
 
-    _validate_generated_task_schema(normalized_tasks)
+    valid_requirement_ids = {
+        str(requirement.get("requirement_id") or "").strip()
+        for requirement in policy_context.get("requirements") or []
+        if isinstance(requirement, dict)
+        and str(requirement.get("requirement_id") or "").strip()
+    }
+    _validate_generated_task_schema(normalized_tasks, valid_requirement_ids)
     expected_ids = [f"T{index}" for index in range(1, len(normalized_tasks) + 1)]
     actual_ids = [task["task_id"] for task in normalized_tasks]
     if actual_ids != expected_ids:
@@ -921,6 +1071,7 @@ def _build_tasks_with_llm(intake_obj, config):
             "style": intake_obj.get("style"),
             "output_format": intake_obj.get("output_format"),
             "web_authorized": intake_obj.get("web_authorized") is True,
+            "requirements": intake_obj.get("requirements") or [],
         },
         resources=resource_objs,
         policy_context=intake_obj,
@@ -1018,6 +1169,7 @@ def _build_tasks_from_replan_feedback(state, config, current_tasks):
                 "style": intake_data.get("style"),
                 "output_format": intake_data.get("output_format"),
                 "web_authorized": policy_context["web_authorized"],
+                "requirements": intake_data.get("requirements") or [],
             },
             resources=resource_objs,
             policy_context=policy_context,
@@ -1121,6 +1273,7 @@ def _refine_tasks(
                 "style": intake_data.get("style"),
                 "output_format": intake_data.get("output_format"),
                 "web_authorized": policy_context["web_authorized"],
+                "requirements": intake_data.get("requirements") or [],
             },
             resources=all_resources,
             policy_context=policy_context,
