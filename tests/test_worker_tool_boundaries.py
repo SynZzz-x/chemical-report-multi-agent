@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,9 +7,31 @@ import pytest
 
 from src.evidence.models import EvidenceBundle, EvidenceRecord
 from src.evidence.normalizer import normalize_rag_tool_calls
+from src.evidence.query_identity import normalize_query_identity, query_fingerprint
 from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode, ChemicalKnowledgeBaseTool, ToolManager
 from src.tool_names import canonical_tool_name
+
+
+def test_query_identity_is_textual_only():
+    assert normalize_query_identity("  聚乙烯   质量异常 ") == "聚乙烯 质量异常"
+    assert normalize_query_identity("聚乙烯质量问题") != normalize_query_identity(
+        "聚乙烯 质量异常"
+    )
+    assert normalize_query_identity(" PE  Quality ") == "pe quality"
+    assert query_fingerprint(" PE  Quality ") == query_fingerprint("pe quality")
+
+
+def test_worker_prefetch_and_tool_loop_share_query_identity_authority():
+    import inspect
+
+    prefetch_source = inspect.getsource(AutonomousToolNode._prefetch_rag)
+    loop_source = inspect.getsource(AutonomousToolNode._execute_tool_loop)
+
+    assert "normalize_query_identity(" in prefetch_source
+    assert "normalize_query_identity(" in loop_source
+    assert ".casefold()" not in prefetch_source
+    assert ".casefold()" not in loop_source
 
 
 @pytest.mark.parametrize(
@@ -1257,6 +1280,203 @@ def test_worker_generation_evidence_context_preserves_no_evidence_constraint():
 
     assert "未提供可验证的来源证据" in context
     assert "不得使用模型常识补答" in context
+
+
+def test_prefetched_evidence_is_first_iteration_inventory_and_finishes_in_one_call(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
+        ),
+    )
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, parameters):
+            self.calls.append(parameters)
+            return {
+                "success": True,
+                "evidence": [
+                    {
+                        "title": "聚乙烯生产工艺与质量控制概述",
+                        "source": "/srv/private/process.docx",
+                        "section_path": "§5 关键工艺参数及其影响",
+                        "content": "参数趋势、实验室分析与批次追踪可用于异常诊断。" * 30,
+                    }
+                ],
+            }
+
+    class Model:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, messages, **_kwargs):
+            self.calls.append(messages)
+            return SimpleNamespace(content="基于已有证据完成报告。[E1]" + "正文" * 100, tool_calls=[])
+
+    query = "聚乙烯 质量异常 排查建议"
+    task = {"task_id": "T1", "use_rag": True, "query": query}
+    tool = KnowledgeTool()
+    prefetched = AutonomousToolNode._prefetch_rag(task, [tool])
+    context = AutonomousToolNode._evidence_context_for_generation(prefetched)
+
+    assert '"prefetched_queries": ["聚乙烯 质量异常 排查建议"]' in context
+    assert f'"query_fingerprints": ["{query_fingerprint(query)}"]' in context
+    assert '"prefetch_queries_used": 1' in context
+    assert '"adaptive_queries_remaining": 2' in context
+    assert '"supporting_text_excerpt"' in context
+    assert '"supporting_text"' not in context
+    assert "/srv/private/process.docx" not in context
+    assert len(context) < 1400
+    inventory = json.loads(context[context.index("{") :])
+    assert len(inventory["evidence"][0]["supporting_text_excerpt"]) == 240
+    assert "预检索已完成" in context
+    assert "具体的新证据缺口" in context
+
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
+    model = Model()
+    node.llm_client = model
+    _content, calls, _stats = node._execute_tool_loop(
+        model,
+        [SimpleNamespace(content=context)],
+        [tool],
+        task,
+        initial_tool_calls=prefetched,
+    )
+
+    assert len(model.calls) == 1
+    assert len(tool.calls) == 1
+    assert len(calls) == 1
+
+
+def test_same_normalized_prefetch_query_is_rejected_without_adaptive_retrieval(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
+        ),
+    )
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, parameters):
+            self.calls.append(parameters)
+            return {"success": True, "evidence": []}
+
+    responses = [
+        SimpleNamespace(
+            content="",
+            tool_calls=[
+                {
+                    "id": "same-q1",
+                    "name": "chemical_knowledge_base_tool",
+                    "args": {"query": "聚乙烯 质量异常"},
+                }
+            ],
+        ),
+        SimpleNamespace(content="基于已有证据完成。" + "正文" * 100, tool_calls=[]),
+    ]
+
+    seen_messages = []
+
+    class Model:
+        def invoke(self, messages, **_kwargs):
+            seen_messages.append(messages)
+            return responses.pop(0)
+
+    task = {"task_id": "T1", "use_rag": True, "query": "  聚乙烯   质量异常 "}
+    tool = KnowledgeTool()
+    prefetched = AutonomousToolNode._prefetch_rag(task, [tool])
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
+    node.llm_client = Model()
+
+    _content, calls, _stats = node._execute_tool_loop(
+        node.llm_client, [], [tool], task, initial_tool_calls=prefetched
+    )
+
+    assert len(tool.calls) == 1
+    assert len(calls) == 1
+    assert any(
+        "已跳过重复的知识库查询" in message.content
+        for message in seen_messages[1]
+        if hasattr(message, "content")
+    )
+
+
+def test_textually_distinct_q2_runs_one_adaptive_retrieval(monkeypatch):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(
+                rag_max_queries=3, rag_adaptive_reserve=1
+            )
+        ),
+    )
+
+    class KnowledgeTool:
+        name = "chemical_knowledge_base_tool"
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, parameters):
+            self.calls.append(parameters)
+            return {"success": True, "evidence": []}
+
+    q2 = "催化剂注入量 灰分"
+    responses = [
+        SimpleNamespace(
+            content="",
+            tool_calls=[
+                {
+                    "id": "new-q2",
+                    "name": "chemical_knowledge_base_tool",
+                    "args": {"query": q2},
+                }
+            ],
+        ),
+        SimpleNamespace(content="补充证据后完成。" + "正文" * 100, tool_calls=[]),
+    ]
+
+    class Model:
+        def invoke(self, _messages, **_kwargs):
+            return responses.pop(0)
+
+    task = {"task_id": "T1", "use_rag": True, "query": "聚乙烯 质量异常"}
+    tool = KnowledgeTool()
+    prefetched = AutonomousToolNode._prefetch_rag(task, [tool])
+    node = AutonomousToolNode.__new__(AutonomousToolNode)
+    node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
+    node.llm_client = Model()
+
+    _content, calls, _stats = node._execute_tool_loop(
+        node.llm_client, [], [tool], task, initial_tool_calls=prefetched
+    )
+
+    assert [call["query"] for call in tool.calls] == [task["query"], q2]
+    assert calls[-1]["parameters"]["query"] == q2
+    assert calls[-1]["iteration"] == 1
 
 
 def test_worker_clean_loop_uses_prefetched_stable_id_without_binding_call():

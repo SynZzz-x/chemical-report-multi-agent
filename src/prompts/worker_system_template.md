@@ -16,6 +16,7 @@
 # Constraints
 1. **工具使用规范**:
    - 优先使用 **ChemicalKnowledgeBaseTool** 检索已有知识。
+   - 若执行上下文已列出完成的知识库预检索，证据足够时直接撰写；仅在存在具体新证据缺口时使用剩余 adaptive query budget，不得重复已列查询。
    - 仅在必要时使用 **SpiderTool**，每个任务最多爬取 {max_spider_results} 个网页。
    - 图表生成限制：每个任务最多 {max_charts_per_task} 个，每个数据集最多 {max_charts_per_dataset} 个。
    - 避免重复生成相同类型的图表。

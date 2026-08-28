@@ -132,9 +132,7 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         SimpleNamespace(content=json.dumps(PASS_VERIFIER_RESPONSE, ensure_ascii=False))
     )
     worker_a_recorder = BenchmarkRecorder(SCENARIO_A_WORKER_RESPONSE)
-    worker_b_recorder = _SequenceRecorder(
-        [SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE, SCENARIO_B_FINAL_WORKER_RESPONSE]
-    )
+    worker_b_recorder = _SequenceRecorder([SCENARIO_B_FINAL_WORKER_RESPONSE])
     knowledge_tool = _KnowledgeTool()
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -210,19 +208,16 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
     assert verifier_update["assessment"]["status"] == "PASS"
     attempted_adaptive_retrievals = [
         tool_call
-        for response in (
-            SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE,
-            SCENARIO_B_FINAL_WORKER_RESPONSE,
-        )
+        for response in (SCENARIO_B_FINAL_WORKER_RESPONSE,)
         for tool_call in getattr(response, "tool_calls", [])
         if tool_call.get("name") == "chemical_knowledge_base_tool"
     ]
     prefetch_retrieval_calls = len(prefetched)
     adaptive_retrieval_calls = len(knowledge_tool.calls) - prefetch_retrieval_calls
     duplicate_retrievals = len(attempted_adaptive_retrievals) - adaptive_retrieval_calls
-    assert len(attempted_adaptive_retrievals) == 1
+    assert len(attempted_adaptive_retrievals) == 0
     assert adaptive_retrieval_calls == 0
-    assert duplicate_retrievals == 1
+    assert duplicate_retrievals == 0
     failed_semantic_assessment = parse_verifier_assessment(
         json.dumps(FAILED_SEMANTIC_VERIFIER_RESPONSE, ensure_ascii=False)
     )
@@ -242,7 +237,6 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         intake_recorder.response,
         planner_recorder.response,
         worker_a_recorder.response,
-        SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE,
         SCENARIO_B_FINAL_WORKER_RESPONSE,
         verifier_recorder.response,
     )
@@ -392,16 +386,37 @@ def test_offline_benchmark_metrics_are_deterministic():
 
     assert first == second
     baseline_metrics = baseline["measurement"]["metrics"]
+    optimized_metrics = {
+        "worker_llm_calls",
+        "worker_generations",
+        "worker_tool_loop_iterations",
+        "duplicate_retrievals",
+        "total_llm_calls",
+    }
     character_metrics = {"serialized_prompt_chars", "mock_completion_chars"}
     assert {
-        key: value for key, value in first.items() if key not in character_metrics
+        key: value
+        for key, value in first.items()
+        if key not in character_metrics | optimized_metrics
     } == {
         key: value
         for key, value in baseline_metrics.items()
-        if key not in character_metrics
+        if key not in character_metrics | optimized_metrics
     }
     assert first["serialized_prompt_chars"] <= baseline_metrics["serialized_prompt_chars"]
     assert first["mock_completion_chars"] <= baseline_metrics["mock_completion_chars"]
+    assert first["worker_llm_calls"] == 2
+    assert first["worker_generations"] == 2
+    assert first["worker_tool_loop_iterations"] == 2
+    assert first["prefetch_retrieval_calls"] == 1
+    assert first["adaptive_retrieval_calls"] == 0
+    assert first["duplicate_retrievals"] == 0
+    assert first["total_llm_calls"] == 5
+    assert first["worker_llm_calls"] == baseline_metrics["worker_llm_calls"] - 1
+    assert first["worker_tool_loop_iterations"] == (
+        baseline_metrics["worker_tool_loop_iterations"] - 1
+    )
+    assert first["duplicate_retrievals"] == baseline_metrics["duplicate_retrievals"] - 1
     assert first["total_llm_calls"] >= 1
     assert first["serialized_prompt_chars"] > 0
     assert first["mock_completion_chars"] > 0
