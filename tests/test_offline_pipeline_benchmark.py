@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +19,7 @@ from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode
 from tests.benchmark_support import (
     BenchmarkRecorder,
+    FAILED_SEMANTIC_VERIFIER_RESPONSE,
     PASS_VERIFIER_RESPONSE,
     SCENARIO_A_TASK,
     SCENARIO_A_WORKER_RESPONSE,
@@ -26,47 +31,7 @@ from tests.benchmark_support import (
     measure_serialized_messages,
     serialized_chars,
 )
-
-
-class _Message:
-    def __init__(self, content: str):
-        self.content = content
-
-
-class _FormattedChain:
-    def __init__(self, prompt: "_RecordingPrompt", model: Any):
-        self.prompt = prompt
-        self.model = model
-
-    def invoke(self, values: Any, **kwargs: Any) -> Any:
-        return self.model.invoke(self.prompt.format_messages(**values), **kwargs)
-
-
-class _RecordingPrompt:
-    """Small local prompt fake which records production formatting inputs."""
-
-    def __init__(self, messages: list[tuple[str, str]]):
-        self.messages = messages
-
-    @classmethod
-    def from_messages(cls, messages: list[tuple[str, str]]) -> "_RecordingPrompt":
-        return cls(messages)
-
-    @classmethod
-    def from_template(cls, template: str) -> "_RecordingPrompt":
-        return cls([("human", template)])
-
-    def format_messages(self, **values: Any) -> list[_Message]:
-        rendered = []
-        for _role, template in self.messages:
-            content = template
-            for key, value in values.items():
-                content = content.replace("{" + key + "}", str(value))
-            rendered.append(_Message(content))
-        return rendered
-
-    def __or__(self, model: Any) -> _FormattedChain:
-        return _FormattedChain(self, model)
+from src.verifier_contract import parse_verifier_assessment
 
 
 class _SequenceRecorder:
@@ -85,6 +50,7 @@ class _SequenceRecorder:
 
 class _KnowledgeTool:
     name = "chemical_knowledge_base_tool"
+    description = "检索离线化工知识库。"
 
     def __init__(self):
         self.calls: list[dict[str, Any]] = []
@@ -124,8 +90,24 @@ def _planner_response() -> str:
     )
 
 
-def collect_pipeline_metrics() -> dict[str, int]:
-    """Run Intake, Planner, Worker, and Verifier with no external services."""
+def _worker_initial_messages(
+    node: AutonomousToolNode, task: dict[str, Any], tools: list[Any], prefetched: list[dict[str, Any]]
+) -> list[Any]:
+    """Build the production Worker prompt path, including prefetch context."""
+
+    messages = [
+        worker_graph_module.SystemMessage(content=node._build_system_prompt(task, tools)),
+        worker_graph_module.HumanMessage(content=node._build_task_prompt(task)),
+    ]
+    if prefetched:
+        evidence_context = node._evidence_context_for_generation(prefetched)
+        if evidence_context:
+            messages.append(worker_graph_module.HumanMessage(content=evidence_context))
+    return messages
+
+
+def _collect_pipeline_metrics_in_process() -> dict[str, int]:
+    """Run the real production prompt construction with offline fakes only."""
 
     intake_response = {
         "is_chat": False,
@@ -156,8 +138,6 @@ def collect_pipeline_metrics() -> dict[str, int]:
     knowledge_tool = _KnowledgeTool()
 
     with pytest.MonkeyPatch.context() as monkeypatch:
-        for module in (intake_module, planner_module, verifier_module, worker_graph_module):
-            monkeypatch.setattr(module, "ChatPromptTemplate", _RecordingPrompt, raising=False)
         monkeypatch.setattr(intake_module, "get_llm", lambda *args, **kwargs: intake_recorder)
         monkeypatch.setattr(intake_module, "invoke_llm", _fake_invoke)
         parsed_intake = intake_module.llm_parse_user_need(
@@ -182,11 +162,21 @@ def collect_pipeline_metrics() -> dict[str, int]:
         node = AutonomousToolNode.__new__(AutonomousToolNode)
         node.config = SimpleNamespace(MAX_TOOL_ITERATIONS=3, MAX_CHARTS_PER_TASK=0)
         node.llm_client = worker_a_recorder
-        node._execute_tool_loop(worker_a_recorder, [], [], SCENARIO_A_TASK)
+        scenario_a_messages = _worker_initial_messages(node, SCENARIO_A_TASK, [], [])
+        node._execute_tool_loop(worker_a_recorder, scenario_a_messages, [], SCENARIO_A_TASK)
 
         prefetched = AutonomousToolNode._prefetch_rag(SCENARIO_B_TASK, [knowledge_tool])
         node.llm_client = worker_b_recorder
-        node._execute_tool_loop(worker_b_recorder, [], [knowledge_tool], SCENARIO_B_TASK, prefetched)
+        scenario_b_messages = _worker_initial_messages(
+            node, SCENARIO_B_TASK, [knowledge_tool], prefetched
+        )
+        node._execute_tool_loop(
+            worker_b_recorder,
+            scenario_b_messages,
+            [knowledge_tool],
+            SCENARIO_B_TASK,
+            prefetched,
+        )
 
         monkeypatch.setattr(verifier_module, "get_llm", lambda *args, **kwargs: verifier_recorder)
         monkeypatch.setattr(verifier_module, "invoke_llm", _fake_invoke)
@@ -218,6 +208,29 @@ def collect_pipeline_metrics() -> dict[str, int]:
         )
 
     assert verifier_update["assessment"]["status"] == "PASS"
+    attempted_adaptive_retrievals = [
+        tool_call
+        for response in (
+            SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE,
+            SCENARIO_B_FINAL_WORKER_RESPONSE,
+        )
+        for tool_call in getattr(response, "tool_calls", [])
+        if tool_call.get("name") == "chemical_knowledge_base_tool"
+    ]
+    prefetch_retrieval_calls = len(prefetched)
+    adaptive_retrieval_calls = len(knowledge_tool.calls) - prefetch_retrieval_calls
+    duplicate_retrievals = len(attempted_adaptive_retrievals) - adaptive_retrieval_calls
+    assert len(attempted_adaptive_retrievals) == 1
+    assert adaptive_retrieval_calls == 0
+    assert duplicate_retrievals == 1
+    failed_semantic_assessment = parse_verifier_assessment(
+        json.dumps(FAILED_SEMANTIC_VERIFIER_RESPONSE, ensure_ascii=False)
+    )
+    failed_semantic_verifier_issues = sum(
+        issue.code == "CLAIM_PARTIALLY_SUPPORTED"
+        for issue in failed_semantic_assessment.issues
+    )
+    assert failed_semantic_verifier_issues == 1
     prompt_recorders = (
         intake_recorder,
         planner_recorder,
@@ -248,20 +261,48 @@ def collect_pipeline_metrics() -> dict[str, int]:
         "verifier_llm_calls": len(verifier_recorder.calls),
         "worker_generations": len(worker_a_recorder.calls) + len(worker_b_recorder.calls),
         "worker_tool_loop_iterations": len(worker_a_recorder.calls) + len(worker_b_recorder.calls),
-        "prefetch_retrieval_calls": len(knowledge_tool.calls),
-        "adaptive_retrieval_calls": 0,
-        "duplicate_retrievals": 1,
+        "prefetch_retrieval_calls": prefetch_retrieval_calls,
+        "adaptive_retrieval_calls": adaptive_retrieval_calls,
+        "duplicate_retrievals": duplicate_retrievals,
+        "failed_semantic_verifier_issues": failed_semantic_verifier_issues,
         "total_llm_calls": sum(len(recorder.calls) for recorder in prompt_recorders),
         "serialized_prompt_chars": serialized_prompt_chars,
         "mock_completion_chars": mock_completion_chars,
     }
 
 
+def collect_pipeline_metrics() -> dict[str, int]:
+    """Collect with installed production LangChain prompts, outside pytest stubs."""
+
+    if os.environ.get("OFFLINE_PIPELINE_BENCHMARK_CHILD") == "1":
+        return _collect_pipeline_metrics_in_process()
+    command = (
+        "import json; "
+        "from tests.test_offline_pipeline_benchmark import collect_pipeline_metrics; "
+        "print('__OFFLINE_PIPELINE_METRICS__' + json.dumps(collect_pipeline_metrics()))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "OFFLINE_PIPELINE_BENCHMARK_CHILD": "1"},
+    )
+    marker = "__OFFLINE_PIPELINE_METRICS__"
+    metrics_line = next(
+        line for line in reversed(result.stdout.splitlines()) if line.startswith(marker)
+    )
+    return json.loads(metrics_line.removeprefix(marker))
+
+
 def test_offline_benchmark_metrics_are_deterministic():
     first = collect_pipeline_metrics()
     second = collect_pipeline_metrics()
+    baseline_path = Path(__file__).parents[1] / "docs/benchmarks/2026-08-28-pipeline-baseline.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
     assert first == second
+    assert first == baseline["measurement"]["metrics"]
     assert first["total_llm_calls"] >= 1
     assert first["serialized_prompt_chars"] > 0
     assert first["mock_completion_chars"] > 0

@@ -31,6 +31,11 @@ class BenchmarkRecorder:
         self.calls.append(value)
         return self.response
 
+    def __call__(self, value: Any, **kwargs: Any) -> Any:
+        """Allow a real LangChain prompt sequence to invoke this offline fake."""
+
+        return self.invoke(value, **kwargs)
+
     @property
     def prompt_chars(self) -> int:
         return sum(serialized_chars(value) for value in self.calls)
