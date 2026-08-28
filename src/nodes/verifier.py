@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
 from src.evidence.citations import extract_inline_evidence_ids
+from src.evidence.claims import derive_claims
 from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm, invoke_llm, with_completion_budget
 from src.evidence.projection import project_report_sources
@@ -48,6 +49,10 @@ _CATEGORY_BY_CODE = {
     "SOURCE_UNSUPPORTED": "EVIDENCE_GAP",
     "INVALID_CITATION_ID": "EVIDENCE_GAP",
     "MISSING_INLINE_CITATION": "EVIDENCE_GAP",
+    "CLAIM_UNSUPPORTED": "EVIDENCE_GAP",
+    "CLAIM_PARTIALLY_SUPPORTED": "EVIDENCE_GAP",
+    "CLAIM_EVIDENCE_MISMATCH": "EVIDENCE_GAP",
+    "UNLABELED_INFERENCE": "EVIDENCE_GAP",
     "TOO_SHORT": "CONTENT_DEFECT",
     "TOO_LONG": "CONTENT_DEFECT",
     "MISSING_TABLE": "CONTENT_DEFECT",
@@ -74,6 +79,14 @@ _VALID_CATEGORIES = {
     "EXTERNAL_BLOCKER",
     "VERIFIER_FAILURE",
 }
+_SEMANTIC_CLAIM_CODES = frozenset(
+    {
+        "CLAIM_UNSUPPORTED",
+        "CLAIM_PARTIALLY_SUPPORTED",
+        "CLAIM_EVIDENCE_MISMATCH",
+        "UNLABELED_INFERENCE",
+    }
+)
 _ISSUE_REQUIRED_STRING_FIELDS = {
     "code",
     "category",
@@ -120,6 +133,10 @@ _REQUIREMENT_KINDS_BY_CODE = {
     "MISSING_INLINE_CITATION": {"citation", "evidence"},
     "SOURCE_UNSUPPORTED": {"citation", "evidence"},
     "REPORT_SOURCE_INCONSISTENT": {"citation", "evidence"},
+    "CLAIM_UNSUPPORTED": {"citation", "evidence"},
+    "CLAIM_PARTIALLY_SUPPORTED": {"citation", "evidence"},
+    "CLAIM_EVIDENCE_MISMATCH": {"citation", "evidence"},
+    "UNLABELED_INFERENCE": {"citation", "evidence"},
 }
 
 
@@ -186,6 +203,11 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
         try:
             current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
             content = current_result.get("content") or current_result.get("text_output") or ""
+            citations = current_result.get("citations") or []
+            claim_evidence_pairs = json.dumps(
+                derive_claims(str(content), citations),
+                ensure_ascii=False,
+            )
             actual_length = count_report_length(str(content))
             length_target = parse_length_target(
                 str(current_task.get("task_description") or "")
@@ -195,7 +217,15 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     "status": current_result.get("status"),
                     "tables": current_result.get("tables", []),
                     "figures": current_result.get("figures", []),
-                    "citations": current_result.get("citations", []),
+                    "citations": [
+                        {
+                            "evidence_id": str(citation.get("evidence_id") or "")[:32],
+                            "title": str(citation.get("title") or "")[:200],
+                            "locator": str(citation.get("locator") or "")[:200],
+                        }
+                        for citation in citations
+                        if isinstance(citation, dict)
+                    ],
                     "sources_used": current_result.get("sources_used", []),
                     "evidence_coverage": current_result.get("evidence_coverage", {}),
                     "actual_length": actual_length,
@@ -240,6 +270,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     ),
                     "worker_result": content,
                     "worker_assets": worker_assets,
+                    "claim_evidence_pairs": claim_evidence_pairs,
                     "deterministic_checks": json.dumps(
                         _deterministic_issues(state), ensure_ascii=False
                     ),
@@ -895,7 +926,11 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             detail = normalized.get("retrieval_query") or "当前硬性证据要求"
             normalized.update(
                 {
-                    "code": "EVIDENCE_GAP",
+                    "code": (
+                        code
+                        if code in _SEMANTIC_CLAIM_CODES
+                        else "EVIDENCE_GAP"
+                    ),
                     "category": "EVIDENCE_GAP",
                     "description": f"当前已授权来源不足以支持该证据要求：{detail}",
                     "suggestion": (

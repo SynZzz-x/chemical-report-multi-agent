@@ -13,6 +13,9 @@ Worker 正文：
 Worker 结构化资产：
 {worker_assets}
 
+逐项论断及其语义证据（这是判断证据是否支持论断的权威语义输入）：
+{claim_evidence_pairs}
+
 程序确定性检查结果：
 {deterministic_checks}
 
@@ -50,9 +53,26 @@ Synthesis 专用来源上下文（普通任务时为空）：
 使用 `EVIDENCE_GAP` 并设为 FAILED/BLOCKED。
 
 当 `citations` 非空时，正文中的证据性论断必须在相邻位置使用真实的 `[E编号]`。
-检查正文引用的编号是否存在于 `citations`，并结合对应 `supporting_text` 判断相邻论断
-是否得到支持。不存在的编号使用 `INVALID_CITATION_ID`；有证据表但正文没有引用绑定时
-使用 `MISSING_INLINE_CITATION`；引用存在但不能支持相邻论断时使用 `SOURCE_UNSUPPORTED`。
+不存在的编号使用 `INVALID_CITATION_ID`；有证据表但正文没有引用绑定时使用
+`MISSING_INLINE_CITATION`。这些结构事实由程序确定性检查裁决。合法引用与相邻论断之间的
+语义支持关系必须使用下述四个逐项论断 code，不得将它们扁平化为 `SOURCE_UNSUPPORTED`。
+
+引用编号存在本身绝不代表证据支持论断。必须逐项比较“逐项论断及其语义证据”，并使用
+以下四个精确 code；这些问题的 category 均为 `EVIDENCE_GAP`：
+
+- `CLAIM_UNSUPPORTED`：证据涉及同一主题，但不能确立论断的核心断言。例如，证据仅说明
+  温度影响分子量，而论断声称具体的链转移机理及方向。
+- `CLAIM_PARTIALLY_SUPPORTED`：复合论断的重要部分得到支持，但另加了证据未支持的范围、
+  机理、顺序、因果、程度、优先级或阈值。建议只能是缩小论断或补充证据。
+- `CLAIM_EVIDENCE_MISMATCH`：引用证据支持的是不同对象、变量、关系或现象；这表示引用
+  错误，而不只是证据较弱。
+- `UNLABELED_INFERENCE`：证据可以作为前提，但正文把新推导的结论写成来源直接陈述的
+  事实。外观像事实的派生结论必须使用此 code。
+
+短复合论断只要存在未支持的重要分句，就必须使用 `CLAIM_PARTIALLY_SUPPORTED`。明确标注
+为 inference 的推论可根据前提是否足够审核；外观像事实的派生结论使用
+`UNLABELED_INFERENCE`。`evidence_gap` 类型是明确的证据缺口披露，可以没有引用或证据项，
+不得仅因其 `evidence_ids=[]` 判为缺陷。
 
 当任务类型为 `synthesis` 时，它只能抽取和重排已经验收的章节。必须使用
 “Synthesis 专用来源上下文”判断内容来源：候选正文中与 accepted_sections 原句一致、
@@ -62,6 +82,10 @@ Synthesis 专用来源上下文（普通任务时为空）：
 
 # Output Contract
 {format_instructions}
+
+`PASS` 只输出契约必需字段，且 `issues`、`requirements_met`、
+`requirements_missing` 均为空数组。`FAILED` 只输出 Recovery 能采取行动的问题，不总结、
+改写或代写 Worker 报告。
 
 每个 issue 必须包含非空的 `code`、`category`、`description`、`suggestion` 和
 `severity`；`severity` 只能是 `minor`、`major` 或 `critical`。只有资源问题可增加

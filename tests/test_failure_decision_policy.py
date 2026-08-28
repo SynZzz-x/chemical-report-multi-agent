@@ -84,6 +84,35 @@ def test_evidence_recovery_publishes_canonical_retry_decision():
     assert update["failure_decision"]["repair_budget"] == 1
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "CLAIM_UNSUPPORTED",
+        "CLAIM_PARTIALLY_SUPPORTED",
+        "CLAIM_EVIDENCE_MISMATCH",
+        "UNLABELED_INFERENCE",
+    ],
+)
+def test_claim_issue_codes_reach_existing_evidence_recovery_unchanged(code):
+    state = _state(code=code, requirement_kind="evidence")
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": code,
+                "category": "EVIDENCE_GAP",
+                "requirement_ids": ["REQ-001"],
+            }
+        ],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert update["failure_decision"]["subtype"] == code
+    assert update["failure_decision"]["action"] == FailureAction.RECOVER_EVIDENCE
+
+
 def test_exhausted_soft_evidence_is_terminal_degradation_without_human():
     state = _state(code="EVIDENCE_GAP")
     state["evidence_recovery_count"] = {"T1": 1}

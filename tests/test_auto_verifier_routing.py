@@ -203,6 +203,90 @@ def test_llm_issue_requirement_ids_are_filtered_to_active_task_scope():
     assert sanitized["issues"][0]["requirement_ids"] == ["REQ-001"]
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "CLAIM_UNSUPPORTED",
+        "CLAIM_PARTIALLY_SUPPORTED",
+        "CLAIM_EVIDENCE_MISMATCH",
+        "UNLABELED_INFERENCE",
+    ],
+)
+def test_claim_issue_codes_keep_identity_and_use_evidence_gap_category(code):
+    state = _state()
+    state["tasks"][0]["requirement_ids"] = ["REQ-EVIDENCE"]
+    state["requirement_registry"] = [
+        {
+            "requirement_id": "REQ-EVIDENCE",
+            "kind": "evidence",
+            "severity": "hard",
+            "status": "active",
+        }
+    ]
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": code,
+                "category": "CONTENT_DEFECT",
+                "description": "证据不能支持论断",
+                "suggestion": "缩小论断或补充证据",
+                "severity": "major",
+                "requirement_ids": ["REQ-EVIDENCE"],
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["论断支持"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    assert sanitized["issues"][0]["code"] == code
+    assert sanitized["issues"][0]["category"] == "EVIDENCE_GAP"
+    assert sanitized["issues"][0]["requirement_ids"] == ["REQ-EVIDENCE"]
+    assert auto_verifier_module._REQUIREMENT_KINDS_BY_CODE[code] == {
+        "citation",
+        "evidence",
+    }
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "CLAIM_UNSUPPORTED",
+        "CLAIM_PARTIALLY_SUPPORTED",
+        "CLAIM_EVIDENCE_MISMATCH",
+        "UNLABELED_INFERENCE",
+    ],
+)
+def test_unauthorized_web_normalization_preserves_claim_issue_code(code):
+    state = _state()
+    state["tasks"][0].update({"use_rag": True, "use_web": False})
+    state["web_authorized"] = False
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": code,
+                "category": "EVIDENCE_GAP",
+                "description": "当前证据不能支持该论断。",
+                "suggestion": "补充外部资料或缩小论断。",
+                "severity": "major",
+                "requirement_ids": [],
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["论断支持"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    assert sanitized["issues"][0]["code"] == code
+    assert sanitized["issues"][0]["category"] == "EVIDENCE_GAP"
+
+
 def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
     caplog.set_level("INFO", logger="src.nodes.verifier")
     state = _state()
@@ -590,14 +674,36 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
     }
 
     state = _state(cursor=1)
-    state["current_result"]["tables"] = [{"title": "质量指标"}]
+    state["current_result"].update(
+        {
+            "tables": [{"title": "质量指标"}],
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "title": "工艺证据",
+                    "locator": "2.1",
+                    "supporting_text": "温度升高会提高熔融指数。",
+                    "internal_chunk_id": "chunk-secret",
+                }
+            ],
+            "report_sources": ["工艺证据"],
+        }
+    )
     _, captured = _run(monkeypatch, state, assessment)
 
     assert "必须生成质量指标表格" in captured["task_requirements"]
     assets = json.loads(captured["worker_assets"])
-    assert assets["citations"] == [{"evidence_id": "E1"}]
+    assert assets["citations"] == [
+        {"evidence_id": "E1", "title": "工艺证据", "locator": "2.1"}
+    ]
     assert assets["tables"] == [{"title": "质量指标"}]
     assert "actual_length" in assets
+    claim_pairs = json.loads(captured["claim_evidence_pairs"])
+    assert claim_pairs[0]["evidence"][0]["semantic_evidence_excerpt"] == (
+        "温度升高会提高熔融指数。"
+    )
+    assert "supporting_text" not in captured["worker_assets"]
+    assert "internal_chunk_id" not in captured["worker_assets"]
 
 
 def test_verifier_receives_effective_source_policy(monkeypatch):
