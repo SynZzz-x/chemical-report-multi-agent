@@ -121,6 +121,11 @@ _UNAUTHORIZED_WEB_DEMAND_MARKERS = (
     "补充",
 )
 _RETRIEVAL_QUERY_MAX_CHARS = 200
+_VALID_EVIDENCE_ID = re.compile(r"E\d+", re.IGNORECASE)
+_INLINE_CITATION_LIKE = re.compile(
+    r"\[\s*E(?=[\s\d\-_,，;；、:]|\])[^\]\r\n]*\]",
+    re.IGNORECASE,
+)
 _REQUIREMENT_KINDS_BY_CODE = {
     "TOO_SHORT": {"length"},
     "TOO_LONG": {"length"},
@@ -500,16 +505,48 @@ def _apply_citation_integrity(
     known_ids = {
         str(citation.get("evidence_id") or "").strip().upper()
         for citation in citations
-        if isinstance(citation, dict) and citation.get("evidence_id")
+        if isinstance(citation, dict)
+        and _VALID_EVIDENCE_ID.fullmatch(
+            str(citation.get("evidence_id") or "").strip()
+        )
     }
     content = str(
         current_result.get("content") or current_result.get("text_output") or ""
     )
     cited_ids = extract_inline_evidence_ids(content)
     unknown_ids = cited_ids - known_ids
+    malformed_markers = [
+        marker
+        for marker in _INLINE_CITATION_LIKE.findall(content)
+        if not extract_inline_evidence_ids(marker)
+    ]
+    malformed_record_indexes = [
+        index
+        for index, citation in enumerate(citations)
+        if not isinstance(citation, dict)
+        or not _VALID_EVIDENCE_ID.fullmatch(
+            str(citation.get("evidence_id") or "").strip()
+        )
+    ]
     issue = None
     missing_requirement = "正文中的证据编号绑定"
-    if unknown_ids:
+    if malformed_markers or malformed_record_indexes:
+        details: list[str] = []
+        if malformed_markers:
+            details.append("正文格式错误：" + ", ".join(malformed_markers))
+        if malformed_record_indexes:
+            details.append(
+                "citation 记录缺失或包含无效 evidence_id："
+                + ", ".join(str(index) for index in malformed_record_indexes)
+            )
+        issue = {
+            "code": "INVALID_CITATION_ID",
+            "category": "EVIDENCE_GAP",
+            "description": "；".join(details),
+            "suggestion": "仅使用格式为 [E编号] 且具有合法 evidence_id 的证据记录。",
+            "severity": "major",
+        }
+    elif unknown_ids:
         issue = {
             "code": "INVALID_CITATION_ID",
             "category": "EVIDENCE_GAP",

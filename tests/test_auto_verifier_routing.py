@@ -1100,6 +1100,62 @@ def test_verifier_rejects_unknown_id_inside_compound_citation(monkeypatch):
     assert "E404" in update["assessment"]["issues"][0]["description"]
 
 
+def test_malformed_citation_preflight_links_only_legal_evidence_requirements(
+    monkeypatch,
+):
+    state = _state()
+    state["tasks"][0]["requirement_ids"] = [
+        "REQ-CITATION",
+        "REQ-QUALITY",
+        "REQ-INACTIVE",
+        "REQ-OUT-OF-SCOPE",
+    ]
+    state["requirement_registry"] = [
+        {
+            "requirement_id": "REQ-CITATION",
+            "kind": "citation",
+            "status": "active",
+        },
+        {
+            "requirement_id": "REQ-QUALITY",
+            "kind": "quality",
+            "status": "active",
+        },
+        {
+            "requirement_id": "REQ-INACTIVE",
+            "kind": "evidence",
+            "status": "withdrawn",
+        },
+        {
+            "requirement_id": "REQ-NOT-ASSIGNED",
+            "kind": "evidence",
+            "status": "active",
+        },
+    ]
+    state["current_result"].update(
+        {
+            "text_output": "结论。[E-bad]",
+            "citations": [{"title": "missing id"}],
+            "report_sources": [],
+        }
+    )
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "get_llm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "malformed citation preflight must bypass semantic verifier"
+        ),
+    )
+
+    update = auto_verifier_module.verifier(
+        state, {"configurable": {"use_llm": True}}
+    )
+
+    issue = update["assessment"]["issues"][0]
+    assert issue["code"] == "INVALID_CITATION_ID"
+    assert issue["requirement_ids"] == ["REQ-CITATION"]
+
+
 def test_verifier_requires_inline_binding_when_citations_are_available(monkeypatch):
     state = _state()
     state["current_result"]["text_output"] = "温度影响熔融指数。"

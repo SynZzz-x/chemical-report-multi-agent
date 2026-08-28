@@ -77,6 +77,8 @@ def fake_verifier(monkeypatch):
         pending.append(response)
         report_sources = []
         for citation in citations:
+            if not str(citation.get("evidence_id") or "").strip():
+                continue
             title = str(citation.get("title") or "").strip()
             if title and title not in report_sources:
                 report_sources.append(title)
@@ -257,6 +259,32 @@ def test_invented_identity_preflight_makes_zero_semantic_model_calls(
 
     assert result["assessment"]["status"] == "FAILED"
     assert result["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
+    assert fake_verifier.calls == []
+
+
+@pytest.mark.parametrize(
+    "citations",
+    [
+        [],
+        [{"title": "missing id"}],
+    ],
+)
+def test_malformed_citation_identity_preflight_fails_without_semantic_call(
+    citations, fake_verifier, monkeypatch
+):
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "derive_claims",
+        lambda *_args, **_kwargs: pytest.fail(
+            "malformed citation preflight must run before claim derivation"
+        ),
+    )
+
+    result = fake_verifier.run("结论。[E-bad]", citations, _assessment())
+
+    assert result["assessment"]["status"] == "FAILED"
+    assert result["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
+    assert result["assessment"]["issues"][0]["category"] == "EVIDENCE_GAP"
     assert fake_verifier.calls == []
 
 
