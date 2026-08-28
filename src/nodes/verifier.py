@@ -122,8 +122,13 @@ _UNAUTHORIZED_WEB_DEMAND_MARKERS = (
 )
 _RETRIEVAL_QUERY_MAX_CHARS = 200
 _VALID_EVIDENCE_ID = re.compile(r"E\d+", re.IGNORECASE)
-_INLINE_CITATION_LIKE = re.compile(
-    r"\[\s*E(?=[\s\d\-_,，;；、:]|\])[^\]\r\n]*\]",
+_BRACKETED_TEXT = re.compile(r"\[[^\]\r\n]*\]")
+_EVIDENCE_TOKEN_WITH_DIGIT = re.compile(
+    r"^E(?:(?=\S*[0-9])\S+|\s+[0-9])",
+    re.IGNORECASE,
+)
+_MALFORMED_EVIDENCE_SENTINEL = re.compile(
+    r"^E\s*[-_:]?\s*(?:bad|invalid|unknown|missing)\b",
     re.IGNORECASE,
 )
 _REQUIREMENT_KINDS_BY_CODE = {
@@ -515,11 +520,7 @@ def _apply_citation_integrity(
     )
     cited_ids = extract_inline_evidence_ids(content)
     unknown_ids = cited_ids - known_ids
-    malformed_markers = [
-        marker
-        for marker in _INLINE_CITATION_LIKE.findall(content)
-        if not extract_inline_evidence_ids(marker)
-    ]
+    malformed_markers = _malformed_inline_citation_markers(content)
     malformed_record_indexes = [
         index
         for index, citation in enumerate(citations)
@@ -584,6 +585,21 @@ def _apply_citation_integrity(
         }
     )
     return updated
+
+
+def _malformed_inline_citation_markers(content: str) -> list[str]:
+    """Return bracket groups with unambiguous but invalid evidence-ID intent."""
+
+    malformed: list[str] = []
+    for marker in _BRACKETED_TEXT.findall(str(content or "")):
+        if extract_inline_evidence_ids(marker):
+            continue
+        inner = marker[1:-1].strip()
+        if _EVIDENCE_TOKEN_WITH_DIGIT.match(
+            inner
+        ) or _MALFORMED_EVIDENCE_SENTINEL.match(inner):
+            malformed.append(marker)
+    return malformed
 
 
 def _deterministic_issues(state: State) -> list[dict[str, Any]]:

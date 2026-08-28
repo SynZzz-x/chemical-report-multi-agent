@@ -288,6 +288,51 @@ def test_malformed_citation_identity_preflight_fails_without_semantic_call(
     assert fake_verifier.calls == []
 
 
+@pytest.mark.parametrize(
+    "ordinary_bracket",
+    [
+        "[E-mail]",
+        "[E = mc²]",
+        "[E: enabled]",
+        "[E]",
+        "[E_critical]",
+    ],
+)
+def test_non_citation_e_brackets_do_not_trigger_identity_preflight(
+    ordinary_bracket, fake_verifier
+):
+    result = fake_verifier.run(
+        f"正文包含普通标记 {ordinary_bracket}。",
+        [],
+        _assessment(),
+    )
+
+    assert result["assessment"]["status"] == "PASS"
+    assert len(fake_verifier.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "malformed_marker",
+    ["[E12x]", "[E-foo1]", "[E:1]", "[E=1]", "[E/1]", "[E.1]"],
+)
+def test_e_prefixed_tokens_with_digits_are_malformed_citation_intent(
+    malformed_marker, fake_verifier, monkeypatch
+):
+    monkeypatch.setattr(
+        auto_verifier_module,
+        "derive_claims",
+        lambda *_args, **_kwargs: pytest.fail(
+            "malformed digit-bearing evidence token must fail in preflight"
+        ),
+    )
+
+    result = fake_verifier.run(f"结论。{malformed_marker}", [], _assessment())
+
+    assert result["assessment"]["status"] == "FAILED"
+    assert result["assessment"]["issues"][0]["code"] == "INVALID_CITATION_ID"
+    assert fake_verifier.calls == []
+
+
 def test_semantic_excerpt_preserves_late_support_while_presentation_stays_short():
     raw = "背景" * 2200 + "氢气乙烯比升高导致分子量下降。"
 
