@@ -34,14 +34,45 @@ from tests.benchmark_support import (
 from src.verifier_contract import parse_verifier_assessment
 
 
-class _SequenceRecorder:
-    def __init__(self, responses: list[Any]):
-        self.responses = list(responses)
+class _PrefetchAwareWorkerRecorder:
+    """Deterministically model the effect of completed first-turn prefetch context."""
+
+    _REQUIRED_MARKERS = (
+        "预检索已完成",
+        "具体的新证据缺口",
+        '"prefetched_queries"',
+        '"query_fingerprints"',
+        '"evidence"',
+        '"evidence_id": "E1"',
+        '"supporting_text_excerpt"',
+        '"prefetch_queries_used"',
+        '"adaptive_queries_remaining"',
+        "聚乙烯 质量异常 排查 建议 常见异常",
+        "熔融指数、灰分和凝胶含量异常",
+    )
+
+    def __init__(self):
         self.calls: list[Any] = []
+        self.emitted_responses: list[Any] = []
 
     def invoke(self, value: Any, **kwargs: Any) -> Any:
         self.calls.append(value)
-        return self.responses.pop(0)
+        if isinstance(value, (list, tuple)):
+            serialized = "\n".join(
+                str(getattr(message, "content", message)) for message in value
+            )
+        else:
+            serialized = str(value)
+        if len(self.calls) == 1 and all(
+            marker in serialized for marker in self._REQUIRED_MARKERS
+        ):
+            response = SCENARIO_B_FINAL_WORKER_RESPONSE
+        elif len(self.calls) == 1:
+            response = SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE
+        else:
+            response = SCENARIO_B_FINAL_WORKER_RESPONSE
+        self.emitted_responses.append(response)
+        return response
 
     @property
     def prompt_chars(self) -> int:
@@ -132,7 +163,7 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         SimpleNamespace(content=json.dumps(PASS_VERIFIER_RESPONSE, ensure_ascii=False))
     )
     worker_a_recorder = BenchmarkRecorder(SCENARIO_A_WORKER_RESPONSE)
-    worker_b_recorder = _SequenceRecorder([SCENARIO_B_FINAL_WORKER_RESPONSE])
+    worker_b_recorder = _PrefetchAwareWorkerRecorder()
     knowledge_tool = _KnowledgeTool()
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -208,7 +239,7 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
     assert verifier_update["assessment"]["status"] == "PASS"
     attempted_adaptive_retrievals = [
         tool_call
-        for response in (SCENARIO_B_FINAL_WORKER_RESPONSE,)
+        for response in worker_b_recorder.emitted_responses
         for tool_call in getattr(response, "tool_calls", [])
         if tool_call.get("name") == "chemical_knowledge_base_tool"
     ]
@@ -237,7 +268,7 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         intake_recorder.response,
         planner_recorder.response,
         worker_a_recorder.response,
-        SCENARIO_B_FINAL_WORKER_RESPONSE,
+        *worker_b_recorder.emitted_responses,
         verifier_recorder.response,
     )
     serialized_prompt_chars = sum(
@@ -376,6 +407,31 @@ def test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call():
     assert issue["suggestion"] == "缩小结论范围或补充直接证据。"
     assert issue["retrieval_query"] == "聚乙烯 氢气 熔融指数 优先级 直接因果"
     assert serialized_chars(PASS_VERIFIER_RESPONSE) < serialized_chars(failed_payload)
+
+
+def test_worker_benchmark_fake_requires_completed_prefetch_inventory():
+    recorder = _PrefetchAwareWorkerRecorder()
+
+    without_inventory = recorder.invoke(
+        [SimpleNamespace(content="请完成任务，知识库可用。")]
+    )
+    with_inventory = _PrefetchAwareWorkerRecorder().invoke(
+        [
+            SimpleNamespace(
+                content=(
+                    "知识库预检索已完成；只有具体的新证据缺口才可检索。"
+                    ' {"prefetched_queries": ["聚乙烯 质量异常 排查 建议 常见异常"], '
+                    '"query_fingerprints": ["abc"], '
+                    '"evidence": [{"evidence_id": "E1", '
+                    '"supporting_text_excerpt": "熔融指数、灰分和凝胶含量异常"}], '
+                    '"prefetch_queries_used": 1, "adaptive_queries_remaining": 2}'
+                )
+            )
+        ]
+    )
+
+    assert without_inventory is SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE
+    assert with_inventory is SCENARIO_B_FINAL_WORKER_RESPONSE
 
 
 def test_offline_benchmark_metrics_are_deterministic():

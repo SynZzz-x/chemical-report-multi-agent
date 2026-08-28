@@ -38,6 +38,36 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+_INTERNAL_DISPLAY_ID = re.compile(
+    r"^(?:user|conversation|job)[-_]?[a-z0-9-]+(?:\.[a-z0-9]+)?$",
+    re.IGNORECASE,
+)
+
+
+def _worker_evidence_display_title(record: Any) -> str:
+    """Return a model-facing label without exposing internal provenance paths."""
+
+    title = str(getattr(record, "title", "") or "").strip()
+    normalized = title.replace("\\", "/")
+    provenance_values = {
+        str(getattr(record, field, "") or "").strip()
+        for field in ("file_path", "url")
+    }
+    looks_like_path = (
+        title in provenance_values
+        or normalized.startswith("/")
+        or bool(re.match(r"^[A-Za-z]:/", normalized))
+        or any(
+            segment in normalized.casefold()
+            for segment in ("/cache/", "/users/", "/conversations/", "/jobs/")
+        )
+    )
+    label = normalized.rsplit("/", 1)[-1] if looks_like_path else title
+    if not label or _INTERNAL_DISPLAY_ID.fullmatch(label):
+        return "知识库文档"
+    return label
+
 # 添加工具目录到路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'tools'))
 
@@ -2015,7 +2045,7 @@ class AutonomousToolNode:
             "evidence": [
                 {
                     "evidence_id": record.evidence_id,
-                    "title": record.title,
+                    "title": _worker_evidence_display_title(record),
                     "locator": record.locator,
                     "supporting_text_excerpt": presentation_evidence_excerpt(
                         record.supporting_text

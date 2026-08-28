@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from copy import deepcopy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -1357,6 +1358,49 @@ def test_prefetched_evidence_is_first_iteration_inventory_and_finishes_in_one_ca
     assert len(model.calls) == 1
     assert len(tool.calls) == 1
     assert len(calls) == 1
+
+
+def test_prefetch_inventory_uses_safe_title_without_mutating_provenance(monkeypatch):
+    monkeypatch.setattr(
+        worker_graph_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            concept_graph_settings=SimpleNamespace(rag_max_queries=3)
+        ),
+    )
+    internal_path = (
+        "/srv/cache/users/user-17/conversations/conversation-29/jobs/job-41/"
+        "process-guide.docx"
+    )
+    tool_calls = [
+        {
+            "tool": "chemical_knowledge_base_tool",
+            "parameters": {"query": "聚乙烯工艺"},
+            "success": True,
+            "prefetched": True,
+            "full_result": {
+                "evidence": [
+                    {
+                        "title": "",
+                        "source": internal_path,
+                        "section_path": "§5",
+                        "content": "温度影响熔融指数。",
+                    }
+                ]
+            },
+        }
+    ]
+    original = deepcopy(tool_calls)
+
+    context = AutonomousToolNode._evidence_context_for_generation(tool_calls)
+
+    assert internal_path not in context
+    assert "/srv/cache" not in context
+    assert "users/user-17" not in context
+    assert "conversations/conversation-29" not in context
+    assert "jobs/job-41" not in context
+    assert '"title": "process-guide.docx"' in context
+    assert tool_calls == original
 
 
 def test_same_normalized_prefetch_query_is_rejected_without_adaptive_retrieval(
