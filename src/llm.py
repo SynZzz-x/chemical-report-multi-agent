@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -111,8 +112,19 @@ def _token_value(mapping: Mapping[str, Any], *names: str) -> int | None:
     return None
 
 
-def extract_token_usage(response: Any) -> tuple[int | None, int | None, int | None]:
-    """Read token usage from common LangChain/OpenAI-compatible response shapes."""
+@dataclass(frozen=True)
+class ProviderTokenUsage:
+    """Provider-reported token usage with its original field semantics."""
+
+    provider_prompt_tokens: int | None = None
+    provider_completion_tokens: int | None = None
+    provider_reasoning_tokens: int | None = None
+    provider_total_tokens: int | None = None
+
+
+def extract_provider_token_usage(response: Any) -> ProviderTokenUsage:
+    """Read named usage fields from common LangChain/provider response shapes."""
+
     try:
         usage = _mapping(getattr(response, "usage_metadata", None))
         if not usage:
@@ -123,16 +135,44 @@ def extract_token_usage(response: Any) -> tuple[int | None, int | None, int | No
                 response_metadata.get("token_usage")
                 or response_metadata.get("usage")
             )
-        input_tokens = _token_value(usage, "input_tokens", "prompt_tokens")
-        output_tokens = _token_value(
+        prompt_tokens = _token_value(usage, "input_tokens", "prompt_tokens")
+        completion_tokens = _token_value(
             usage, "output_tokens", "completion_tokens"
         )
         total_tokens = _token_value(usage, "total_tokens")
-        if total_tokens is None and input_tokens is not None and output_tokens is not None:
-            total_tokens = input_tokens + output_tokens
-        return input_tokens, output_tokens, total_tokens
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        output_details = _mapping(usage.get("output_token_details"))
+        completion_details = _mapping(usage.get("completion_tokens_details"))
+        reasoning_tokens = _token_value(usage, "reasoning_tokens")
+        if reasoning_tokens is None:
+            reasoning_tokens = _token_value(
+                output_details, "reasoning", "reasoning_tokens"
+            )
+        if reasoning_tokens is None:
+            reasoning_tokens = _token_value(
+                completion_details, "reasoning_tokens", "reasoning"
+            )
+        return ProviderTokenUsage(
+            provider_prompt_tokens=prompt_tokens,
+            provider_completion_tokens=completion_tokens,
+            provider_reasoning_tokens=reasoning_tokens,
+            provider_total_tokens=total_tokens,
+        )
     except Exception:
-        return None, None, None
+        return ProviderTokenUsage()
+
+
+def extract_token_usage(response: Any) -> tuple[int | None, int | None, int | None]:
+    """Compatibility adapter for the original input/output/total tuple."""
+
+    usage = extract_provider_token_usage(response)
+    return (
+        usage.provider_prompt_tokens,
+        usage.provider_completion_tokens,
+        usage.provider_total_tokens,
+    )
 
 
 def invoke_llm(
@@ -172,6 +212,7 @@ def invoke_llm(
         f"attempt={_log_value(attempt)} "
         f"iteration={_log_value(iteration)} "
         f"model={_log_value(_model_name(runnable))} "
+        f"requested_max_completion_tokens={_log_value(max_completion_tokens)} "
         f"max_completion_tokens={_log_value(max_completion_tokens)} "
         f"json_mode={str(json_mode).lower() if json_mode is not None else '-'}"
     )
@@ -193,15 +234,22 @@ def invoke_llm(
         raise
 
     latency_ms = round((time.perf_counter() - started) * 1000)
-    input_tokens, output_tokens, total_tokens = extract_token_usage(response)
+    usage = extract_provider_token_usage(response)
+    # Provider completion usage may include provider-accounted reasoning and is
+    # therefore not guaranteed to equal the visible response-text token count.
     logger.info(
-        "LLM_CALL_END %s status=ok latency_ms=%s input_tokens=%s "
-        "output_tokens=%s total_tokens=%s",
+        "LLM_CALL_END %s status=ok latency_ms=%s provider_prompt_tokens=%s "
+        "provider_completion_tokens=%s provider_reasoning_tokens=%s "
+        "provider_total_tokens=%s input_tokens=%s output_tokens=%s total_tokens=%s",
         common,
         latency_ms,
-        _log_value(input_tokens),
-        _log_value(output_tokens),
-        _log_value(total_tokens),
+        _log_value(usage.provider_prompt_tokens),
+        _log_value(usage.provider_completion_tokens),
+        _log_value(usage.provider_reasoning_tokens),
+        _log_value(usage.provider_total_tokens),
+        _log_value(usage.provider_prompt_tokens),
+        _log_value(usage.provider_completion_tokens),
+        _log_value(usage.provider_total_tokens),
     )
     return response
 

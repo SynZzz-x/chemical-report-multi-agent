@@ -11,7 +11,13 @@ import pytest
 
 from src import llm as llm_module
 from src.evidence.models import EvidenceBundle, EvidenceRecord
-from src.llm import completion_budget, extract_token_usage, invoke_llm
+from src.llm import (
+    ProviderTokenUsage,
+    completion_budget,
+    extract_provider_token_usage,
+    extract_token_usage,
+    invoke_llm,
+)
 from src.nodes import intake as intake_module
 from src.nodes import planner as planner_module
 from src.nodes import verifier as verifier_module
@@ -69,6 +75,78 @@ def test_extract_token_usage_supports_langchain_shapes(response, expected):
     assert extract_token_usage(response) == expected
 
 
+def test_provider_usage_keeps_openai_reasoning_separate_when_supplied():
+    response = SimpleNamespace(
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 30,
+                "completion_tokens_details": {"reasoning_tokens": 20},
+                "total_tokens": 40,
+            }
+        }
+    )
+
+    assert extract_provider_token_usage(response) == ProviderTokenUsage(
+        provider_prompt_tokens=10,
+        provider_completion_tokens=30,
+        provider_reasoning_tokens=20,
+        provider_total_tokens=40,
+    )
+    assert extract_token_usage(response) == (10, 30, 40)
+
+
+def test_provider_usage_keeps_langchain_reasoning_separate_when_supplied():
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 8,
+            "output_tokens": 21,
+            "output_token_details": {"reasoning": 13},
+            "total_tokens": 29,
+        }
+    )
+
+    assert extract_provider_token_usage(response) == ProviderTokenUsage(
+        provider_prompt_tokens=8,
+        provider_completion_tokens=21,
+        provider_reasoning_tokens=13,
+        provider_total_tokens=29,
+    )
+
+
+def test_provider_usage_does_not_fabricate_missing_reasoning():
+    response = SimpleNamespace(
+        usage_metadata={"input_tokens": 4, "output_tokens": 6}
+    )
+
+    assert extract_provider_token_usage(response) == ProviderTokenUsage(
+        provider_prompt_tokens=4,
+        provider_completion_tokens=6,
+        provider_reasoning_tokens=None,
+        provider_total_tokens=10,
+    )
+
+
+def test_provider_usage_keeps_top_level_reasoning_separate_without_recomputation():
+    response = SimpleNamespace(
+        response_metadata={
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 17,
+                "reasoning_tokens": 11,
+                "total_tokens": 22,
+            }
+        }
+    )
+
+    assert extract_provider_token_usage(response) == ProviderTokenUsage(
+        provider_prompt_tokens=5,
+        provider_completion_tokens=17,
+        provider_reasoning_tokens=11,
+        provider_total_tokens=22,
+    )
+
+
 def test_invoke_llm_logs_success_and_preserves_response_identity(caplog):
     caplog.set_level("INFO", logger="src.llm.observability")
     response = SimpleNamespace(
@@ -117,6 +195,8 @@ def test_invoke_llm_logs_success_and_preserves_response_identity(caplog):
         "attempt=2",
         "iteration=-",
         "model=deepseek-chat",
+        "requested_max_completion_tokens=3500",
+        "max_completion_tokens=3500",
         "json_mode=true",
     ):
         assert field in start
@@ -124,6 +204,10 @@ def test_invoke_llm_logs_success_and_preserves_response_identity(caplog):
         "call_id=",
         "status=ok",
         "latency_ms=",
+        "provider_prompt_tokens=3",
+        "provider_completion_tokens=4",
+        "provider_reasoning_tokens=-",
+        "provider_total_tokens=7",
         "input_tokens=3",
         "output_tokens=4",
         "total_tokens=7",

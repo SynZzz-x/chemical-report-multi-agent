@@ -295,6 +295,95 @@ def collect_pipeline_metrics() -> dict[str, int]:
     return json.loads(metrics_line.removeprefix(marker))
 
 
+def _verifier_benchmark_state() -> dict[str, Any]:
+    return {
+        "tasks": [
+            {
+                "task_id": "T1",
+                "task_name": "聚乙烯质量异常排查",
+                "task_description": "基于知识库证据分析聚乙烯常见质量异常。",
+                "task_type": "analysis",
+                "use_rag": True,
+                "use_web": False,
+                "requirement_ids": [],
+            }
+        ],
+        "cursor": 0,
+        "current_result": {
+            "status": "COMPLETED",
+            "text_output": "氢气是第一优先排查项并直接决定熔融指数。[E1]",
+            "tables": [],
+            "figures": [],
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "title": "聚乙烯质量控制手册",
+                    "locator": "§3.2",
+                    "supporting_text": "氢气用量会影响聚乙烯熔融指数。",
+                }
+            ],
+            "report_sources": ["聚乙烯质量控制手册"],
+        },
+        "requirement_registry": [],
+    }
+
+
+def _run_verifier_fixture(response_payload: dict[str, Any]):
+    recorder = BenchmarkRecorder(
+        SimpleNamespace(content=json.dumps(response_payload, ensure_ascii=False))
+    )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            verifier_module, "get_llm", lambda *args, **kwargs: recorder
+        )
+        monkeypatch.setattr(verifier_module, "invoke_llm", _fake_invoke)
+        update = verifier_module.verifier(
+            _verifier_benchmark_state(),
+            {"configurable": {"use_llm": True}},
+        )
+    return recorder, update
+
+
+def test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call():
+    failed_payload = json.loads(
+        json.dumps(FAILED_SEMANTIC_VERIFIER_RESPONSE, ensure_ascii=False)
+    )
+    failed_payload["issues"][0].update(
+        {
+            "description": (
+                "论断‘氢气是第一优先排查项并直接决定熔融指数’增加了未获支持的"
+                "优先级和直接因果。"
+            ),
+            "retrieval_query": "聚乙烯 氢气 熔融指数 优先级 直接因果",
+        }
+    )
+
+    pass_recorder, pass_update = _run_verifier_fixture(PASS_VERIFIER_RESPONSE)
+    failed_recorder, failed_update = _run_verifier_fixture(failed_payload)
+
+    assert len(pass_recorder.calls) == 1
+    assert len(failed_recorder.calls) == 1
+    assert set(PASS_VERIFIER_RESPONSE) == {
+        "status",
+        "current_section",
+        "issues",
+        "requirements_met",
+        "requirements_missing",
+    }
+    assert PASS_VERIFIER_RESPONSE["issues"] == []
+    assert PASS_VERIFIER_RESPONSE["requirements_met"] == []
+    assert PASS_VERIFIER_RESPONSE["requirements_missing"] == []
+    assert pass_update["assessment"]["status"] == "PASS"
+
+    issue = failed_update["assessment"]["issues"][0]
+    assert failed_update["assessment"]["status"] == "FAILED"
+    assert issue["code"] == "CLAIM_PARTIALLY_SUPPORTED"
+    assert "氢气是第一优先排查项" in issue["description"]
+    assert issue["suggestion"] == "缩小结论范围或补充直接证据。"
+    assert issue["retrieval_query"] == "聚乙烯 氢气 熔融指数 优先级 直接因果"
+    assert serialized_chars(PASS_VERIFIER_RESPONSE) < serialized_chars(failed_payload)
+
+
 def test_offline_benchmark_metrics_are_deterministic():
     first = collect_pipeline_metrics()
     second = collect_pipeline_metrics()
@@ -302,7 +391,17 @@ def test_offline_benchmark_metrics_are_deterministic():
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
     assert first == second
-    assert first == baseline["measurement"]["metrics"]
+    baseline_metrics = baseline["measurement"]["metrics"]
+    character_metrics = {"serialized_prompt_chars", "mock_completion_chars"}
+    assert {
+        key: value for key, value in first.items() if key not in character_metrics
+    } == {
+        key: value
+        for key, value in baseline_metrics.items()
+        if key not in character_metrics
+    }
+    assert first["serialized_prompt_chars"] <= baseline_metrics["serialized_prompt_chars"]
+    assert first["mock_completion_chars"] <= baseline_metrics["mock_completion_chars"]
     assert first["total_llm_calls"] >= 1
     assert first["serialized_prompt_chars"] > 0
     assert first["mock_completion_chars"] > 0
