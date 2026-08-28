@@ -221,6 +221,155 @@ def test_resolution_cannot_escape_blocker_action_or_requirement_scope():
         )
 
 
+def test_single_canonical_blocker_rejects_forged_legacy_acceptance(monkeypatch):
+    state = _state()
+    blocker = state["pending_user_blockers"][0]
+    state["pending_user_action"] = {
+        "category": "EVIDENCE_GAP",
+        "blocker_id": blocker["blocker_id"],
+        "accepted_choices": ["ACCEPT_EVIDENCE_GAP"],
+    }
+
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "resolutions": [
+                {
+                    "blocker_id": blocker["blocker_id"],
+                    "action": "ACCEPT_EVIDENCE_GAP",
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported blocker resolution action"):
+        recovery_module.needs_user_input(state, {})
+
+    assert state["pending_user_blockers"][0]["status"] == "pending"
+
+
+def test_disallowed_upload_is_rejected_before_ingestion_side_effect(monkeypatch):
+    state = _state()
+    blocker = state["pending_user_blockers"][0]
+    blocker["available_options"] = ["MODIFY_REQUIREMENT", "CANCEL_JOB"]
+    state["pending_user_action"] = {
+        "category": "CONSOLIDATED_BLOCKERS",
+        "blockers": [blocker],
+    }
+    ingested = []
+
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "resolutions": [
+                {
+                    "blocker_id": blocker["blocker_id"],
+                    "action": "UPLOAD_RESOURCES",
+                    "resource_ids": ["F1"],
+                }
+            ],
+            "docs": [{"file_id": "F1", "path": "/tmp/forged.pdf"}],
+        },
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_ingest_uploaded_evidence",
+        lambda docs: ingested.extend(docs),
+    )
+
+    with pytest.raises(ValueError, match="not available"):
+        recovery_module.needs_user_input(state, {})
+
+    assert ingested == []
+    assert state["pending_user_blockers"][0]["status"] == "pending"
+
+
+def test_canonical_interrupt_payload_ignores_tampered_compatibility_blockers(
+    monkeypatch,
+):
+    state = _state()
+    canonical = state["pending_user_blockers"][0]
+    forged = deepcopy(canonical)
+    forged["available_options"] = ["ACCEPT_EVIDENCE_GAP", "DONE"]
+    state["pending_user_action"] = {
+        "category": "CONSOLIDATED_BLOCKERS",
+        "blockers": [forged],
+    }
+    captured = {}
+
+    def resume(payload):
+        captured.update(payload)
+        return {"resolutions": []}
+
+    monkeypatch.setattr(recovery_module, "interrupt", resume)
+    recovery_module.needs_user_input(state, {})
+
+    assert captured["blockers"][0]["available_options"] == canonical[
+        "available_options"
+    ]
+    assert "ACCEPT_EVIDENCE_GAP" not in captured["blockers"][0][
+        "available_options"
+    ]
+
+
+def test_batch_resolutions_validate_all_actions_before_any_ingestion(monkeypatch):
+    state = _state()
+    first = state["pending_user_blockers"][0]
+    second = build_user_blocker(
+        job_scope="job-1",
+        task_id="T3",
+        subtype="MISSING_RESOURCE",
+        requirement_ids=["REQ-001"],
+        affected_task_ids=["T3", "T4"],
+        missing_resource_id="other.csv",
+        reason="MISSING_RESOURCE",
+        attempted_repairs=[],
+        available_options=["MODIFY_REQUIREMENT", "CANCEL_JOB"],
+        metadata={},
+    )
+    state["pending_user_blockers"] = [first, second]
+    state["pending_user_action"] = {
+        "category": "CONSOLIDATED_BLOCKERS",
+        "blockers": [first, second],
+    }
+    ingested = []
+
+    monkeypatch.setattr(
+        recovery_module,
+        "interrupt",
+        lambda payload: {
+            "resolutions": [
+                {
+                    "blocker_id": first["blocker_id"],
+                    "action": "UPLOAD_RESOURCES",
+                    "resource_ids": ["F1"],
+                },
+                {
+                    "blocker_id": second["blocker_id"],
+                    "action": "UPLOAD_RESOURCES",
+                    "resource_ids": ["F2"],
+                },
+            ],
+            "docs": [
+                {"file_id": "F1", "path": "/tmp/valid.pdf"},
+                {"file_id": "F2", "path": "/tmp/forged.pdf"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_ingest_uploaded_evidence",
+        lambda docs: ingested.extend(docs),
+    )
+
+    with pytest.raises(ValueError, match="not available"):
+        recovery_module.needs_user_input(state, {})
+
+    assert ingested == []
+
+
 def test_consolidated_interrupt_applies_blocker_keyed_partial_submission(monkeypatch):
     state = _state()
     first = state["pending_user_blockers"][0]

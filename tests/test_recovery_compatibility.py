@@ -1270,7 +1270,7 @@ def test_streamlit_uses_action_specific_blocker_submission_controls():
     assert "build_blocker_resume_payload" in source
     assert "st.file_uploader(" in source
     assert "st.text_area(" in source
-    assert "has_blocker_actions = bool(blocker_choices(pending_interrupt))" in source
+    assert "or blocker_forms(pending_interrupt)" in source
     assert "disabled=has_blocker_actions" in source
     assert "disabled=pending_interrupt is not None" not in source
     assert "pending_resume_action = _render_pending_resume_action()" not in source

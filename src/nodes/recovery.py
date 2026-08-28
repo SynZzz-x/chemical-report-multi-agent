@@ -626,20 +626,24 @@ def _ingest_uploaded_evidence(documents: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def _patch_error_update(state: State, error: Exception) -> dict[str, Any]:
-    issues = list((state.get("assessment") or {}).get("issues") or [])
-    blocker = {
-        "category": "PLAN_PATCH_ERROR",
-        "task_id": _current_task_id(state),
-        "issues": issues,
-        "guidance": f"The local plan patch could not be safely applied: {error}",
-        "accepted_choices": ["UPLOAD_RESOURCES", "REWORK", "NEXT", "DONE"],
+    assessment = {
+        "status": "FAILED",
+        "current_section": _current_task_id(state),
+        "issues": [
+            {
+                "code": "PLAN_PATCH_INTERNAL_ERROR",
+                "category": IssueCategory.LOCAL_PLAN_DEFECT.value,
+                "description": "本地规划修补器未能产生可安全应用的结构化结果。",
+                "suggestion": "由失败决策策略终止当前任务并保留安全诊断。",
+                "severity": "critical",
+                "requirement_ids": [],
+                "error_type": type(error).__name__,
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": [],
     }
-    return {
-        "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
-        "pending_user_action": blocker,
-        "job_patch_count": int(state.get("job_patch_count", 0) or 0),
-        "task_patch_count": deepcopy(state.get("task_patch_count") or {}),
-    }
+    return decide_recovery_action(state, assessment)
 
 
 def plan_patcher(
@@ -685,16 +689,15 @@ def needs_user_input(
 ) -> dict[str, Any]:
     """Interrupt with a concrete blocker and route the incremental resume safely."""
     pending = deepcopy(state.get("pending_user_action") or {})
+    canonical_registry = list(state.get("pending_user_blockers") or [])
+    blocker_source = canonical_registry or list(pending.get("blockers") or [])
     consolidated_blockers = [
         deepcopy(blocker)
-        for blocker in pending.get("blockers") or state.get("pending_user_blockers") or []
+        for blocker in blocker_source
         if isinstance(blocker, dict)
         and str(blocker.get("status") or "") == "pending"
     ]
-    if consolidated_blockers and (
-        str(pending.get("category") or "") == "CONSOLIDATED_BLOCKERS"
-        or len(consolidated_blockers) > 1
-    ):
+    if consolidated_blockers:
         payload = {
             "type": "needs_user_input",
             "category": "CONSOLIDATED_BLOCKERS",
@@ -711,12 +714,14 @@ def needs_user_input(
         )
         transition_state: dict[str, Any] = dict(state)
         resumed_docs = list(resumed.get("docs") or []) if isinstance(resumed, dict) else []
+        prepared_uploads: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for submission in submissions:
             if not isinstance(submission, dict):
                 continue
             canonical_action = str(submission.get("action") or "").upper()
             if canonical_action == "ADJUST_REQUIREMENT":
                 canonical_action = "MODIFY_REQUIREMENT"
+            selected_docs: list[dict[str, Any]] = []
             if canonical_action == "UPLOAD_RESOURCES":
                 selected_resource_ids = {
                     str(resource_id)
@@ -734,39 +739,6 @@ def needs_user_input(
                     )
                     in selected_resource_ids
                 ]
-                if selected_docs:
-                    _ingest_uploaded_evidence(selected_docs)
-                    existing_docs = list(transition_state.get("docs") or [])
-                    transition_state["docs"] = existing_docs + [
-                        doc for doc in selected_docs if doc not in existing_docs
-                    ]
-                    blocker = next(
-                        (
-                            item
-                            for item in transition_state.get("pending_user_blockers") or []
-                            if str(item.get("blocker_id") or "")
-                            == str(submission.get("blocker_id") or "")
-                        ),
-                        {},
-                    )
-                    blocker_task_id = str(blocker.get("task_id") or "")
-                    tasks = deepcopy(transition_state.get("tasks") or [])
-                    for index, task in enumerate(tasks):
-                        if str(task.get("task_id") or "") != blocker_task_id:
-                            continue
-                        task = dict(task)
-                        task["use_rag"] = True
-                        task["use_resources"] = list(
-                            dict.fromkeys(
-                                list(task.get("use_resources") or [])
-                                + [
-                                    str(doc.get("path") or doc.get("file_id") or "")
-                                    for doc in selected_docs
-                                ]
-                            )
-                        )
-                        tasks[index] = task
-                    transition_state["tasks"] = tasks
             resolution_update = apply_blocker_resolution(
                 transition_state,
                 blocker_id=str(submission.get("blocker_id") or ""),
@@ -776,6 +748,44 @@ def needs_user_input(
                 metadata={"source": "needs_user_input"},
             )
             transition_state = {**transition_state, **resolution_update}
+            prepared_uploads.append((submission, selected_docs))
+
+        if not transition_state.get("cancel_job"):
+            for submission, selected_docs in prepared_uploads:
+                if not selected_docs:
+                    continue
+                _ingest_uploaded_evidence(selected_docs)
+                existing_docs = list(transition_state.get("docs") or [])
+                transition_state["docs"] = existing_docs + [
+                    doc for doc in selected_docs if doc not in existing_docs
+                ]
+                blocker = next(
+                    (
+                        item
+                        for item in transition_state.get("pending_user_blockers") or []
+                        if str(item.get("blocker_id") or "")
+                        == str(submission.get("blocker_id") or "")
+                    ),
+                    {},
+                )
+                blocker_task_id = str(blocker.get("task_id") or "")
+                tasks = deepcopy(transition_state.get("tasks") or [])
+                for index, task in enumerate(tasks):
+                    if str(task.get("task_id") or "") != blocker_task_id:
+                        continue
+                    task = dict(task)
+                    task["use_rag"] = True
+                    task["use_resources"] = list(
+                        dict.fromkeys(
+                            list(task.get("use_resources") or [])
+                            + [
+                                str(doc.get("path") or doc.get("file_id") or "")
+                                for doc in selected_docs
+                            ]
+                        )
+                    )
+                    tasks[index] = task
+                transition_state["tasks"] = tasks
 
         update_keys = {
             "results",

@@ -147,6 +147,62 @@ def test_canonical_assessment_contract_rejects_invalid_payloads(payload):
         parse_verifier_assessment(payload)
 
 
+def test_assessment_issue_requirement_ids_are_serializable_and_legacy_safe():
+    base = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "TOO_LONG",
+                "category": "CONTENT_DEFECT",
+                "description": "正文过长",
+                "suggestion": "压缩正文",
+                "severity": "major",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["篇幅"],
+    }
+
+    legacy = parse_verifier_assessment(json.dumps(base, ensure_ascii=False))
+    assert legacy.issues[0].requirement_ids == []
+    assert legacy.model_dump(mode="json")["issues"][0]["requirement_ids"] == []
+
+    base["issues"][0]["requirement_ids"] = ["REQ-002"]
+    linked = parse_verifier_assessment(json.dumps(base, ensure_ascii=False))
+    assert linked.issues[0].requirement_ids == ["REQ-002"]
+
+
+def test_llm_issue_requirement_ids_are_filtered_to_active_task_scope():
+    state = _state()
+    state["tasks"][0]["requirement_ids"] = ["REQ-001", "REQ-002"]
+    state["requirement_registry"] = [
+        {"requirement_id": "REQ-001", "status": "active"},
+        {"requirement_id": "REQ-002", "status": "withdrawn"},
+        {"requirement_id": "REQ-003", "status": "active"},
+    ]
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "缺少来源",
+                "suggestion": "补充来源",
+                "severity": "major",
+                "requirement_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-404"],
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["来源"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+
+    assert sanitized["issues"][0]["requirement_ids"] == ["REQ-001"]
+
+
 def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
     caplog.set_level("INFO", logger="src.nodes.verifier")
     state = _state()
@@ -827,6 +883,47 @@ def test_deterministic_length_check_emits_too_long():
     issue = next(issue for issue in checked["issues"] if issue["code"] == "TOO_LONG")
     assert issue["actual"] == 7
     assert issue["required_max"] == 3
+
+
+def test_deterministic_length_issue_links_only_length_requirement():
+    state = _state()
+    state["tasks"][0].update(
+        {
+            "task_description": "不超过3字。",
+            "requirement_ids": ["REQ-HARD-FILE", "REQ-SOFT-LENGTH"],
+        }
+    )
+    state["requirement_registry"] = [
+        {
+            "requirement_id": "REQ-HARD-FILE",
+            "kind": "resource",
+            "severity": "hard",
+            "status": "active",
+        },
+        {
+            "requirement_id": "REQ-SOFT-LENGTH",
+            "kind": "length",
+            "severity": "soft",
+            "status": "active",
+        },
+    ]
+    state["current_result"].update(
+        {"text_output": "聚乙烯生产工艺", "citations": []}
+    )
+
+    checked = auto_verifier_module._apply_deterministic_validation(
+        {
+            "status": "PASS",
+            "current_section": "引言",
+            "issues": [],
+            "requirements_met": [],
+            "requirements_missing": [],
+        },
+        state,
+    )
+
+    issue = next(issue for issue in checked["issues"] if issue["code"] == "TOO_LONG")
+    assert issue["requirement_ids"] == ["REQ-SOFT-LENGTH"]
 
 
 def test_verifier_prints_short_issue_summary(monkeypatch, capsys):

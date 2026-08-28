@@ -108,6 +108,19 @@ _UNAUTHORIZED_WEB_DEMAND_MARKERS = (
     "补充",
 )
 _RETRIEVAL_QUERY_MAX_CHARS = 200
+_REQUIREMENT_KINDS_BY_CODE = {
+    "TOO_SHORT": {"length"},
+    "TOO_LONG": {"length"},
+    "MISSING_TABLE": {"asset"},
+    "MISSING_FIGURE": {"asset"},
+    "MISSING_REQUIRED_FIGURE": {"asset"},
+    "MISSING_RESOURCE": {"resource", "user_resource"},
+    "RESOURCE_UNAVAILABLE": {"resource", "user_resource"},
+    "INVALID_CITATION_ID": {"citation", "evidence"},
+    "MISSING_INLINE_CITATION": {"citation", "evidence"},
+    "SOURCE_UNSUPPORTED": {"citation", "evidence"},
+    "REPORT_SOURCE_INCONSISTENT": {"citation", "evidence"},
+}
 
 
 def _task_name(tasks: list[dict[str, Any]], index: int) -> str:
@@ -200,7 +213,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             format_instructions = (
                 "仅输出 JSON 对象：status 为 PASS|FAILED|BLOCKED；issues 每项必须含 "
                 "code、category、description、suggestion、severity；severity 仅允许 "
-                "minor|major|critical；可选 resource_name；"
+                "minor|major|critical；requirement_ids 只能引用任务要求中的稳定 ID；"
+                "可选 resource_name；"
                 "EVIDENCE_GAP 可选 retrieval_query；"
                 "另含 current_section、requirements_met、requirements_missing。不得输出路由建议。"
             )
@@ -306,6 +320,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 assessment = assessment_model.model_dump(
                     mode="json",
                     exclude_none=True,
+                    exclude_defaults=True,
                 )
                 llm_record["response_snippet"] = str(assessment)[:500]
         except Exception as exc:
@@ -351,7 +366,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
 
     raw_issues = _bounded_raw_issues(assessment)
     sanitized = _sanitize_assessment(assessment, state)
-    sanitized = _apply_citation_integrity(sanitized, current_result)
+    sanitized = _apply_citation_integrity(sanitized, current_result, state)
     sanitized = _apply_deterministic_validation(sanitized, state)
     sanitized = apply_evidence_gap_acceptance(sanitized, state)
     plan_revision = int(state.get("plan_revision", 1) or 1)
@@ -447,6 +462,7 @@ def _bounded_contract_error(error: BaseException) -> str:
 def _apply_citation_integrity(
     assessment: dict[str, Any],
     current_result: dict[str, Any],
+    state: State | None = None,
 ) -> dict[str, Any]:
     """Add deterministic failures for missing or invented inline evidence IDs."""
     citations = current_result.get("citations") or []
@@ -481,6 +497,9 @@ def _apply_citation_integrity(
         }
     if issue is None:
         return assessment
+    requirement_ids = _deterministic_requirement_ids(state or {}, issue["code"])
+    if requirement_ids:
+        issue["requirement_ids"] = requirement_ids
 
     updated = dict(assessment)
     issues = list(updated.get("issues") or [])
@@ -601,7 +620,48 @@ def _deterministic_issues(state: State) -> list[dict[str, Any]]:
                 "severity": "major",
             }
         )
+    for issue in issues:
+        requirement_ids = _deterministic_requirement_ids(
+            state, str(issue.get("code") or "")
+        )
+        if requirement_ids:
+            issue["requirement_ids"] = requirement_ids
     return issues
+
+
+def _legal_requirement_ids(state: State) -> set[str]:
+    tasks = state.get("tasks") or []
+    cursor = int(state.get("cursor", 0) or 0)
+    task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
+    active_ids = {
+        str(requirement.get("requirement_id") or "").strip()
+        for requirement in state.get("requirement_registry") or []
+        if isinstance(requirement, dict)
+        and str(requirement.get("requirement_id") or "").strip()
+        and str(requirement.get("status") or "active") == "active"
+    }
+    if str(task.get("task_type") or "") == "synthesis":
+        return active_ids
+    task_ids = {
+        str(requirement_id).strip()
+        for requirement_id in task.get("requirement_ids") or []
+        if str(requirement_id).strip()
+    }
+    return active_ids & task_ids
+
+
+def _deterministic_requirement_ids(state: State, code: str) -> list[str]:
+    allowed_kinds = _REQUIREMENT_KINDS_BY_CODE.get(str(code).strip().upper(), set())
+    if not allowed_kinds:
+        return []
+    legal_ids = _legal_requirement_ids(state)
+    return sorted(
+        str(requirement.get("requirement_id") or "").strip()
+        for requirement in state.get("requirement_registry") or []
+        if isinstance(requirement, dict)
+        and str(requirement.get("requirement_id") or "").strip() in legal_ids
+        and str(requirement.get("kind") or "").strip().lower() in allowed_kinds
+    )
 
 
 def _apply_deterministic_validation(
@@ -666,6 +726,7 @@ def _deterministic_preflight(state: State) -> dict[str, Any]:
     assessment = _apply_citation_integrity(
         assessment,
         state.get("current_result") or {},
+        state,
     )
     assessment = _apply_deterministic_validation(assessment, state)
     return apply_evidence_gap_acceptance(assessment, state)
@@ -735,6 +796,14 @@ def _assessment_elements_are_valid(assessment: dict[str, Any]) -> bool:
             or not issue["resource_name"].strip()
         ):
             return False
+        if "requirement_ids" in issue and (
+            not isinstance(issue["requirement_ids"], list)
+            or any(
+                not isinstance(requirement_id, str) or not requirement_id.strip()
+                for requirement_id in issue["requirement_ids"]
+            )
+        ):
+            return False
     return True
 
 
@@ -802,6 +871,15 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             "description": str(issue.get("description") or code).strip(),
             "suggestion": str(issue.get("suggestion") or "Correct this issue.").strip(),
             "severity": str(issue.get("severity") or "major").strip().lower(),
+            "requirement_ids": [
+                requirement_id
+                for requirement_id in dict.fromkeys(
+                    str(requirement_id).strip()
+                    for requirement_id in issue.get("requirement_ids") or []
+                    if str(requirement_id).strip()
+                )
+                if requirement_id in _legal_requirement_ids(state)
+            ],
         }
         resource_name = str(issue.get("resource_name") or "").strip()
         if resource_name:
@@ -930,6 +1008,10 @@ def _bounded_raw_issues(assessment: Any) -> list[dict[str, Any]]:
                 issue[str(key)] = value[:2000]
             elif value is None or isinstance(value, (bool, int, float)):
                 issue[str(key)] = value
+            elif isinstance(value, list) and all(
+                isinstance(item, str) for item in value
+            ):
+                issue[str(key)] = [item[:200] for item in value[:100]]
             else:
                 issue[str(key)] = str(value)[:2000]
         bounded.append(issue)

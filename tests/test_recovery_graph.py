@@ -29,6 +29,16 @@ route_after_blocker = getattr(recovery_module, "route_after_blocker", _missing_r
 route_policy = getattr(recovery_module, "route_policy", _missing_recovery)
 
 
+def test_plan_patcher_fatal_route_uses_existing_exit_node():
+    source = (Path(__file__).parents[1] / "src" / "graph.py").read_text()
+    plan_patcher_block = source.split(
+        'self.add_node("PlanPatcher", plan_patcher)', 1
+    )[1].split('self.add_node("NeedsUserInput", needs_user_input)', 1)[0]
+
+    assert '"FATAL_SYSTEM": "Exit"' in plan_patcher_block
+    assert '"NEEDS_USER_INPUT": "NeedsUserInput"' not in plan_patcher_block
+
+
 def _task(task_id, **overrides):
     return {
         "task_id": task_id,
@@ -424,20 +434,26 @@ def test_plan_patcher_validates_and_applies_only_local_patch(monkeypatch):
     assert update["job_patch_count"] == 1
 
 
-def test_plan_patcher_model_or_validation_error_requires_user_input(monkeypatch):
+def test_plan_patcher_internal_failure_is_canonical_fatal_without_business_blocker(
+    monkeypatch,
+):
     state = graph_state(assessment={"status": "BLOCKED", "issues": []})
 
     class Model:
         def invoke(self, messages):
-            return SimpleNamespace(content='{"tasks": []}')
+            return SimpleNamespace(content='{"tasks": ["secret-token"]}')
 
     monkeypatch.setattr(recovery_module, "get_llm", lambda *args, **kwargs: Model())
 
     update = plan_patcher(state, {})
 
-    assert update["workflow_action"] == "NEEDS_USER_INPUT"
-    assert update["pending_user_action"]["category"] == "PLAN_PATCH_ERROR"
-    assert "guidance" in update["pending_user_action"]
+    assert update["workflow_action"] == "FATAL_SYSTEM"
+    assert update["failure_decision"]["failure_class"] == "FATAL_SYSTEM"
+    assert update["failure_decision"]["action"] == "FAIL_JOB"
+    assert update["failure_decision"]["subtype"] == "PLAN_PATCH_INTERNAL_ERROR"
+    assert update["pending_user_action"] == {}
+    assert update["pending_user_blockers"] == []
+    assert "secret-token" not in str(update["fatal_system_error"])
     assert update["job_patch_count"] == 0
     assert "tasks" not in update
 

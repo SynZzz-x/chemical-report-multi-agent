@@ -17,6 +17,7 @@ from src.config import (
 )
 from src.control_messages import blocker_guidance, is_displayable_assistant_message
 from src.job_store import JobStore, interrupt_from_snapshot
+from src.job_outcome import project_job_outcome
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
 
@@ -266,17 +267,19 @@ def main():
             jobs.update_job(user_id, thread_id, **changes)
 
         if job_record_created:
+            projection = project_job_outcome(
+                dict(snapshot.values or {}),
+                last_interrupt_value,
+                graph_incomplete=bool(getattr(snapshot, "next", ()) or ()),
+            )
             restore_changes: dict[str, Any] = {
                 "pending_interrupt": last_interrupt_value,
             }
-            if is_interrupted:
-                restore_changes["status"] = "waiting"
-            elif existing_job.get("status") in {"running", "waiting"}:
-                restore_changes["status"] = (
-                    "completed"
-                    if not (getattr(snapshot, "next", ()) or ())
-                    else "failed"
-                )
+            if (
+                existing_job.get("status") != "failed"
+                or projection["status"] != "completed"
+            ):
+                restore_changes.update(projection)
             persist_projection(snapshot, **restore_changes)
 
         logger.info(f"=== Agent CLI Debugger (Thread: {thread_id}) ===")
@@ -449,11 +452,18 @@ def main():
                     )
 
                 try:
-                    persist_projection(
-                        completed_snapshot,
-                        status="waiting" if is_interrupted else "completed",
-                        pending_interrupt=last_interrupt_value,
+                    outcome = project_job_outcome(
+                        dict(getattr(completed_snapshot, "values", {}) or {}),
+                        last_interrupt_value,
+                        graph_incomplete=completed_snapshot is None,
                     )
+                    persist_projection(completed_snapshot, **outcome)
+                    if outcome["status"] == "failed":
+                        diagnostic = outcome.get("fatal_system_error") or {}
+                        logger.error(
+                            "[System] Workflow failed (diagnostic_code=%s)",
+                            diagnostic.get("diagnostic_code") or "WORKFLOW_FAILED",
+                        )
                 except Exception as store_exc:
                     logger.error(
                         "[Persistence Error] Graph execution completed, but "

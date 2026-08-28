@@ -189,15 +189,16 @@ def test_asset_retry_limit_uses_asset_specific_user_blocker():
 
     assert decision["workflow_action"] == WorkflowAction.NEEDS_USER_INPUT
     assert decision["pending_user_action"]["accepted_choices"] == [
-        "RETRY_ASSET",
-        "ADJUST_REQUIREMENT",
-        "ACCEPT_AS_DRAFT",
-        "DONE",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
     ]
-    assert "正文不会重新生成" in decision["pending_user_action"]["guidance"]
+    assert decision["pending_user_blockers"][0]["required_user_action"] == (
+        "MISSING_FIGURE"
+    )
 
 
 def assessment_with(code, category, **issue):
+    issue.setdefault("requirement_ids", ["REQ-001"])
     return {
         "status": "FAILED",
         "issues": [{"code": code, "category": category, **issue}],
@@ -207,7 +208,10 @@ def assessment_with(code, category, **issue):
 def assessment_with_issues(*issues):
     return {
         "status": "FAILED",
-        "issues": list(issues),
+        "issues": [
+            {"requirement_ids": ["REQ-001"], **issue}
+            for issue in issues
+        ],
     }
 
 
@@ -221,19 +225,14 @@ def test_evidence_gap_recovers_once_then_requests_user_input():
     second_state = {**state, **first}
     second = decide_recovery_action(second_state, assessment)
     assert second["workflow_action"] == "NEEDS_USER_INPUT"
-    assert second["pending_user_action"]["category"] == "EVIDENCE_GAP"
-    assert second["pending_user_action"]["blocker_status"] == "ACTIVE"
+    assert second["pending_user_action"]["category"] == "CONSOLIDATED_BLOCKERS"
+    assert second["pending_user_blockers"][0]["status"] == "pending"
     assert second["pending_user_action"]["blocker_id"].startswith("blocker-")
     assert second["pending_user_action"]["accepted_choices"] == [
         "UPLOAD_RESOURCES",
-        "AUTHORIZE_WEB",
-        "ADJUST_REQUIREMENT",
-        "ACCEPT_EVIDENCE_GAP",
-        "ACCEPT_AS_DRAFT",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
     ]
-    assert "上传" in second["pending_user_action"]["guidance"]
-    assert "页面" in second["pending_user_action"]["guidance"]
-    assert "直接回复" not in second["pending_user_action"]["guidance"]
 
 
 def test_evidence_gap_without_authorized_retrieval_requires_user_input_immediately():
@@ -250,8 +249,12 @@ def test_evidence_gap_without_authorized_retrieval_requires_user_input_immediate
 
     assert decision["workflow_action"] == "NEEDS_USER_INPUT"
     assert decision["evidence_recovery_count"] == {}
-    assert decision["pending_user_action"]["category"] == "EVIDENCE_GAP"
-    assert "未授权可执行的证据检索能力" in decision["pending_user_action"]["guidance"]
+    assert decision["pending_user_action"]["category"] == "CONSOLIDATED_BLOCKERS"
+    assert decision["pending_user_blockers"][0]["available_options"] == [
+        "UPLOAD_RESOURCES",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
+    ]
 
 
 def test_verifier_failure_exhaustion_is_fatal_without_blocker_actions():
@@ -305,7 +308,7 @@ def test_exhausted_verifier_execution_failure_precedes_semantic_assessment():
     )
 
 
-def test_content_and_waivable_evidence_gap_can_be_explicitly_accepted_as_draft():
+def test_hard_content_and_evidence_gap_cannot_be_accepted_as_draft():
     state = recovery_state(
         task_id="T1",
         evidence_recovery_count={"T1": 1},
@@ -317,13 +320,9 @@ def test_content_and_waivable_evidence_gap_can_be_explicitly_accepted_as_draft()
 
     decision = decide_recovery_action(state, assessment)
 
-    assert decision["pending_user_action"]["category"] == "EVIDENCE_GAP"
-    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
-        "accepted_choices"
-    ]
-    assert "ACCEPT_AS_DRAFT" in decision["pending_user_action"][
-        "accepted_choices"
-    ]
+    assert decision["pending_user_action"]["category"] == "CONSOLIDATED_BLOCKERS"
+    assert "ACCEPT_EVIDENCE_GAP" not in decision["pending_user_action"]["accepted_choices"]
+    assert "ACCEPT_AS_DRAFT" not in decision["pending_user_action"]["accepted_choices"]
 
 
 @pytest.mark.parametrize(
@@ -386,13 +385,14 @@ def test_evidence_blocker_does_not_offer_web_when_runtime_is_unavailable(monkeyp
     )
 
     assert "AUTHORIZE_WEB" not in decision["pending_user_action"]["accepted_choices"]
-    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
-        "accepted_choices"
+    assert decision["pending_user_action"]["accepted_choices"] == [
+        "UPLOAD_RESOURCES",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
     ]
-    assert "当前服务器未提供可用的公开网络检索工具" in decision["pending_user_action"]["guidance"]
 
 
-def test_evidence_blocker_offers_web_when_runtime_is_available(monkeypatch):
+def test_hard_evidence_blocker_does_not_widen_when_web_is_available(monkeypatch):
     monkeypatch.setattr(
         "src.recovery.policy.public_web_runtime_available",
         lambda: True,
@@ -403,9 +403,11 @@ def test_evidence_blocker_offers_web_when_runtime_is_available(monkeypatch):
         state, assessment_with("EVIDENCE_GAP", "EVIDENCE_GAP")
     )
 
-    assert "AUTHORIZE_WEB" in decision["pending_user_action"]["accepted_choices"]
-    assert "ACCEPT_EVIDENCE_GAP" in decision["pending_user_action"][
-        "accepted_choices"
+    assert "AUTHORIZE_WEB" not in decision["pending_user_action"]["accepted_choices"]
+    assert decision["pending_user_action"]["accepted_choices"] == [
+        "UPLOAD_RESOURCES",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
     ]
 
 
@@ -457,10 +459,8 @@ def test_content_retry_limit_requires_explicit_user_acceptance_without_committin
     assert "results" not in decision
     assert decision["section_status"]["T2"]["status"] == "BLOCKED"
     assert decision["pending_user_action"]["accepted_choices"] == [
-        "REWORK",
-        "ADJUST_REQUIREMENT",
-        "ACCEPT_AS_DRAFT",
-        "DONE",
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
     ]
 
 

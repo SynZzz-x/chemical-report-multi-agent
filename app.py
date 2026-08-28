@@ -43,6 +43,7 @@ from src.control_messages import (
 from src.graph import WorkFlow, WorkFlowAuto
 from src.fatal_errors import build_fatal_system_error
 from src.job_store import JobStore, interrupt_from_snapshot
+from src.job_outcome import project_job_outcome
 from src.persistence import SQLitePersistence
 from src.runtime_config import execution_config
 from src.report_acceptance import delivery_path_candidates
@@ -279,15 +280,17 @@ def _restore_job(job_id: str) -> None:
         st.session_state["pending_interrupt"] = pending
         st.session_state["verifier_mode"] = mode
 
+        projection = project_job_outcome(
+            dict(snapshot.values or {}),
+            pending,
+            graph_incomplete=bool(getattr(snapshot, "next", ()) or ()),
+        )
         changes: dict[str, Any] = {"pending_interrupt": pending}
-        if pending is not None:
-            changes["status"] = "waiting"
-        elif record.get("status") in {"running", "waiting"}:
-            changes["status"] = (
-                "completed"
-                if not (getattr(snapshot, "next", ()) or ())
-                else "failed"
-            )
+        if (
+            record.get("status") != "failed"
+            or projection["status"] != "completed"
+        ):
+            changes.update(projection)
         JOBS.update_job(user_id, job_id, **changes)
     except Exception:
         for key, value in previous_state.items():
@@ -1024,7 +1027,9 @@ _render_history()
 _render_report_preview()
 _render_report_downloads()
 pending_interrupt = st.session_state.get("pending_interrupt")
-has_blocker_actions = bool(blocker_choices(pending_interrupt))
+has_blocker_actions = bool(
+    blocker_choices(pending_interrupt) or blocker_forms(pending_interrupt)
+)
 blocker_submission = _render_pending_resume_submission()
 
 if "app" not in st.session_state:
@@ -1221,19 +1226,21 @@ if blocker_submission is not None or chat_value:
                 st.write(f"**{node}**{f' · {summary}' if summary else ''}")
                 _handle_node_delta(node, delta)
 
-        if st.session_state.get("last_run_failed"):
+        outcome_values = _snapshot_values()
+        outcome = project_job_outcome(
+            outcome_values,
+            st.session_state.get("pending_interrupt"),
+            graph_incomplete=not bool(outcome_values),
+        )
+        if st.session_state.get("last_run_failed") or outcome["status"] == "failed":
             status.update(label="本轮执行失败", state="error", expanded=True)
-        elif st.session_state.get("pending_interrupt") is None:
+        elif outcome["status"] == "completed":
             status.update(label="本轮执行完成", state="complete", expanded=False)
 
-    if (
-        st.session_state.get("pending_interrupt") is None
-        and not st.session_state.get("last_run_failed")
-    ):
+    if not st.session_state.get("last_run_failed"):
         report_paths = [str(path) for path in _report_paths_from_state()]
         _update_job(
-            status="completed",
-            pending_interrupt=None,
+            **outcome,
             report_paths=report_paths,
         )
 

@@ -222,11 +222,11 @@ def _requirement_scope(
         for requirement_id in issue.get("requirement_ids") or []
         if str(requirement_id).strip()
     }
-    affected = (
-        task_requirement_ids & issue_requirement_ids
-        if issue_requirement_ids
-        else task_requirement_ids
-    )
+    current_task = _current_task(state)
+    if str(current_task.get("task_type") or "").strip().lower() == "synthesis":
+        affected = issue_requirement_ids
+    else:
+        affected = task_requirement_ids & issue_requirement_ids
     active_registry = {
         str(requirement.get("requirement_id") or "").strip(): requirement
         for requirement in state.get("requirement_registry") or []
@@ -345,6 +345,33 @@ def _tasks_with_legacy_dependencies(state: Mapping[str, Any]) -> list[dict[str, 
         if task_id:
             prior_ids.append(task_id)
     return normalized
+
+
+def _canonical_blocker_projection(
+    blockers: Iterable[Mapping[str, Any]], *, task_id: str = ""
+) -> Dict[str, Any]:
+    """Project active canonical blockers into the legacy UI state field."""
+
+    active = [
+        deepcopy(dict(blocker))
+        for blocker in blockers
+        if str(blocker.get("status") or "") in {"pending", "retry_pending"}
+    ]
+    if not active:
+        return {}
+    choices = (
+        list(active[0].get("available_options") or [])
+        if len(active) == 1
+        else []
+    )
+    return {
+        "category": "CONSOLIDATED_BLOCKERS",
+        "task_id": task_id or str(active[0].get("task_id") or ""),
+        "blocker_id": str(active[-1].get("blocker_id") or ""),
+        "blockers": active,
+        "guidance": "请逐项处理以下未解决的硬性要求。",
+        "accepted_choices": choices,
+    }
 
 
 def _register_user_blocker(
@@ -472,26 +499,10 @@ def _register_user_blocker(
         update["cursor"] = max(0, next_index - 1)
         update["workflow_action"] = WorkflowAction.NEXT.value
         update["pending_user_action"] = {}
-    elif len(
-        [
-            blocker
-            for blocker in blockers
-            if str(blocker.get("status") or "") in {"pending", "retry_pending"}
-        ]
-    ) > 1:
-        unresolved = [
-            deepcopy(blocker)
-            for blocker in blockers
-            if str(blocker.get("status") or "") in {"pending", "retry_pending"}
-        ]
-        update["pending_user_action"] = {
-            "category": "CONSOLIDATED_BLOCKERS",
-            "task_id": task_id,
-            "blocker_id": record["blocker_id"],
-            "blockers": unresolved,
-            "guidance": "请逐项处理以下未解决的硬性要求。",
-            "accepted_choices": [],
-        }
+    else:
+        update["pending_user_action"] = _canonical_blocker_projection(
+            blockers, task_id=task_id
+        )
 
 
 def _terminal_scheduler_update(
@@ -580,12 +591,7 @@ def _terminal_scheduler_update(
         transition.update(
             {
                 "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
-                "pending_user_action": {
-                    "category": "CONSOLIDATED_BLOCKERS",
-                    "blockers": deepcopy(unresolved),
-                    "guidance": "请逐项处理以下未解决的硬性要求。",
-                    "accepted_choices": [],
-                },
+                "pending_user_action": _canonical_blocker_projection(unresolved),
             }
         )
         return transition
@@ -1070,6 +1076,12 @@ def _commit_degraded_result(
         repair_type = FailureAction.REPAIR_CONTRACT.value
         attempt = 1
         budget = 1
+    elif subtype in PLAN_PATCH_SUBTYPES:
+        repair_type = FailureAction.PATCH_PLAN.value
+        attempt = _normalise_counter(state.get("task_patch_count"), state).get(
+            task_id, 0
+        )
+        budget = MAX_TASK_PATCHES
     else:
         repair_type = FailureAction.RETRY_TASK.value
         attempt = _normalise_counter(state.get("task_retry_count"), state).get(
@@ -1126,36 +1138,46 @@ def _commit_degraded_result(
     )
 
 
-def _fatal_verifier_update(
+def _fatal_system_update(
     update: Dict[str, Any],
     state: Dict[str, Any],
     assessment: Dict[str, Any],
+    *,
+    subtype: str,
+    component: str,
+    operation: str,
+    metadata: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     task_id = _current_task_id(state)
+    safe_metadata = {
+        str(key): value
+        for key, value in (metadata or {}).items()
+        if isinstance(value, (str, int, float, bool, type(None)))
+    }
     identity = "|".join(
         (
             str(state.get("_job_id") or ""),
             task_id,
-            "VERIFIER_UNAVAILABLE",
-            "Verifier",
-            "assessment",
+            subtype,
+            component,
+            operation,
         )
     )
     update.update(
         {
-            "workflow_action": "FATAL_SYSTEM",
+            "workflow_action": WorkflowAction.FATAL_SYSTEM.value,
             "pending_user_action": {},
             "fatal_system_error": {
                 "failure_id": "fatal-" + sha256(identity.encode("utf-8")).hexdigest()[:24],
                 "failure_class": FailureClass.FATAL_SYSTEM.value,
-                "subtype": "VERIFIER_UNAVAILABLE",
+                "subtype": subtype,
                 "origin": "graph",
-                "component": "Verifier",
-                "operation": "assessment",
+                "component": component,
+                "operation": operation,
                 "task_id": task_id,
-                "diagnostic_code": "VERIFIER_UNAVAILABLE",
+                "diagnostic_code": subtype,
                 "retryable": False,
-                "metadata": {},
+                "metadata": safe_metadata,
             },
         }
     )
@@ -1165,8 +1187,24 @@ def _fatal_verifier_update(
         assessment,
         failure_class=FailureClass.FATAL_SYSTEM,
         action=FailureAction.FAIL_JOB,
-        subtype="VERIFIER_UNAVAILABLE",
+        subtype=subtype,
         retryable=False,
+        metadata=safe_metadata,
+    )
+
+
+def _fatal_verifier_update(
+    update: Dict[str, Any],
+    state: Dict[str, Any],
+    assessment: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _fatal_system_update(
+        update,
+        state,
+        assessment,
+        subtype="VERIFIER_UNAVAILABLE",
+        component="Verifier",
+        operation="assessment",
     )
 
 
@@ -1279,6 +1317,26 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if isinstance(issue, dict)
         and str(issue.get("code") or "").strip().upper() not in _VERIFIER_CODES
     }
+    if "PLAN_PATCH_INTERNAL_ERROR" in issue_codes:
+        error_type = next(
+            (
+                str(issue.get("error_type") or "PlanPatchError")
+                for issue in assessment.get("issues") or []
+                if isinstance(issue, Mapping)
+                and str(issue.get("code") or "").strip().upper()
+                == "PLAN_PATCH_INTERNAL_ERROR"
+            ),
+            "PlanPatchError",
+        )
+        return _fatal_system_update(
+            update,
+            state,
+            assessment,
+            subtype="PLAN_PATCH_INTERNAL_ERROR",
+            component="PlanPatcher",
+            operation="plan_patch",
+            metadata={"error_type": error_type},
+        )
     in_progress_statuses = record_section_status(
         state,
         BLOCKED,
@@ -1551,6 +1609,23 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 action=FailureAction.PATCH_PLAN,
                 repair_attempt=patches + 1,
                 repair_budget=MAX_TASK_PATCHES,
+            )
+        _, hard_requirement_ids = _requirement_scope(state, assessment)
+        if not hard_requirement_ids:
+            if state.get("current_result"):
+                return _commit_degraded_result(
+                    update,
+                    state,
+                    assessment,
+                    warning_code="PLAN_PATCH_BUDGET_EXHAUSTED",
+                )
+            return _fatal_system_update(
+                update,
+                state,
+                assessment,
+                subtype="PLAN_PATCH_BUDGET_EXHAUSTED",
+                component="DecisionPolicy",
+                operation="plan_patch_budget",
             )
 
     blocking_status = (

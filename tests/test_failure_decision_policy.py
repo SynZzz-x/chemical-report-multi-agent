@@ -109,6 +109,25 @@ def test_exhausted_hard_evidence_requires_contract_decision():
     assert update["workflow_action"] == "NEEDS_USER_INPUT"
 
 
+def test_single_hard_evidence_blocker_projects_only_canonical_actions():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="hard")
+    state["evidence_recovery_count"] = {"T1": 1}
+
+    update = decide_recovery_action(state, _assessment("EVIDENCE_GAP"))
+
+    blockers = update["pending_user_blockers"]
+    assert len(blockers) == 1
+    canonical = blockers[0]["available_options"]
+    projected = update["pending_user_action"]["accepted_choices"]
+    assert projected == canonical
+    assert not {
+        "ACCEPT_EVIDENCE_GAP",
+        "ACCEPT_AS_DRAFT",
+        "NEXT",
+        "DONE",
+    }.intersection(projected)
+
+
 def test_exhausted_optional_asset_degrades_and_commits():
     state = _state(code="MISSING_FIGURE", requirement_kind="asset")
     state["asset_retry_count"] = {"T1": MAX_ASSET_RETRIES}
@@ -163,6 +182,75 @@ def test_issue_text_cannot_promote_unlinked_soft_requirement_to_hard():
     assert update["failure_decision"]["failure_class"] == FailureClass.DEGRADABLE_QUALITY
 
 
+def test_synthesis_issue_can_link_report_wide_hard_requirement():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="hard")
+    state["tasks"][0]["task_type"] = "synthesis"
+    state["tasks"][0]["requirement_ids"] = []
+    state["tasks"][0]["use_rag"] = False
+    state["task_retry_count"] = {"T1": 2}
+
+    update = decide_recovery_action(state, _assessment("EVIDENCE_GAP"))
+
+    assert update["failure_decision"]["failure_class"] == FailureClass.USER_DECISION_REQUIRED
+    assert update["failure_decision"]["hard_requirement_ids"] == ["REQ-001"]
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+
+
+def test_soft_length_issue_ignores_unrelated_hard_file_requirement():
+    state = _state(code="TOO_LONG", requirement_kind="resource")
+    state["tasks"][0]["requirement_ids"] = [
+        "REQ-HARD-FILE",
+        "REQ-SOFT-LENGTH",
+    ]
+    hard_file = {
+        **state["requirement_registry"][0],
+        "requirement_id": "REQ-HARD-FILE",
+        "severity": "hard",
+        "kind": "resource",
+    }
+    soft_length = {
+        **state["requirement_registry"][0],
+        "requirement_id": "REQ-SOFT-LENGTH",
+        "severity": "soft",
+        "kind": "length",
+    }
+    state["requirement_registry"] = [hard_file, soft_length]
+    state["length_rewrite_attempts"] = {"T1:length_rewrite:t1": 1}
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "TOO_LONG",
+                "category": "CONTENT_DEFECT",
+                "requirement_ids": ["REQ-SOFT-LENGTH"],
+            }
+        ],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["failure_decision"]["requirement_ids"] == ["REQ-SOFT-LENGTH"]
+    assert update["failure_decision"]["hard_requirement_ids"] == []
+    assert update["failure_decision"]["failure_class"] == FailureClass.DEGRADABLE_QUALITY
+    assert update["pending_user_blockers"] == []
+
+
+def test_legacy_issue_without_linkage_does_not_bind_all_task_requirements():
+    state = _state(code="TOO_LONG", requirement_severity="hard")
+    state["tasks"][0]["requirement_ids"] = ["REQ-001"]
+    state["length_rewrite_attempts"] = {"T1:length_rewrite:t1": 1}
+    assessment = {
+        "status": "FAILED",
+        "issues": [{"code": "TOO_LONG", "category": "CONTENT_DEFECT"}],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["failure_decision"]["requirement_ids"] == []
+    assert update["failure_decision"]["hard_requirement_ids"] == []
+    assert update["failure_decision"]["failure_class"] == FailureClass.DEGRADABLE_QUALITY
+
+
 @pytest.mark.parametrize(
     "code",
     [
@@ -208,6 +296,58 @@ def test_non_plan_failures_never_route_to_plan_patcher(code, category):
     update = decide_recovery_action(state, assessment)
 
     assert update["workflow_action"] != "PLAN_PATCH"
+
+
+def test_soft_plan_patch_budget_exhaustion_degrades_without_user_blocker():
+    state = _state(code="INVALID_TASK_ORDER", requirement_kind="quality")
+    state["task_patch_count"] = {"T1": 1}
+    state["job_patch_count"] = 3
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "INVALID_TASK_ORDER",
+                "category": "LOCAL_PLAN_DEFECT",
+                "requirement_ids": ["REQ-001"],
+            }
+        ],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["failure_decision"]["failure_class"] == FailureClass.DEGRADABLE_QUALITY
+    assert update["failure_decision"]["action"] == FailureAction.COMMIT_WITH_WARNING
+    assert update["pending_user_action"] == {}
+    assert update["pending_user_blockers"] == []
+
+
+def test_hard_plan_conflict_after_patch_budget_uses_canonical_blocker():
+    state = _state(
+        code="INVALID_TASK_ORDER",
+        requirement_severity="hard",
+        requirement_kind="constraint",
+    )
+    state["task_patch_count"] = {"T1": 1}
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "INVALID_TASK_ORDER",
+                "category": "LOCAL_PLAN_DEFECT",
+                "requirement_ids": ["REQ-001"],
+            }
+        ],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["failure_decision"]["failure_class"] == FailureClass.USER_DECISION_REQUIRED
+    assert update["failure_decision"]["action"] == FailureAction.REGISTER_BLOCKER
+    assert len(update["pending_user_blockers"]) == 1
+    assert update["pending_user_action"]["accepted_choices"] == [
+        "MODIFY_REQUIREMENT",
+        "CANCEL_JOB",
+    ]
 
 
 def test_hard_blocker_registration_continues_independent_task():

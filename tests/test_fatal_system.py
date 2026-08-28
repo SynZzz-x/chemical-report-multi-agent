@@ -99,3 +99,15 @@ def test_runner_fatal_handlers_do_not_restore_blockers_or_render_exception_text(
     assert "st.exception(exc)" not in app_source
     assert "fatal_system_error=fatal" in app_source
     assert "fatal_system_error=fatal" in run_source
+
+
+def test_streamlit_and_cli_use_shared_checkpoint_outcome_projection():
+    root = Path(__file__).parents[1]
+    app_source = (root / "app.py").read_text(encoding="utf-8")
+    run_source = (root / "run.py").read_text(encoding="utf-8")
+
+    assert "project_job_outcome" in app_source
+    assert "project_job_outcome" in run_source
+    assert "graph_incomplete=not bool(outcome_values)" in app_source
+    assert 'if outcome["status"] == "failed":' in run_source
+    assert "Workflow failed" in run_source

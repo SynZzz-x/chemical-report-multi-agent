@@ -188,7 +188,7 @@ class WorkFlowBase(StateGraph):
                     "REWORK": "Worker",
                     "LENGTH_REWRITE": "Worker",
                     "SYNTHESIS_REWORK": "Synthesis",
-                    "NEEDS_USER_INPUT": "NeedsUserInput",
+                    "FATAL_SYSTEM": "Exit",
                 },
             )
 

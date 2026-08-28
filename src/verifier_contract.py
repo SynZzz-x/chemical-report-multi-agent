@@ -49,6 +49,7 @@ class AssessmentIssue(BaseModel):
     description: NonEmptyString
     suggestion: NonEmptyString
     severity: AssessmentSeverity
+    requirement_ids: list[NonEmptyString] = Field(default_factory=list)
     resource_name: NonEmptyString | None = None
     retrieval_query: NonEmptyString | None = None
 
