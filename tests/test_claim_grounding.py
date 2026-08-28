@@ -93,6 +93,16 @@ def test_compound_cited_claim_stays_one_claim_with_multiple_known_evidence_ids()
     assert [item["evidence_id"] for item in claims[0]["evidence"]] == ["E2", "E1"]
 
 
+def test_single_line_break_inside_a_cited_sentence_keeps_the_full_claim():
+    citations = [{"evidence_id": "E1", "title": "趋势", "supporting_text": "温度影响熔指和密度。"}]
+
+    claims = derive_claims("升温提高熔融指数\n并提高密度。[E1]", citations)
+
+    assert len(claims) == 1
+    assert "升温提高熔融指数" in claims[0]["text"]
+    assert "并提高密度。[E1]" in claims[0]["text"]
+
+
 def test_adjacent_normalized_citations_remain_bound_to_one_sentence():
     citations = [
         {"evidence_id": "E1", "title": "温度", "supporting_text": "温度影响熔指。"},

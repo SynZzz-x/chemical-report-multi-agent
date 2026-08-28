@@ -12,7 +12,7 @@ from .text_projection import semantic_evidence_excerpt
 
 
 _PARAGRAPH_BOUNDARY = re.compile(r"(?:\r?\n\s*){2,}")
-_SENTENCE = re.compile(r".*?[。！？!?](?:\s*\[[^\]]+\])*|.+$")
+_SENTENCE = re.compile(r".*?[。！？!?](?:\s*\[[^\]]+\])*|.+$", re.DOTALL)
 _CLAIM_TEXT_LIMIT = 1000
 _EVIDENCE_GAP_MARKERS = (
     "未检出",
