@@ -49,7 +49,7 @@ claim_id: stable within the invocation
 text: bounded claim text
 claim_type: factual | inference | recommendation | evidence_gap
 evidence_ids: validated evidence IDs
-evidence: [{evidence_id, title, locator, supporting_text_excerpt}]
+evidence: [{evidence_id, title, locator, semantic_evidence_excerpt}]
 ```
 
 Extraction is deliberately local rather than a full-document claim extractor:
@@ -65,6 +65,22 @@ Extraction is deliberately local rather than a full-document claim extractor:
 - The deterministic extractor does not identify `UNLABELED_INFERENCE`.
   A factual-looking claim that is actually an inference is detected by the
   semantic verifier.
+- A short compound statement may remain one claim. The semantic verifier must
+  classify it as `CLAIM_PARTIALLY_SUPPORTED` when a material clause is not
+  supported. Obvious delimiter-based clause splitting is permitted only when it
+  remains deterministic and performs no entailment or semantic similarity
+  judgement.
+
+Semantic evidence projection is distinct from presentation projection. Both may
+reuse safe text extraction, pathological-whitespace collapse, and table-noise
+normalization, but they use separate length policies:
+
+- `semantic_evidence_excerpt()` uses a wider correctness-oriented bound and
+  preserves the evidence context needed to judge the claim.
+- `presentation_evidence_excerpt()` uses a tighter readability-oriented bound
+  for Worker inventory and the final appendix.
+
+The presentation bound is never the verifier's evidence authority.
 
 ### Semantic issue codes
 
@@ -157,10 +173,13 @@ Acceptance scenarios are:
 
 - Sufficient Q1 prefetch: one Worker generation, one tool-loop iteration, no
   adaptive tool call, and no duplicate retrieval.
-- Normalized-equivalent Q1 request: the duplicate guard rejects it without
+- Same-normalized-fingerprint Q1 request: the duplicate guard rejects it without
   executing retrieval.
 - Materially distinct Q2 request for a concrete gap: adaptive retrieval runs and
   is not rejected as a duplicate.
+
+Distinct paraphrases are not considered duplicates unless the existing
+deterministic textual normalization maps them to the same identity.
 
 No prefetch metadata is added to persistent State.
 
@@ -190,6 +209,14 @@ service, or the public network. Metrics remain distinct:
   proxy and never labelled provider tokens.
 - Local execution time may detect algorithmic regressions but is not used to
   claim online model speedup.
+
+Before each performance-focused implementation stage, the same fixed fixtures
+are run against baseline commit
+`3ba9fd3eb3ad84b193f699e72e15bc40bea40446`, and the resulting deterministic
+measurements are recorded in the benchmark artifact. The optimized code is then
+measured with the identical fixtures. Tests guard optimized behavior; they do
+not copy or retain the old production prompt builder or tool loop merely to
+reconstruct a baseline.
 
 The supplied online baseline remains reference-only:
 
@@ -222,7 +249,8 @@ display title or filename and never exposes absolute cache paths, user IDs,
 conversation IDs, or job IDs.
 
 A presentation-only sanitizer collapses whitespace, removes repeated table
-separator noise such as long `|` sequences, and applies a fixed excerpt bound.
+separator noise such as long `|` sequences, and applies the fixed
+`presentation_evidence_excerpt()` bound.
 It never mutates the citation registry or provenance objects. Safe locators such
 as a section, page, or table remain visible; internal paths and chunk IDs do not.
 Grouping follows the actual semantics of the existing
