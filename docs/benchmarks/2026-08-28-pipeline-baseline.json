@@ -1,0 +1,25 @@
+{
+  "artifact": "offline_pipeline_baseline",
+  "baseline_commit": "3ba9fd3eb3ad84b193f699e72e15bc40bea40446",
+  "measurement": {
+    "method": "Fixed offline Intake, Planner, Worker, and Verifier fakes; serialized characters are prompt/completion proxies and are not provider tokens.",
+    "scenarios": {
+      "A": "One Worker generation with no tool request.",
+      "B": "Planner query 聚乙烯 质量异常 排查 建议 常见异常, successful prefetch evidence, then a repeated first adaptive request."
+    },
+    "metrics": {
+      "intake_llm_calls": 1,
+      "planner_llm_calls": 1,
+      "worker_llm_calls": 3,
+      "verifier_llm_calls": 1,
+      "worker_generations": 3,
+      "worker_tool_loop_iterations": 3,
+      "prefetch_retrieval_calls": 1,
+      "adaptive_retrieval_calls": 0,
+      "duplicate_retrievals": 1,
+      "total_llm_calls": 6,
+      "serialized_prompt_chars": 1674,
+      "mock_completion_chars": 1301
+    }
+  }
+}
