@@ -92,12 +92,14 @@ present in `src/evidence/normalizer.py::_dedupe_key()` instead of inventing a
 second presentation-oriented identity. The existing normalizer dedupe delegates
 to the public helper after extraction.
 
-Identity components use this priority:
+Source correctness authority uses this priority:
 
 ```text
-stable file/source ID or canonical URL
-  -> existing canonical source identity
-  -> normalized full source path fallback
+1. stable file/source ID, when available
+2. canonical URL, when available
+3. existing canonical_source_identity(), only when it represents a sufficiently
+   strong source authority rather than a presentation/basename grouping key
+4. normalized full source path fallback
 + locator
 + stable chunk/evidence identity
 + hash of full raw supporting evidence when no stronger evidence ID exists
@@ -110,6 +112,8 @@ Rules:
   their cache paths differ;
 - two unrelated files with the same basename do not become equal merely because
   `canonical_source_identity()` has presentation-grouping semantics;
+- a non-empty presentation-only basename never terminates correctness authority
+  resolution before the full-path fallback is considered;
 - `supporting_text_excerpt` and every presentation sanitizer are forbidden from
   correctness identity;
 - when text is the final fallback, hash the complete raw supporting evidence,
@@ -184,8 +188,12 @@ checks:
 6. the body-used ID set equals the projected used-registry ID set;
 7. the assembled Markdown cannot introduce or drop body citation IDs; appendix
    repetition cannot make a missing body binding appear valid;
-8. task-local IDs cannot reappear as an accidental global alias;
-9. the same input produces byte-identical Markdown on repeated assembly.
+8. task-local IDs cannot reappear as an accidental global alias.
+
+Markdown assembly itself must be deterministic. Regression tests enforce that
+two assemblies of the same input are byte-identical; the production integrity
+validator does not assemble the report a second time merely to prove this
+property.
 
 The validator returns structured deterministic errors for tests and logging. It
 does not invoke a model and does not modify citations.
@@ -224,12 +232,28 @@ selected_policy_issue_code
 selected_policy_action/tier
 ```
 
-The four codes below are non-degradable semantic issues:
+The four semantic codes below are non-degradable issues:
 
 - `CLAIM_UNSUPPORTED`
 - `CLAIM_PARTIALLY_SUPPORTED`
 - `CLAIM_EVIDENCE_MISMATCH`
 - `UNLABELED_INFERENCE`
+
+`UNCITED_MATERIAL_CLAIM` is also explicitly non-degradable even though its
+category is `CONTENT_DEFECT`. Conceptually, the policy owns:
+
+```text
+NON_DEGRADABLE_ISSUE_CODES = {
+    CLAIM_UNSUPPORTED,
+    CLAIM_PARTIALLY_SUPPORTED,
+    CLAIM_EVIDENCE_MISMATCH,
+    UNLABELED_INFERENCE,
+    UNCITED_MATERIAL_CLAIM,
+}
+```
+
+This prevents the new structural citation-binding failure from falling through
+the existing soft-content degradation rule after rework exhaustion.
 
 Selection is deterministic and independent of input order. It uses the current
 category priority for compatibility and a stable code tie-break inside the same
@@ -250,18 +274,21 @@ passed unchanged into status, recovery, blocker, and observability handling.
 
 ### 4.2 Degradation invariant
 
-The policy invariant is executable, not merely documented:
+The policy invariant is an executable necessary safety gate, not a forced
+transition rule:
 
 ```text
-COMMIT_WITH_WARNING if and only if
-all unresolved issues are degradable at that terminal point.
+COMMIT_WITH_WARNING
+  implies all unresolved issues are degradable at that terminal point.
 ```
 
 Every `_commit_degraded_result()` entry receives a shared defensive check so a
 future caller cannot bypass the invariant. Degradability remains based on the
 existing single-issue rules for evidence, content, asset, and plan outcomes;
-the new semantic codes are never waivable. The guard must not broadly reclassify
-existing soft content/asset/plan behavior.
+the new semantic codes and `UNCITED_MATERIAL_CLAIM` are never waivable. Even when
+all issues are degradable, the existing terminal policy, authorization, and
+budget rules still decide whether the workflow actually commits. The guard must
+not broadly reclassify existing soft content/asset/plan behavior.
 
 ### 4.3 Semantic recovery state machine
 
@@ -489,7 +516,8 @@ red-green TDD.
 - the gate consumes lossless records and catches conflicts hidden by current
   lossy dictionary projections;
 - failure invokes no renderer and creates no report directory;
-- two assemblies produce byte-identical Markdown.
+- two assemblies produce byte-identical Markdown without a runtime double
+  assembly inside the validator.
 
 ### P0-2 regressions
 
@@ -562,8 +590,9 @@ The implementation is acceptable only if it proves all of the following:
 - conflicting local IDs become distinct across tasks or fail closed within one
   task-scoped identity;
 - multi-issue action selection is order independent;
-- `COMMIT_WITH_WARNING` occurs if and only if every unresolved issue is
-  degradable;
+- `COMMIT_WITH_WARNING` never occurs unless every unresolved issue is
+  degradable; existing terminal policy still decides whether an all-degradable
+  assessment actually commits;
 - semantic issues cannot hitchhike on degradable evidence gaps;
 - strong uncited factual assertions and ungrounded material inferences are caught
   without treating recommendations as facts;
