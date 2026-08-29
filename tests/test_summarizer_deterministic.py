@@ -130,6 +130,70 @@ def test_blocked_report_does_not_create_delivery_files(monkeypatch, tmp_path):
     assert not (tmp_path / "report").exists()
 
 
+def test_final_citation_conflict_blocks_before_delivery_paths(monkeypatch):
+    state = _state(
+        statuses={"T1": _status("VERIFIED_PASS"), "T2": _status("VERIFIED_PASS")},
+        results=[
+            {
+                "task_id": "T1",
+                "text_output": "冲突正文 [E1]。",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "citations": [
+                    {
+                        "evidence_id": "E1",
+                        "evidence_key": "shared-final-display-id",
+                        "file_path": "/docs/a.docx",
+                        "locator": "1",
+                        "supporting_text": "甲",
+                    },
+                ],
+            },
+            {
+                "task_id": "T2",
+                "text_output": "正常正文 [E1]。",
+                "plan_revision": 1,
+                "task_revision": 1,
+                "citations": [
+                    {
+                        "evidence_id": "E1",
+                        "evidence_key": "shared-final-display-id",
+                        "file_path": "/docs/c.docx",
+                        "locator": "3",
+                        "supporting_text": "丙",
+                    }
+                ],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        summarizer_v2,
+        "get_session_cache_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("gate must precede path resolution")
+        ),
+    )
+
+    update = summarizer_v2.summarizer(state, {})
+
+    assert update["report_status"] == "BLOCKED"
+    assert update["final_result"]["attachments"] == []
+    assert (
+        update["final_result"]["blocking_sections"][0]["issues"][0]["code"]
+        == "FINAL_CITATION_INTEGRITY"
+    )
+
+
+def test_markdown_assembly_is_byte_deterministic():
+    state = _state(statuses={"T1": _status("VERIFIED_PASS"), "T2": _status("VERIFIED_PASS")})
+    sections, _ = summarizer_v2.normalize_sections_evidence(state["results"])
+
+    first = summarizer_v2._assemble_markdown(state, sections, "READY_FOR_FINAL")
+    second = summarizer_v2._assemble_markdown(state, sections, "READY_FOR_FINAL")
+
+    assert first == second
+
+
 def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_path):
     statuses = {
         "T1": _status("VERIFIED_PASS"),
@@ -225,14 +289,6 @@ def test_knowledge_base_file_list_is_deterministically_aggregated(monkeypatch, t
             "locator": "第2章",
             "supporting_text": "工艺说明",
         },
-        {
-            "evidence_id": "E2",
-            "source_type": "rag",
-            "title": "聚乙烯生产工艺与质量控制概述",
-            "file_path": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
-            "locator": "第3章",
-            "supporting_text": "质量说明",
-        },
     ]
     state["results"][1]["citations"] = [
         {
@@ -290,14 +346,22 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
     state["results"] = [
         {
             "task_id": "T1",
-            "text_output": "正文使用第一和第三条证据。[E1, 3] 伪造编号[E999]。",
+            "text_output": "正文使用第一和第三条证据。[E1, 3]。",
             "plan_revision": 1,
             "task_revision": 1,
             "citations": [
-                {"evidence_id": "E1", "source_type": "rag", "file_path": "/a/source_a.docx", "supporting_text": "a1"},
-                {"evidence_id": "E2", "source_type": "rag", "file_path": "/a/source_a.docx", "supporting_text": "a2"},
-                {"evidence_id": "E3", "source_type": "rag", "file_path": "/b/source_b.pdf", "supporting_text": "b"},
-                {"evidence_id": "E4", "source_type": "rag", "file_path": "/c/unused.txt", "supporting_text": "unused"},
+                {
+                    "evidence_id": "E1",
+                    "source_type": "rag",
+                    "file_path": "/a/source_a.docx",
+                    "supporting_text": "a1",
+                },
+                {
+                    "evidence_id": "E3",
+                    "source_type": "rag",
+                    "file_path": "/b/source_b.pdf",
+                    "supporting_text": "b",
+                },
             ],
         },
         {
@@ -305,9 +369,7 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
             "text_output": "本节没有证据引用。",
             "plan_revision": 1,
             "task_revision": 1,
-            "citations": [
-                {"evidence_id": "E1", "source_type": "rag", "file_path": "/d/also_unused.docx", "supporting_text": "unused"},
-            ],
+            "citations": [],
         },
     ]
     state["messages"] = [
@@ -332,7 +394,6 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
     assert markdown.count("| source_b.pdf | rag |") == 1
     assert "unused.txt" not in markdown
     assert "also_unused.docx" not in markdown
-    assert "E999" not in markdown.partition("## 3. 知识库文件清单")[2]
 
 
 def test_accepted_missing_figure_removes_dangling_reference_and_caption(

@@ -1,7 +1,11 @@
 from copy import deepcopy
 
 from src.evidence.identity import canonical_citation_identity
-from src.evidence.integrity import validate_pre_remap_citation_integrity
+from src.evidence.integrity import (
+    project_lossless_used_citations,
+    validate_final_citation_integrity,
+    validate_pre_remap_citation_integrity,
+)
 
 
 def citation(path: str, *, evidence_id: str = "E8", file_id: str = "") -> dict:
@@ -115,3 +119,142 @@ def test_pre_remap_scopes_same_local_id_by_task():
         },
     ]
     assert validate_pre_remap_citation_integrity(sections).is_valid is True
+
+
+def test_final_gate_rejects_one_display_id_with_two_identities():
+    sections = [
+        {
+            "task_id": "T1",
+            "text_output": "工艺 [E1]。",
+            "citations": [citation("/docs/process.docx", evidence_id="E1")],
+        },
+        {
+            "task_id": "T2",
+            "text_output": "维护 [E1]。",
+            "citations": [citation("/docs/maintenance.docx", evidence_id="E1")],
+        },
+    ]
+    registry = [item for section in sections for item in section["citations"]]
+
+    result = validate_final_citation_integrity(
+        sections, "工艺 [E1]。\n维护 [E1]。", registry
+    )
+
+    assert result.is_valid is False
+    assert {issue.code for issue in result.issues} == {
+        "FINAL_DISPLAY_IDENTITY_CONFLICT"
+    }
+
+
+def test_final_gate_rejects_unbound_body_marker():
+    sections = [{"task_id": "T1", "text_output": "工艺 [E9]。", "citations": []}]
+
+    result = validate_final_citation_integrity(sections, "工艺 [E9]。", [])
+
+    assert result.is_valid is False
+    assert "FINAL_CITATION_BINDING_MISSING" in {
+        issue.code for issue in result.issues
+    }
+
+
+def test_final_gate_allows_exact_duplicate_resolution():
+    item = citation("/docs/process.docx", evidence_id="E1")
+    sections = [
+        {
+            "task_id": "T1",
+            "text_output": "工艺 [E1]。",
+            "citations": [item, deepcopy(item)],
+        }
+    ]
+
+    result = validate_final_citation_integrity(
+        sections, "工艺 [E1]。\n\n[E1]", [item, deepcopy(item)]
+    )
+
+    assert result.is_valid is True
+
+
+def test_appendix_marker_cannot_mask_missing_body_binding():
+    sections = [{"task_id": "T1", "text_output": "正文 [E9]。", "citations": []}]
+
+    result = validate_final_citation_integrity(
+        sections, "正文 [E9]。\n\n证据附录 [E9]", []
+    )
+
+    assert "FINAL_CITATION_BINDING_MISSING" in {
+        issue.code for issue in result.issues
+    }
+
+
+def test_lossless_projection_retains_conflicting_entries():
+    left = citation("/docs/a.docx", evidence_id="E1")
+    right = citation("/docs/b.docx", evidence_id="E1")
+
+    projected = project_lossless_used_citations(
+        [
+            {
+                "task_id": "T1",
+                "text_output": "正文 [E1]。",
+                "citations": [left, right],
+            }
+        ]
+    )
+
+    assert projected == [left, right]
+
+
+def test_final_gate_rejects_registry_id_unused_by_body():
+    sections = [
+        {
+            "task_id": "T1",
+            "text_output": "正文 [E1]。",
+            "citations": [citation("/docs/a.docx", evidence_id="E1")],
+        }
+    ]
+    registry = [
+        citation("/docs/a.docx", evidence_id="E1"),
+        citation("/docs/b.docx", evidence_id="E2"),
+    ]
+
+    result = validate_final_citation_integrity(sections, "正文 [E1]。", registry)
+
+    assert "FINAL_REGISTRY_ID_UNUSED" in {issue.code for issue in result.issues}
+
+
+def test_final_gate_rejects_task_local_alias_after_remap():
+    sections = [
+        {
+            "task_id": "T1",
+            "text_output": "正文 [E8]。",
+            "citations": [
+                {
+                    **citation("/docs/a.docx", evidence_id="E1"),
+                    "local_evidence_id": "E8",
+                }
+            ],
+        }
+    ]
+    registry = sections[0]["citations"]
+
+    result = validate_final_citation_integrity(sections, "正文 [E8]。", registry)
+
+    assert "FINAL_REMAP_ALIAS" in {issue.code for issue in result.issues}
+
+
+def test_final_gate_accepts_grouped_markers():
+    registry = [
+        citation("/docs/a.docx", evidence_id="E1"),
+        citation("/docs/b.docx", evidence_id="E2"),
+        citation("/docs/c.docx", evidence_id="E3"),
+    ]
+    sections = [
+        {
+            "task_id": "T1",
+            "text_output": "正文 [E1, 2；E3]。",
+            "citations": registry,
+        }
+    ]
+
+    result = validate_final_citation_integrity(sections, "正文 [E1, 2；E3]。", registry)
+
+    assert result.is_valid is True

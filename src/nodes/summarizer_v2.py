@@ -14,6 +14,12 @@ from langchain_core.runnables import RunnableConfig
 from PIL import Image as PILImage
 
 from ..evidence.identity import normalize_sections_evidence
+from ..evidence.integrity import (
+    CitationIntegrityValidation,
+    project_lossless_used_citations,
+    validate_final_citation_integrity,
+    validate_pre_remap_citation_integrity,
+)
 from ..evidence.projection import canonical_source_identity, project_used_citations
 from ..evidence.reporting import (
     append_missing_figures,
@@ -534,6 +540,31 @@ def _blocked_update(blocking_sections: Sequence[Mapping[str, Any]]) -> dict[str,
     }
 
 
+def _citation_integrity_blocked_update(
+    validation: CitationIntegrityValidation,
+) -> dict[str, Any]:
+    """Adapt pure citation-validation failures to the existing blocked result."""
+
+    detail = "；".join(
+        f"{issue.code}: {issue.description}" for issue in validation.issues
+    )
+    return _blocked_update(
+        [
+            {
+                "task_id": "REPORT",
+                "task_name": "报告引用完整性",
+                "status": BLOCKED,
+                "issues": [
+                    {
+                        "code": "FINAL_CITATION_INTEGRITY",
+                        "description": detail or "最终引用完整性校验失败。",
+                    }
+                ],
+            }
+        ]
+    )
+
+
 def _draft_warning(state: State) -> str:
     statuses = state.get("section_status") or {}
     task_names = {
@@ -751,7 +782,19 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
     if missing:
         return _blocked_update(missing)
 
+    preflight = validate_pre_remap_citation_integrity(sections)
+    if not preflight.is_valid:
+        return _citation_integrity_blocked_update(preflight)
+
     sections, evidence_display_map = normalize_sections_evidence(sections)
+    final_markdown = _assemble_markdown(state, sections, report_status)
+    final_citations = project_lossless_used_citations(sections)
+    final_validation = validate_final_citation_integrity(
+        sections, final_markdown, final_citations
+    )
+    if not final_validation.is_valid:
+        return _citation_integrity_blocked_update(final_validation)
+
     report_sources: list[str] = []
     seen_sources: set[str] = set()
     for citation in _deduplicate_citations(sections):
@@ -759,7 +802,6 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         if source and source.casefold() not in seen_sources:
             seen_sources.add(source.casefold())
             report_sources.append(source)
-    final_markdown = _assemble_markdown(state, sections, report_status)
     report_dir = os.path.join(get_session_cache_dir(state, config), "report")
     os.makedirs(report_dir, exist_ok=True)
     stem = "report_draft_with_gaps" if report_status == DRAFT_WITH_GAPS else "report"
