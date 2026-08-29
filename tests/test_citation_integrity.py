@@ -29,6 +29,12 @@ def test_identity_does_not_merge_distinct_same_basename_files():
     )
 
 
+def test_identity_rejects_basename_like_explicit_identity_when_path_is_available():
+    left = {**citation("/a/process.docx"), "source_identity": "process.docx"}
+    right = {**citation("/b/process.docx"), "source_identity": "process.docx"}
+    assert canonical_citation_identity(left) != canonical_citation_identity(right)
+
+
 def test_identity_ignores_presentation_excerpt():
     left = citation("/a/process.docx")
     right = deepcopy(left)

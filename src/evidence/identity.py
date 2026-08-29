@@ -40,6 +40,14 @@ def _normalized_source_path(value: Any) -> str:
     return posixpath.normpath(path.replace("\\", "/"))
 
 
+def _is_presentation_basename(identity: str, full_path: str) -> bool:
+    """Return whether an explicit identity is only the available path's label."""
+
+    return bool(full_path) and identity.casefold() == posixpath.basename(
+        full_path
+    ).casefold()
+
+
 def canonical_citation_identity(citation: Mapping[str, Any]) -> str:
     """Return the lossless correctness identity for one raw citation."""
 
@@ -64,6 +72,7 @@ def canonical_citation_identity(citation: Mapping[str, Any]) -> str:
         if canonical_url
         else f"canonical:{explicit_canonical}"
         if explicit_canonical
+        and not _is_presentation_basename(explicit_canonical, full_path)
         else f"path:{full_path}"
         if full_path
         else f"fallback:{title_fallback}"
