@@ -16,6 +16,24 @@ def serialized_chars(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
 
 
+def serialize_emitted_response(response: Any) -> str:
+    """Serialize the complete deterministic fake response, including tool calls."""
+
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump(mode="json")
+    elif hasattr(response, "__dict__"):
+        payload = vars(response)
+    else:
+        payload = response
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 def measure_serialized_messages(messages: Any) -> dict[str, int]:
     """Return character-proxy prompt measurements, never provider token counts."""
 
@@ -107,4 +125,35 @@ FAILED_SEMANTIC_VERIFIER_RESPONSE = {
     ],
     "requirements_met": [],
     "requirements_missing": ["完整因果链证据"],
+}
+
+VERIFIER_PASS_STATE = {
+    "tasks": [
+        {
+            "task_id": "T1",
+            "task_name": "聚乙烯质量异常排查",
+            "task_description": "基于知识库证据分析聚乙烯常见质量异常。",
+            "task_type": "analysis",
+            "use_rag": True,
+            "use_web": False,
+            "requirement_ids": [],
+        }
+    ],
+    "cursor": 0,
+    "current_result": {
+        "status": "COMPLETED",
+        "text_output": "氢气是第一优先排查项并直接决定熔融指数。[E1]",
+        "tables": [],
+        "figures": [],
+        "citations": [
+            {
+                "evidence_id": "E1",
+                "title": "聚乙烯质量控制手册",
+                "locator": "§3.2",
+                "supporting_text": "氢气用量会影响聚乙烯熔融指数。",
+            }
+        ],
+        "report_sources": ["聚乙烯质量控制手册"],
+    },
+    "requirement_registry": [],
 }

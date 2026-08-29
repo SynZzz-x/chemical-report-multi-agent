@@ -17,6 +17,7 @@ from src.nodes import planner as planner_module
 from src.nodes import verifier as verifier_module
 from src.nodes.worker.agent import graph as worker_graph_module
 from src.nodes.worker.agent.graph import AutonomousToolNode
+from src.evidence.query_identity import normalize_query_identity
 from tests.benchmark_support import (
     BenchmarkRecorder,
     FAILED_SEMANTIC_VERIFIER_RESPONSE,
@@ -28,7 +29,9 @@ from tests.benchmark_support import (
     SCENARIO_B_QUERY,
     SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE,
     SCENARIO_B_TASK,
+    VERIFIER_PASS_STATE,
     measure_serialized_messages,
+    serialize_emitted_response,
     serialized_chars,
 )
 from src.verifier_contract import parse_verifier_assessment
@@ -245,10 +248,25 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
     ]
     prefetch_retrieval_calls = len(prefetched)
     adaptive_retrieval_calls = len(knowledge_tool.calls) - prefetch_retrieval_calls
-    duplicate_retrievals = len(attempted_adaptive_retrievals) - adaptive_retrieval_calls
+    prefetch_query_identity = normalize_query_identity(SCENARIO_B_QUERY)
+    duplicate_query_requests = sum(
+        normalize_query_identity((tool_call.get("args") or {}).get("query"))
+        == prefetch_query_identity
+        for tool_call in attempted_adaptive_retrievals
+    )
+    adaptive_tool_parameters = knowledge_tool.calls[prefetch_retrieval_calls:]
+    duplicate_retrieval_executions = sum(
+        normalize_query_identity(parameters.get("query")) == prefetch_query_identity
+        for parameters in adaptive_tool_parameters
+    )
+    duplicate_guard_rejections = (
+        duplicate_query_requests - duplicate_retrieval_executions
+    )
     assert len(attempted_adaptive_retrievals) == 0
     assert adaptive_retrieval_calls == 0
-    assert duplicate_retrievals == 0
+    assert duplicate_query_requests == 0
+    assert duplicate_guard_rejections == 0
+    assert duplicate_retrieval_executions == 0
     failed_semantic_assessment = parse_verifier_assessment(
         json.dumps(FAILED_SEMANTIC_VERIFIER_RESPONSE, ensure_ascii=False)
     )
@@ -276,8 +294,7 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         for recorder in prompt_recorders
     )
     mock_completion_chars = sum(
-        serialized_chars(getattr(response, "content", response))
-        for response in completion_responses
+        len(serialize_emitted_response(response)) for response in completion_responses
     )
     return {
         "intake_llm_calls": len(intake_recorder.calls),
@@ -288,7 +305,9 @@ def _collect_pipeline_metrics_in_process() -> dict[str, int]:
         "worker_tool_loop_iterations": len(worker_a_recorder.calls) + len(worker_b_recorder.calls),
         "prefetch_retrieval_calls": prefetch_retrieval_calls,
         "adaptive_retrieval_calls": adaptive_retrieval_calls,
-        "duplicate_retrievals": duplicate_retrievals,
+        "duplicate_query_requests": duplicate_query_requests,
+        "duplicate_guard_rejections": duplicate_guard_rejections,
+        "duplicate_retrieval_executions": duplicate_retrieval_executions,
         "failed_semantic_verifier_issues": failed_semantic_verifier_issues,
         "total_llm_calls": sum(len(recorder.calls) for recorder in prompt_recorders),
         "serialized_prompt_chars": serialized_prompt_chars,
@@ -320,39 +339,6 @@ def collect_pipeline_metrics() -> dict[str, int]:
     return json.loads(metrics_line.removeprefix(marker))
 
 
-def _verifier_benchmark_state() -> dict[str, Any]:
-    return {
-        "tasks": [
-            {
-                "task_id": "T1",
-                "task_name": "聚乙烯质量异常排查",
-                "task_description": "基于知识库证据分析聚乙烯常见质量异常。",
-                "task_type": "analysis",
-                "use_rag": True,
-                "use_web": False,
-                "requirement_ids": [],
-            }
-        ],
-        "cursor": 0,
-        "current_result": {
-            "status": "COMPLETED",
-            "text_output": "氢气是第一优先排查项并直接决定熔融指数。[E1]",
-            "tables": [],
-            "figures": [],
-            "citations": [
-                {
-                    "evidence_id": "E1",
-                    "title": "聚乙烯质量控制手册",
-                    "locator": "§3.2",
-                    "supporting_text": "氢气用量会影响聚乙烯熔融指数。",
-                }
-            ],
-            "report_sources": ["聚乙烯质量控制手册"],
-        },
-        "requirement_registry": [],
-    }
-
-
 def _run_verifier_fixture(response_payload: dict[str, Any]):
     recorder = BenchmarkRecorder(
         SimpleNamespace(content=json.dumps(response_payload, ensure_ascii=False))
@@ -363,10 +349,45 @@ def _run_verifier_fixture(response_payload: dict[str, Any]):
         )
         monkeypatch.setattr(verifier_module, "invoke_llm", _fake_invoke)
         update = verifier_module.verifier(
-            _verifier_benchmark_state(),
+            VERIFIER_PASS_STATE,
             {"configurable": {"use_llm": True}},
         )
     return recorder, update
+
+
+def collect_verifier_pass_metrics() -> dict[str, int]:
+    """Measure the real production prompt renderer with the fixed PASS fake."""
+
+    if os.environ.get("OFFLINE_VERIFIER_BENCHMARK_CHILD") == "1":
+        recorder, update = _run_verifier_fixture(PASS_VERIFIER_RESPONSE)
+        assert update["assessment"]["status"] == "PASS"
+        return {
+            "serialized_prompt_chars": measure_serialized_messages(recorder.calls)[
+                "serialized_prompt_chars"
+            ],
+            "mock_completion_chars": len(
+                serialize_emitted_response(recorder.response)
+            ),
+            "semantic_llm_calls": len(recorder.calls),
+        }
+    command = (
+        "import json; "
+        "from tests.test_offline_pipeline_benchmark import collect_verifier_pass_metrics; "
+        "print('__OFFLINE_VERIFIER_METRICS__' + "
+        "json.dumps(collect_verifier_pass_metrics()))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "OFFLINE_VERIFIER_BENCHMARK_CHILD": "1"},
+    )
+    marker = "__OFFLINE_VERIFIER_METRICS__"
+    metrics_line = next(
+        line for line in reversed(result.stdout.splitlines()) if line.startswith(marker)
+    )
+    return json.loads(metrics_line.removeprefix(marker))
 
 
 def test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call():
@@ -409,6 +430,32 @@ def test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call():
     assert serialized_chars(PASS_VERIFIER_RESPONSE) < serialized_chars(failed_payload)
 
 
+def test_mock_completion_serialization_includes_structured_tool_calls():
+    serialized = serialize_emitted_response(SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE)
+
+    assert '"content":""' in serialized
+    assert '"tool_calls"' in serialized
+    assert "repeat-prefetch-query" in serialized
+    assert len(serialized) > len(SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE.content)
+
+
+def test_verifier_pass_benchmark_records_exact_snapshot_comparison():
+    baseline_path = Path(__file__).parents[1] / "docs/benchmarks/2026-08-28-pipeline-baseline.json"
+    artifact = json.loads(baseline_path.read_text(encoding="utf-8"))
+    comparison = artifact["verifier_pass_comparison"]
+    current = collect_verifier_pass_metrics()
+
+    assert comparison["fixture"] == "VERIFIER_PASS_STATE + PASS_VERIFIER_RESPONSE"
+    assert comparison["baseline"]["commit"] == (
+        "3ba9fd3eb3ad84b193f699e72e15bc40bea40446"
+    )
+    assert comparison["baseline"]["semantic_llm_calls"] == 1
+    assert comparison["optimized"] == current
+    assert comparison["optimized"]["serialized_prompt_chars"] < (
+        comparison["baseline"]["serialized_prompt_chars"]
+    )
+
+
 def test_worker_benchmark_fake_requires_completed_prefetch_inventory():
     recorder = _PrefetchAwareWorkerRecorder()
 
@@ -447,7 +494,9 @@ def test_offline_benchmark_metrics_are_deterministic():
         "worker_llm_calls",
         "worker_generations",
         "worker_tool_loop_iterations",
-        "duplicate_retrievals",
+        "duplicate_query_requests",
+        "duplicate_guard_rejections",
+        "duplicate_retrieval_executions",
         "total_llm_calls",
     }
     character_metrics = {"serialized_prompt_chars", "mock_completion_chars"}
@@ -463,18 +512,27 @@ def test_offline_benchmark_metrics_are_deterministic():
     assert first["serialized_prompt_chars"] <= baseline_metrics["serialized_prompt_chars"]
     assert first["serialized_prompt_chars"] < 14500
     assert first["mock_completion_chars"] <= baseline_metrics["mock_completion_chars"]
+    assert baseline_metrics["mock_completion_chars"] - first["mock_completion_chars"] == len(
+        serialize_emitted_response(SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE)
+    )
     assert first["worker_llm_calls"] == 2
     assert first["worker_generations"] == 2
     assert first["worker_tool_loop_iterations"] == 2
     assert first["prefetch_retrieval_calls"] == 1
     assert first["adaptive_retrieval_calls"] == 0
-    assert first["duplicate_retrievals"] == 0
+    assert first["duplicate_query_requests"] == 0
+    assert first["duplicate_guard_rejections"] == 0
+    assert first["duplicate_retrieval_executions"] == 0
     assert first["total_llm_calls"] == 5
     assert first["worker_llm_calls"] == baseline_metrics["worker_llm_calls"] - 1
     assert first["worker_tool_loop_iterations"] == (
         baseline_metrics["worker_tool_loop_iterations"] - 1
     )
-    assert first["duplicate_retrievals"] == baseline_metrics["duplicate_retrievals"] - 1
+    assert first["duplicate_query_requests"] == baseline_metrics["duplicate_query_requests"] - 1
+    assert first["duplicate_guard_rejections"] == baseline_metrics["duplicate_guard_rejections"] - 1
+    assert baseline_metrics["duplicate_query_requests"] == 1
+    assert baseline_metrics["duplicate_guard_rejections"] == 1
+    assert baseline_metrics["duplicate_retrieval_executions"] == 0
     assert first["total_llm_calls"] >= 1
     assert first["serialized_prompt_chars"] > 0
     assert first["mock_completion_chars"] > 0
