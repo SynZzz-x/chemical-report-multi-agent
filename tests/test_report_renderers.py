@@ -81,7 +81,7 @@ def test_grouped_evidence_appendix_is_stable_safe_bounded_and_read_only():
             "source_type": "rag",
             "file_path": "/other/process.docx",
             "locator": "/cache/users/u-17/chunks/rag_99",
-            "section_title": "附录",
+            "section_title": "/cache/users/u-17/jobs/j-42/internal-section",
             "supporting_text": "重复来源。",
         },
     ]

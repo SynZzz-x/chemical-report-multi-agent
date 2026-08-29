@@ -42,19 +42,28 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
     return canonical_source_identity(citation) or "未命名知识库文件"
 
 
-def _safe_locator(citation: Mapping[str, Any]) -> str:
-    locator = str(citation.get("locator") or citation.get("url") or "").strip()
-    if not locator:
-        return "—"
-    lowered = locator.casefold().replace("\\", "/")
-    if (
-        locator.startswith(("/", "\\"))
-        or (len(locator) > 1 and locator[1] == ":")
+def _internal_reference(value: str) -> bool:
+    lowered = value.casefold().replace("\\", "/")
+    return bool(
+        value.startswith(("/", "\\"))
+        or (len(value) > 1 and value[1] == ":")
         or "chunk_id=" in lowered
         or re.search(r"(?:^|[/_-])rag[_-]?\d", lowered)
-    ):
+    )
+
+
+def _safe_locator(citation: Mapping[str, Any]) -> str:
+    locator = str(citation.get("locator") or citation.get("url") or "").strip()
+    if not locator or _internal_reference(locator):
         return "—"
     return locator
+
+
+def _safe_section_title(citation: Mapping[str, Any]) -> str:
+    section_title = str(citation.get("section_title") or "").strip()
+    if not section_title or _internal_reference(section_title):
+        return "—"
+    return section_title
 
 
 def _evidence_sort_key(citation: Mapping[str, Any]) -> tuple[int, int, str]:
@@ -108,7 +117,7 @@ def format_grouped_evidence_appendix(
                 "| [{evidence_id}] | {locator} | {section_title} | {summary} |".format(
                     evidence_id=_escape_cell(citation.get("evidence_id")),
                     locator=_escape_cell(_safe_locator(citation)),
-                    section_title=_escape_cell(citation.get("section_title")) or "—",
+                    section_title=_escape_cell(_safe_section_title(citation)),
                     summary=_escape_cell(presentation_evidence_excerpt(citation)) or "—",
                 )
             )
