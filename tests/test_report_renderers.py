@@ -262,7 +262,28 @@ def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
             "title": "/public/plots/j-curve.pdf",
             "file_path": "/public/plots/j-curve.pdf",
             "supporting_text": "公开曲线文件。",
-        }
+        },
+        {
+            "evidence_id": "E3",
+            "source_type": "rag",
+            "title": "/public/plots/c-rate.pdf",
+            "file_path": "/public/plots/c-rate.pdf",
+            "supporting_text": "C-rate 曲线。",
+        },
+        {
+            "evidence_id": "E4",
+            "source_type": "rag",
+            "title": "/public/data/u-value.csv",
+            "file_path": "/public/data/u-value.csv",
+            "supporting_text": "U-value 数据。",
+        },
+        {
+            "evidence_id": "E5",
+            "source_type": "rag",
+            "title": "/cache/jobs/1234567890.pdf",
+            "file_path": "/cache/jobs/1234567890.pdf",
+            "supporting_text": "匿名生成文件。",
+        },
     ]
     original = copy.deepcopy(citations)
 
@@ -276,6 +297,9 @@ def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
     assert "RAG1/RAG2" in appendix
     assert "RAG-1/RAG-2 assay" in appendix
     assert "#### j-curve.pdf" in appendix
+    assert "#### c-rate.pdf" in appendix
+    assert "#### u-value.csv" in appendix
+    assert "1234567890.pdf" not in appendix
 
 
 def test_grouped_appendix_redacts_url_fragments_decoded_values_and_private_ips():
@@ -314,6 +338,33 @@ def test_grouped_appendix_redacts_url_fragments_decoded_values_and_private_ips()
         "127.0.0.1",
     ):
         assert internal_value not in appendix
+
+
+def test_file_list_groups_by_canonical_identity_but_displays_only_safe_labels():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "file_path": "/cache/users/alice",
+            "section_title": "/cache/users/alice/private-section",
+        },
+        {
+            "evidence_id": "E2",
+            "source_type": "rag",
+            "file_path": "/cache/jobs/12345",
+            "section_title": "工艺分析 cache/jobs/12345/internal-section",
+        },
+    ]
+    original = copy.deepcopy(citations)
+
+    table = reporting.format_knowledge_base_file_table(citations)
+
+    assert citations == original
+    assert table.count("| 知识库文档 | rag |") == 2
+    assert "alice" not in table
+    assert "12345" not in table
+    assert "/cache" not in table
+    assert "工艺分析" in table
 
 
 def test_docx_heading_number_never_starts_with_zero_when_parent_is_missing(tmp_path):

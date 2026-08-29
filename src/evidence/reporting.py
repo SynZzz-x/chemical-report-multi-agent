@@ -27,9 +27,14 @@ _IDENTIFIER_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 _RAG_REFERENCE = re.compile(r"\brag_[\w.-]+", re.IGNORECASE)
-_SENSITIVE_LABEL = re.compile(
-    r"^(?:(?:u|c)[-_][\w.-]+|j-(?:\d[\w.-]*|[0-9a-f]{8,}[\w.-]*)|"
-    r"(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+)$",
+_GENERATED_LABEL = re.compile(
+    r"^(?:"
+    r"(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+"
+    r"|\d{6,}(?:\.[A-Za-z0-9]{1,12})?"
+    r"|[0-9a-f]{16,}(?:\.[A-Za-z0-9]{1,12})?"
+    r"|[0-9a-f]{8}-[0-9a-f-]{13,}(?:\.[A-Za-z0-9]{1,12})?"
+    r"|(?:u|c|j)[-_](?:\d{4,}|[0-9a-f]{8,})(?:\.[A-Za-z0-9]{1,12})?"
+    r")$",
     re.IGNORECASE,
 )
 _SAFE_FILE_NAME = re.compile(r"[^./\\]+\.[A-Za-z0-9]{1,12}$")
@@ -70,15 +75,20 @@ def _path_like(value: str) -> bool:
 
 
 def _safe_source_name(citation: Mapping[str, Any]) -> str:
-    if str(citation.get("source_type") or "").strip().casefold() == "web":
-        title = str(citation.get("title") or "").strip()
-        if title:
-            return title
-    return canonical_source_identity(citation) or "未命名知识库文件"
+    file_path = str(citation.get("file_path") or "").strip()
+    file_name = ntpath.basename(file_path.rstrip("/\\"))
+    if (
+        file_name
+        and _SAFE_FILE_NAME.fullmatch(file_name)
+        and not _GENERATED_LABEL.fullmatch(file_name)
+        and _redact_internal_references(file_name) == file_name
+    ):
+        return file_name
+    return _safe_group_label(citation)
 
 
 def _safe_group_label(citation: Mapping[str, Any]) -> str:
-    for field in ("title", "file_name"):
+    for field in ("title", "file_name", "file_path"):
         candidate = str(citation.get(field) or "").strip()
         if not candidate:
             continue
@@ -91,7 +101,7 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
         if (
             candidate
             and (not path_like or _SAFE_FILE_NAME.fullmatch(candidate))
-            and not _SENSITIVE_LABEL.fullmatch(candidate)
+            and not _GENERATED_LABEL.fullmatch(candidate)
             and _redact_internal_references(candidate) == candidate
         ):
             return candidate
@@ -352,9 +362,9 @@ def format_knowledge_base_file_table(
         source_type = str(citation.get("source_type") or "").strip()
         if source_type.casefold() != "rag":
             continue
-        file_path = str(citation.get("file_path") or "").strip()
-        file_name = _safe_source_name(citation)
-        key = (source_type.casefold(), file_name.casefold())
+        identity = canonical_source_identity(citation)
+        file_name = _safe_group_label(citation)
+        key = (source_type.casefold(), identity.casefold())
         entry = grouped.setdefault(
             key,
             {
@@ -364,8 +374,8 @@ def format_knowledge_base_file_table(
                 "count": 0,
             },
         )
-        section = str(citation.get("section_title") or "").strip()
-        if section and section not in entry["sections"]:
+        section = _safe_section_title(citation)
+        if section != "—" and section not in entry["sections"]:
             entry["sections"].append(section)
         entry["count"] += 1
 
