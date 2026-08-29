@@ -3,13 +3,92 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
+import posixpath
 import re
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from .projection import collect_used_evidence_ids
 
 
 _EVIDENCE_GROUP = re.compile(r"\[([^\]]*\bE\d+[^\]]*)\]", re.IGNORECASE)
+_STABLE_SOURCE_ID_FIELDS = (
+    "file_id",
+    "resource_id",
+    "source_id",
+    "document_id",
+    "doc_id",
+)
+
+
+def _canonical_url(value: Any) -> str:
+    raw_url = str(value or "").strip()
+    if not raw_url:
+        return ""
+    parts = urlsplit(raw_url)
+    return urlunsplit(
+        (parts.scheme.casefold(), parts.netloc.casefold(), parts.path, parts.query, "")
+    )
+
+
+def _normalized_source_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        return ""
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def canonical_citation_identity(citation: Mapping[str, Any]) -> str:
+    """Return the lossless correctness identity for one raw citation."""
+
+    stable_id = next(
+        (
+            str(citation.get(field) or "").strip()
+            for field in _STABLE_SOURCE_ID_FIELDS
+            if str(citation.get(field) or "").strip()
+        ),
+        "",
+    )
+    canonical_url = _canonical_url(citation.get("url"))
+    full_path = _normalized_source_path(citation.get("file_path"))
+    explicit_canonical = str(
+        citation.get("canonical_source_id") or citation.get("source_identity") or ""
+    ).strip().casefold()
+    title_fallback = str(citation.get("title") or "").strip().casefold()
+    authority = (
+        f"stable:{stable_id}"
+        if stable_id
+        else f"url:{canonical_url}"
+        if canonical_url
+        else f"canonical:{explicit_canonical}"
+        if explicit_canonical
+        else f"path:{full_path}"
+        if full_path
+        else f"fallback:{title_fallback}"
+    )
+    chunk_ids = tuple(str(value) for value in citation.get("chunk_ids") or ())
+    evidence_identity = (
+        {"chunk_ids": chunk_ids}
+        if chunk_ids
+        else {
+            "supporting_text_sha256": hashlib.sha256(
+                str(citation.get("supporting_text") or "").encode("utf-8")
+            ).hexdigest()
+        }
+    )
+    payload = {
+        "source_type": str(citation.get("source_type") or "").casefold(),
+        "authority": authority,
+        "locator": str(citation.get("locator") or "").strip(),
+        **evidence_identity,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def evidence_key(task_id: str, local_id: str) -> str:
@@ -54,18 +133,14 @@ def build_display_evidence_map(
             ),
             raw_citations,
         )
-        citations_by_id = {
-            str(citation.get("evidence_id") or "").strip().upper(): citation
-            for citation in raw_citations
-            if citation.get("evidence_id")
-        }
         for evidence_id in cited_order:
-            citation = citations_by_id[evidence_id]
-            if not isinstance(citation, Mapping):
-                continue
-            key = _citation_key(task_id, citation)
-            if key and key not in display_map:
-                display_map[key] = f"E{len(display_map) + 1}"
+            for citation in raw_citations:
+                local_id = str(citation.get("evidence_id") or "").strip().upper()
+                if local_id != evidence_id:
+                    continue
+                key = _citation_key(task_id, citation)
+                if key and key not in display_map:
+                    display_map[key] = f"E{len(display_map) + 1}"
     return display_map
 
 

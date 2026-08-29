@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .models import EvidenceBundle, EvidenceRecord
+from .identity import canonical_citation_identity
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -21,16 +21,7 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _dedupe_key(record: EvidenceRecord) -> str:
-    identity = "|".join(
-        (
-            record.source_type,
-            record.file_path or record.url,
-            record.locator,
-            ",".join(record.chunk_ids),
-            record.supporting_text.strip(),
-        )
-    )
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return canonical_citation_identity(record.model_dump(mode="json"))
 
 
 def _reindex(records: Iterable[EvidenceRecord]) -> tuple[EvidenceRecord, ...]:
