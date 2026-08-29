@@ -327,6 +327,50 @@ def test_spaced_path_redaction_handles_wrappers_without_matching_decimal_prose()
         assert leaked_path_part not in appendix
 
 
+def test_spaced_path_redaction_consumes_multidot_names_and_chinese_wrappers():
+    posix_versioned = "/Users/alice/My Reports/process report.v2.docx"
+    windows_final = r"C:\Users\alice\My Reports\process report.final.docx"
+    posix_archive = "/Users/alice/My Reports/archive.tar.gz"
+    posix_plain = "/Users/alice/My Reports/process report.docx"
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "公开工艺手册",
+            "file_path": "/knowledge/process.docx",
+            "locator": (
+                f"source（{posix_versioned}）；source“{posix_archive}”；page 6"
+            ),
+            "section_title": (
+                f"source（{windows_final}）；source“{posix_plain}”；table 2"
+            ),
+            "supporting_text": (
+                f"source {posix_plain}’；source {posix_plain}】；"
+                f"source {posix_plain}》；公开结论。"
+            ),
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "page 6" in appendix
+    assert "table 2" in appendix
+    assert "公开结论" in appendix
+    for leaked_path_part in (
+        posix_versioned,
+        windows_final,
+        posix_archive,
+        posix_plain,
+        "report.v2.docx",
+        "report.final.docx",
+        "archive.tar.gz",
+        "Reports/process report.docx",
+    ):
+        assert leaked_path_part not in appendix
+
+
 def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
     citations = [
         {

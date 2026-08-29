@@ -16,11 +16,14 @@ _NATURAL_EVIDENCE_ID = re.compile(r"^E(\d+)$", re.IGNORECASE)
 _URL_REFERENCE = re.compile(r"(?:https?|file)://[^\s|，。；、]+", re.IGNORECASE)
 _SPACED_FILE_PATH_REFERENCE = re.compile(
     r"(?:"
-    r"[A-Za-z]:[\\/](?=[^|，。；、\r\n]*\s)[^|，。；、\r\n]*?"
-    r"\.[A-Za-z][A-Za-z0-9]{0,11}"
-    r"|(?<![\w/])/(?![\s/])(?=[^|，。；、\r\n]*\s)"
-    r"[^|，。；、\r\n]*?\.[A-Za-z][A-Za-z0-9]{0,11}"
-    r")(?=$|[\s|，。；、)\]}>\"'.,;:!?])",
+    r"[A-Za-z]:[\\/](?=[^|，。；、）”’】》」』\r\n]*\s)"
+    r"[^|，。；、）”’】》」』\r\n]*?"
+    r"(?:\.[A-Za-z][A-Za-z0-9]{0,11})+"
+    r"|(?<![\w/])/(?![\s/])"
+    r"(?=[^|，。；、）”’】》」』\r\n]*\s)"
+    r"[^|，。；、）”’】》」』\r\n]*?"
+    r"(?:\.[A-Za-z][A-Za-z0-9]{0,11})+"
+    r")(?=$|[\s|，。；、)\]}>\"',;:!?）”’】》」』]|\.(?=$|\s))",
     re.IGNORECASE,
 )
 _PATH_REFERENCE = re.compile(
