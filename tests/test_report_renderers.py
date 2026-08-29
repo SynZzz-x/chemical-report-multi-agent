@@ -143,6 +143,20 @@ def test_grouped_appendix_never_displays_canonical_web_identity_as_label():
             "file_path": "/cache/users/u-label",
             "supporting_text": "知识库结论。",
         },
+        {
+            "evidence_id": "E3",
+            "source_type": "rag",
+            "title": "/cache/users/alice",
+            "file_path": "/cache/users/alice",
+            "supporting_text": "第一条匿名来源。",
+        },
+        {
+            "evidence_id": "E4",
+            "source_type": "rag",
+            "file_name": "/cache/jobs/12345",
+            "file_path": "/cache/jobs/12345",
+            "supporting_text": "第二条匿名来源。",
+        },
     ]
     original = copy.deepcopy(citations)
 
@@ -150,7 +164,7 @@ def test_grouped_appendix_never_displays_canonical_web_identity_as_label():
 
     assert citations == original
     assert "#### 网页来源" in appendix
-    assert "#### 知识库文档" in appendix
+    assert appendix.count("#### 知识库文档") == 3
     assert "internal.example" not in appendix
     assert "u-secret" not in appendix
     assert "c-secret" not in appendix
@@ -158,6 +172,8 @@ def test_grouped_appendix_never_displays_canonical_web_identity_as_label():
     assert "conversation_id" not in appendix
     assert "job_id" not in appendix
     assert "u-label" not in appendix
+    assert "alice" not in appendix
+    assert "12345" not in appendix
 
 
 def test_grouped_appendix_redacts_internal_references_from_all_display_text():
@@ -170,7 +186,9 @@ def test_grouped_appendix_redacts_internal_references_from_all_display_text():
             "locator": (
                 "§5 / page 6 / table 2；cache/users/u-rel/jobs/j-rel/chunk.txt；"
                 "/Users/alice/private/report.docx；file:///tmp/job-j-file/report.pdf；"
-                "https://internal.example/report?conversation_id=c-query"
+                "https://internal.example/report?conversation_id=c-query；"
+                "https://example.org/report?userId=u-query-camel&"
+                "conversation-id=c-query-dash"
             ),
             "section_title": (
                 "工艺分析 cache/conversations/c-rel/jobs/j-section/notes.md"
@@ -178,6 +196,7 @@ def test_grouped_appendix_redacts_internal_references_from_all_display_text():
             "supporting_text": (
                 "公开摘要；来源 /home/alice/cache/users/u-summary/input.docx；"
                 "chunk_id=rag_7f_internal；user_id=u-inline；"
+                "job_id: j-colon；userId=u-camel；conversation-id=c-dash；"
                 "https://internal.example/chunk?job_id=j-query"
             ),
         }
@@ -201,18 +220,50 @@ def test_grouped_appendix_redacts_internal_references_from_all_display_text():
         "j-rel",
         "j-file",
         "c-query",
+        "u-query-camel",
+        "c-query-dash",
         "c-rel",
         "j-section",
         "u-summary",
         "rag_7f_internal",
         "u-inline",
         "j-query",
+        "j-colon",
+        "u-camel",
+        "c-dash",
         "conversation_id",
         "chunk_id",
         "user_id",
         "job_id",
+        "userId",
+        "conversation-id",
+        "example.org/report?userId",
     ):
         assert internal_value not in appendix
+
+
+def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "web",
+            "title": "公开工艺数据",
+            "url": "https://example.org/report",
+            "locator": "§5 / page 6 / table 2 / https://example.org/report",
+            "section_title": "传质速率 kg/m/s",
+            "supporting_text": "速率单位 kg/m/s、mol/L/min；比较 RAG1/RAG2。",
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "https://example.org/report" in appendix
+    assert "§5 / page 6 / table 2" in appendix
+    assert "kg/m/s" in appendix
+    assert "mol/L/min" in appendix
+    assert "RAG1/RAG2" in appendix
 
 
 def test_docx_heading_number_never_starts_with_zero_when_parent_is_missing(tmp_path):

@@ -16,32 +16,33 @@ _URL_REFERENCE = re.compile(r"(?:https?|file)://[^\s|，。；、]+", re.IGNOREC
 _PATH_REFERENCE = re.compile(
     r"(?:"
     r"[A-Za-z]:[\\/][^\s|，。；、]+"
-    r"|/(?!\s)[^\s|，。；、/]+(?:/[^\s|，。；、/]+)+"
+    r"|(?<![\w/])/(?![\s/])[^\s|，。；、/]+(?:/[^\s|，。；、/]+)+"
     r"|(?<![\w.-])(?:cache|users?|conversations?|jobs?|chunks?)[\\/][^\s|，。；、]+"
     r")",
     re.IGNORECASE,
 )
 _IDENTIFIER_REFERENCE = re.compile(
-    r"\b(?:user|conversation|job|chunk|cache)_id\s*=\s*[^\s|，。；、;&]+",
+    r"\b(?:user|conversation|job|chunk|cache)[_-]?id\s*[:=]\s*[^\s|，。；、;&]+",
     re.IGNORECASE,
 )
-_RAG_REFERENCE = re.compile(r"\brag[_-]?\d[\w.-]*", re.IGNORECASE)
+_RAG_REFERENCE = re.compile(r"\brag[_-][\w.-]+", re.IGNORECASE)
 _SENSITIVE_LABEL = re.compile(
     r"^(?:(?:u|c|j)[-_][\w.-]+|(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+)$",
     re.IGNORECASE,
 )
+_SAFE_FILE_NAME = re.compile(r"[^./\\]+\.[A-Za-z0-9]{1,12}$")
 _INTERNAL_URL_HOST = re.compile(r"(?:^|[.-])(?:internal|localhost|private)(?:[.-]|$)")
 _SENSITIVE_QUERY_KEYS = {
     "user",
-    "user_id",
+    "userid",
     "conversation",
-    "conversation_id",
+    "conversationid",
     "job",
-    "job_id",
+    "jobid",
     "chunk",
-    "chunk_id",
+    "chunkid",
     "cache",
-    "cache_id",
+    "cacheid",
 }
 _INTERNAL_PATH_PARTS = {
     "cache",
@@ -82,10 +83,12 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
         parsed = urlsplit(candidate)
         if parsed.scheme or parsed.netloc or "?" in candidate or "#" in candidate:
             continue
-        if _path_like(candidate):
+        path_like = _path_like(candidate)
+        if path_like:
             candidate = ntpath.basename(candidate.rstrip("/\\"))
         if (
             candidate
+            and (not path_like or _SAFE_FILE_NAME.fullmatch(candidate))
             and not _SENSITIVE_LABEL.fullmatch(candidate)
             and _redact_internal_references(candidate) == candidate
         ):
@@ -103,7 +106,9 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
 def _redact_url(match: re.Match[str]) -> str:
     value = match.group(0)
     parsed = urlsplit(value)
-    query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
+    query_keys = {
+        re.sub(r"[_-]", "", key.casefold()) for key, _ in parse_qsl(parsed.query)
+    }
     path_parts = {part.casefold() for part in parsed.path.split("/") if part}
     if (
         parsed.scheme.casefold() == "file"
@@ -116,11 +121,24 @@ def _redact_url(match: re.Match[str]) -> str:
 
 
 def _redact_internal_references(value: str) -> str:
-    text = _URL_REFERENCE.sub(_redact_url, str(value or ""))
+    protected_urls: dict[str, str] = {}
+
+    def classify_url(match: re.Match[str]) -> str:
+        redacted = _redact_url(match)
+        if redacted != match.group(0):
+            return redacted
+        placeholder = f"PUBLICURLTOKEN{len(protected_urls)}END"
+        protected_urls[placeholder] = match.group(0)
+        return placeholder
+
+    text = _URL_REFERENCE.sub(classify_url, str(value or ""))
     text = _PATH_REFERENCE.sub(_REDACTION, text)
     text = _IDENTIFIER_REFERENCE.sub(_REDACTION, text)
     text = _RAG_REFERENCE.sub(_REDACTION, text)
-    return re.sub(rf"(?:{re.escape(_REDACTION)}\s*)+", _REDACTION, text).strip()
+    text = re.sub(rf"(?:{re.escape(_REDACTION)}\s*)+", _REDACTION, text).strip()
+    for placeholder, url in protected_urls.items():
+        text = text.replace(placeholder, url)
+    return text
 
 
 def _presentation_text(value: Any, *, limit: int = 240) -> str:
