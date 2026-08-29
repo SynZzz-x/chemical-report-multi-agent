@@ -17,7 +17,7 @@ from ..evidence.identity import normalize_sections_evidence
 from ..evidence.projection import canonical_source_identity, project_used_citations
 from ..evidence.reporting import (
     append_missing_figures,
-    format_evidence_table,
+    format_grouped_evidence_appendix,
     format_knowledge_base_file_table,
 )
 from ..report_acceptance import (
@@ -641,20 +641,18 @@ def _assemble_markdown(
             heading_level=reference_heading_level,
             heading_title=reference_item.raw,
         )
-        evidence_index_markdown = format_evidence_table(
+        evidence_index_markdown = format_grouped_evidence_appendix(
             reference_citations,
             heading_level=min(reference_heading_level + 1, 6),
-            include_section=True,
             heading_title="证据索引",
         )
         reference_markdown = "\n\n".join(
             block for block in (file_list_markdown, evidence_index_markdown) if block
         )
     else:
-        reference_markdown = format_evidence_table(
+        reference_markdown = format_grouped_evidence_appendix(
             reference_citations,
             heading_level=reference_heading_level,
-            include_section=True,
             heading_title=(reference_item.raw if reference_item else "证据来源"),
         )
     all_container_paths = section_container_paths(_intake_sections(state))

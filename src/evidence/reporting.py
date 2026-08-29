@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import ntpath
 import os
+import re
 from typing import Any
 
 from .projection import canonical_source_identity
+from .text_projection import presentation_evidence_excerpt
+
+
+_NATURAL_EVIDENCE_ID = re.compile(r"^E(\d+)$", re.IGNORECASE)
 
 
 def _escape_cell(value: Any) -> str:
@@ -22,6 +28,91 @@ def _safe_source_name(citation: Mapping[str, Any]) -> str:
         if title:
             return title
     return canonical_source_identity(citation) or "未命名知识库文件"
+
+
+def _safe_group_label(citation: Mapping[str, Any]) -> str:
+    for field in ("title", "file_name"):
+        candidate = str(citation.get(field) or "").strip()
+        if not candidate:
+            continue
+        if _path_like(candidate):
+            candidate = ntpath.basename(candidate.rstrip("/\\"))
+        if candidate:
+            return candidate
+    return canonical_source_identity(citation) or "未命名知识库文件"
+
+
+def _safe_locator(citation: Mapping[str, Any]) -> str:
+    locator = str(citation.get("locator") or citation.get("url") or "").strip()
+    if not locator:
+        return "—"
+    lowered = locator.casefold().replace("\\", "/")
+    if (
+        locator.startswith(("/", "\\"))
+        or (len(locator) > 1 and locator[1] == ":")
+        or "chunk_id=" in lowered
+        or re.search(r"(?:^|[/_-])rag[_-]?\d", lowered)
+    ):
+        return "—"
+    return locator
+
+
+def _evidence_sort_key(citation: Mapping[str, Any]) -> tuple[int, int, str]:
+    evidence_id = str(citation.get("evidence_id") or "").strip()
+    match = _NATURAL_EVIDENCE_ID.fullmatch(evidence_id)
+    if match:
+        return (0, int(match.group(1)), evidence_id.casefold())
+    return (1, 0, evidence_id.casefold())
+
+
+def format_grouped_evidence_appendix(
+    citations: Sequence[Mapping[str, Any]],
+    *,
+    heading_level: int = 3,
+    heading_title: str = "证据来源",
+) -> str:
+    """Render a stable presentation-only evidence projection by source."""
+
+    if not citations:
+        return ""
+    level = max(1, min(int(heading_level), 6))
+    groups: dict[str, dict[str, Any]] = {}
+    for citation in citations:
+        identity = canonical_source_identity(citation)
+        key = identity.casefold()
+        group = groups.setdefault(
+            key,
+            {
+                "label": _safe_group_label(citation),
+                "citations": [],
+            },
+        )
+        group["citations"].append(citation)
+
+    lines = [
+        f"{'#' * level} {str(heading_title).strip() or '证据来源'}",
+    ]
+    source_level = min(level + 1, 6)
+    for group in groups.values():
+        lines.extend(
+            [
+                "",
+                f"{'#' * source_level} {_escape_cell(group['label'])}",
+                "",
+                "| 证据编号 | 定位 | 支撑章节 | 摘要 |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for citation in sorted(group["citations"], key=_evidence_sort_key):
+            lines.append(
+                "| [{evidence_id}] | {locator} | {section_title} | {summary} |".format(
+                    evidence_id=_escape_cell(citation.get("evidence_id")),
+                    locator=_escape_cell(_safe_locator(citation)),
+                    section_title=_escape_cell(citation.get("section_title")) or "—",
+                    summary=_escape_cell(presentation_evidence_excerpt(citation)) or "—",
+                )
+            )
+    return "\n".join(lines)
 
 
 def append_missing_figures(markdown: str, figures: Sequence[Mapping[str, Any]]) -> str:
