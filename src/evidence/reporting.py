@@ -5,12 +5,56 @@ import ntpath
 import os
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from .projection import canonical_source_identity
-from .text_projection import presentation_evidence_excerpt
+from .text_projection import normalize_evidence_text, presentation_evidence_excerpt
 
 
 _NATURAL_EVIDENCE_ID = re.compile(r"^E(\d+)$", re.IGNORECASE)
+_URL_REFERENCE = re.compile(r"(?:https?|file)://[^\s|，。；、]+", re.IGNORECASE)
+_PATH_REFERENCE = re.compile(
+    r"(?:"
+    r"[A-Za-z]:[\\/][^\s|，。；、]+"
+    r"|/(?!\s)[^\s|，。；、/]+(?:/[^\s|，。；、/]+)+"
+    r"|(?<![\w.-])(?:cache|users?|conversations?|jobs?|chunks?)[\\/][^\s|，。；、]+"
+    r")",
+    re.IGNORECASE,
+)
+_IDENTIFIER_REFERENCE = re.compile(
+    r"\b(?:user|conversation|job|chunk|cache)_id\s*=\s*[^\s|，。；、;&]+",
+    re.IGNORECASE,
+)
+_RAG_REFERENCE = re.compile(r"\brag[_-]?\d[\w.-]*", re.IGNORECASE)
+_SENSITIVE_LABEL = re.compile(
+    r"^(?:(?:u|c|j)[-_][\w.-]+|(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+)$",
+    re.IGNORECASE,
+)
+_INTERNAL_URL_HOST = re.compile(r"(?:^|[.-])(?:internal|localhost|private)(?:[.-]|$)")
+_SENSITIVE_QUERY_KEYS = {
+    "user",
+    "user_id",
+    "conversation",
+    "conversation_id",
+    "job",
+    "job_id",
+    "chunk",
+    "chunk_id",
+    "cache",
+    "cache_id",
+}
+_INTERNAL_PATH_PARTS = {
+    "cache",
+    "user",
+    "users",
+    "conversation",
+    "conversations",
+    "job",
+    "jobs",
+    "chunk",
+    "chunks",
+}
+_REDACTION = "[内部引用已隐藏]"
 
 
 def _escape_cell(value: Any) -> str:
@@ -35,35 +79,66 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
         candidate = str(citation.get(field) or "").strip()
         if not candidate:
             continue
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc or "?" in candidate or "#" in candidate:
+            continue
         if _path_like(candidate):
             candidate = ntpath.basename(candidate.rstrip("/\\"))
-        if candidate:
+        if (
+            candidate
+            and not _SENSITIVE_LABEL.fullmatch(candidate)
+            and _redact_internal_references(candidate) == candidate
+        ):
             return candidate
-    return canonical_source_identity(citation) or "未命名知识库文件"
+    source_type = str(citation.get("source_type") or "").strip().casefold()
+    return {
+        "rag": "知识库文档",
+        "web": "网页来源",
+        "file": "文件来源",
+        "local": "文件来源",
+        "tool": "工具来源",
+    }.get(source_type, "证据来源")
 
 
-def _internal_reference(value: str) -> bool:
-    lowered = value.casefold().replace("\\", "/")
-    return bool(
-        value.startswith(("/", "\\"))
-        or (len(value) > 1 and value[1] == ":")
-        or "chunk_id=" in lowered
-        or re.search(r"(?:^|[/_-])rag[_-]?\d", lowered)
+def _redact_url(match: re.Match[str]) -> str:
+    value = match.group(0)
+    parsed = urlsplit(value)
+    query_keys = {key.casefold() for key, _ in parse_qsl(parsed.query)}
+    path_parts = {part.casefold() for part in parsed.path.split("/") if part}
+    if (
+        parsed.scheme.casefold() == "file"
+        or _INTERNAL_URL_HOST.search(parsed.hostname or "")
+        or query_keys.intersection(_SENSITIVE_QUERY_KEYS)
+        or path_parts.intersection(_INTERNAL_PATH_PARTS)
+    ):
+        return _REDACTION
+    return value
+
+
+def _redact_internal_references(value: str) -> str:
+    text = _URL_REFERENCE.sub(_redact_url, str(value or ""))
+    text = _PATH_REFERENCE.sub(_REDACTION, text)
+    text = _IDENTIFIER_REFERENCE.sub(_REDACTION, text)
+    text = _RAG_REFERENCE.sub(_REDACTION, text)
+    return re.sub(rf"(?:{re.escape(_REDACTION)}\s*)+", _REDACTION, text).strip()
+
+
+def _presentation_text(value: Any, *, limit: int = 240) -> str:
+    normalized = normalize_evidence_text(value)
+    return presentation_evidence_excerpt(
+        _redact_internal_references(normalized),
+        limit=limit,
     )
 
 
 def _safe_locator(citation: Mapping[str, Any]) -> str:
     locator = str(citation.get("locator") or citation.get("url") or "").strip()
-    if not locator or _internal_reference(locator):
-        return "—"
-    return locator
+    return _presentation_text(locator) or "—"
 
 
 def _safe_section_title(citation: Mapping[str, Any]) -> str:
     section_title = str(citation.get("section_title") or "").strip()
-    if not section_title or _internal_reference(section_title):
-        return "—"
-    return section_title
+    return _presentation_text(section_title) or "—"
 
 
 def _evidence_sort_key(citation: Mapping[str, Any]) -> tuple[int, int, str]:
@@ -118,7 +193,7 @@ def format_grouped_evidence_appendix(
                     evidence_id=_escape_cell(citation.get("evidence_id")),
                     locator=_escape_cell(_safe_locator(citation)),
                     section_title=_escape_cell(_safe_section_title(citation)),
-                    summary=_escape_cell(presentation_evidence_excerpt(citation)) or "—",
+                    summary=_escape_cell(_presentation_text(citation)) or "—",
                 )
             )
     return "\n".join(lines)

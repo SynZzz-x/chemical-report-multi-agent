@@ -125,6 +125,96 @@ def test_grouped_evidence_appendix_is_stable_safe_bounded_and_read_only():
     )
 
 
+def test_grouped_appendix_never_displays_canonical_web_identity_as_label():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "web",
+            "url": (
+                "https://internal.example/cache/users/u-secret/report"
+                "?conversation_id=c-secret&job_id=j-secret"
+            ),
+            "supporting_text": "公开结论。",
+        },
+        {
+            "evidence_id": "E2",
+            "source_type": "rag",
+            "title": "cache/users/u-label",
+            "file_path": "/cache/users/u-label",
+            "supporting_text": "知识库结论。",
+        },
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "#### 网页来源" in appendix
+    assert "#### 知识库文档" in appendix
+    assert "internal.example" not in appendix
+    assert "u-secret" not in appendix
+    assert "c-secret" not in appendix
+    assert "j-secret" not in appendix
+    assert "conversation_id" not in appendix
+    assert "job_id" not in appendix
+    assert "u-label" not in appendix
+
+
+def test_grouped_appendix_redacts_internal_references_from_all_display_text():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "公开工艺手册",
+            "file_path": "/srv/cache/users/u-private/source.docx",
+            "locator": (
+                "§5 / page 6 / table 2；cache/users/u-rel/jobs/j-rel/chunk.txt；"
+                "/Users/alice/private/report.docx；file:///tmp/job-j-file/report.pdf；"
+                "https://internal.example/report?conversation_id=c-query"
+            ),
+            "section_title": (
+                "工艺分析 cache/conversations/c-rel/jobs/j-section/notes.md"
+            ),
+            "supporting_text": (
+                "公开摘要；来源 /home/alice/cache/users/u-summary/input.docx；"
+                "chunk_id=rag_7f_internal；user_id=u-inline；"
+                "https://internal.example/chunk?job_id=j-query"
+            ),
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "§5 / page 6 / table 2" in appendix
+    assert "工艺分析" in appendix
+    assert "公开摘要" in appendix
+    for internal_value in (
+        "cache/users",
+        "cache/conversations",
+        "/Users/alice",
+        "/home/alice",
+        "file://",
+        "internal.example",
+        "u-rel",
+        "j-rel",
+        "j-file",
+        "c-query",
+        "c-rel",
+        "j-section",
+        "u-summary",
+        "rag_7f_internal",
+        "u-inline",
+        "j-query",
+        "conversation_id",
+        "chunk_id",
+        "user_id",
+        "job_id",
+    ):
+        assert internal_value not in appendix
+
+
 def test_docx_heading_number_never_starts_with_zero_when_parent_is_missing(tmp_path):
     output = tmp_path / "heading.docx"
 
