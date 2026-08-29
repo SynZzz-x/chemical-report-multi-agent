@@ -284,6 +284,49 @@ def test_grouped_appendix_redacts_complete_absolute_paths_containing_spaces():
         assert leaked_suffix not in appendix
 
 
+def test_spaced_path_redaction_handles_wrappers_without_matching_decimal_prose():
+    posix_path = "/Users/alice/My Reports/process report.docx"
+    windows_path = r"C:\Users\alice\My Reports\process report.docx"
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "公开工艺手册",
+            "file_path": "/knowledge/process.docx",
+            "locator": (
+                f"source ({posix_path})；source \"{posix_path}\"；page 6"
+            ),
+            "section_title": (
+                f"source ({windows_path})；source '{windows_path}'；table 2"
+            ),
+            "supporting_text": (
+                "ratio /temperature response is 2.5；"
+                "kg/m/s to /mol basis is 1.0"
+            ),
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "ratio /temperature response is 2.5" in appendix
+    assert "kg/m/s to /mol basis is 1.0" in appendix
+    assert reporting._redact_internal_references(
+        "ratio /temperature response is 2.5"
+    ) == "ratio /temperature response is 2.5"
+    assert reporting._redact_internal_references(
+        "kg/m/s to /mol basis is 1.0"
+    ) == "kg/m/s to /mol basis is 1.0"
+    for leaked_path_part in (
+        posix_path,
+        windows_path,
+        "Reports/process report.docx",
+        r"Reports\process report.docx",
+    ):
+        assert leaked_path_part not in appendix
+
+
 def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
     citations = [
         {
