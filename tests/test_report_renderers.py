@@ -242,6 +242,48 @@ def test_grouped_appendix_redacts_internal_references_from_all_display_text():
         assert internal_value not in appendix
 
 
+def test_grouped_appendix_redacts_complete_absolute_paths_containing_spaces():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "rag",
+            "title": "公开工艺手册",
+            "file_path": "/knowledge/process.docx",
+            "locator": (
+                "§5 反应条件；/Users/alice/My Reports/process report.docx；"
+                "page 6；https://example.org/public-report"
+            ),
+            "section_title": (
+                r"熔指分析；C:\Users\alice\My Reports\process report.docx；table 2"
+            ),
+            "supporting_text": (
+                "氢气/乙烯比为 0.25 mol/mol；"
+                "/Users/alice/My Reports/process report.docx；"
+                r"Windows 记录 C:\Users\alice\My Reports\process report.docx；"
+                "公开结论保持不变。"
+            ),
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "§5 反应条件" in appendix
+    assert "page 6" in appendix
+    assert "table 2" in appendix
+    assert "氢气/乙烯比为 0.25 mol/mol" in appendix
+    assert "公开结论保持不变" in appendix
+    assert "https://example.org/public-report" in appendix
+    for leaked_suffix in (
+        "/Users/alice",
+        r"C:\Users\alice",
+        "My Reports",
+        "process report.docx",
+    ):
+        assert leaked_suffix not in appendix
+
+
 def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
     citations = [
         {

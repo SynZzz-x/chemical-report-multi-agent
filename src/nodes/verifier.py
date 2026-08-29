@@ -976,21 +976,25 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             if retrieval_query:
                 normalized["retrieval_query"] = retrieval_query
         if not web_allowed and _demands_unauthorized_web(issue):
-            detail = normalized.get("retrieval_query") or "当前硬性证据要求"
-            normalized.update(
-                {
-                    "code": (
-                        code
-                        if code in _SEMANTIC_CLAIM_CODES
-                        else "EVIDENCE_GAP"
-                    ),
-                    "category": "EVIDENCE_GAP",
-                    "description": f"当前已授权来源不足以支持该证据要求：{detail}",
-                    "suggestion": (
-                        "上传相关资料、明确授权公开网络检索，或调整任务要求。"
-                    ),
-                }
-            )
+            if code in _SEMANTIC_CLAIM_CODES:
+                normalized.pop("retrieval_query", None)
+                normalized["suggestion"] = (
+                    "收缩该论断中不受支持的部分，或补充当前已授权来源中的支持证据。"
+                )
+            else:
+                detail = normalized.get("retrieval_query") or "当前硬性证据要求"
+                normalized.update(
+                    {
+                        "code": "EVIDENCE_GAP",
+                        "category": "EVIDENCE_GAP",
+                        "description": (
+                            f"当前已授权来源不足以支持该证据要求：{detail}"
+                        ),
+                        "suggestion": (
+                            "上传相关资料、明确授权公开网络检索，或调整任务要求。"
+                        ),
+                    }
+                )
         issues.append(normalized)
 
     requirements_missing = list(assessment["requirements_missing"])

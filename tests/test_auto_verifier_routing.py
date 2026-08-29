@@ -287,6 +287,63 @@ def test_unauthorized_web_normalization_preserves_claim_issue_code(code):
     assert sanitized["issues"][0]["category"] == "EVIDENCE_GAP"
 
 
+def test_unauthorized_web_normalization_preserves_semantic_claim_context_in_routing():
+    state = _state()
+    state["tasks"][0].update(
+        {
+            "use_rag": True,
+            "use_web": False,
+            "requirement_ids": ["REQ-EVIDENCE"],
+        }
+    )
+    state["web_authorized"] = False
+    state["requirement_registry"] = [
+        {
+            "requirement_id": "REQ-EVIDENCE",
+            "kind": "evidence",
+            "severity": "hard",
+            "status": "active",
+        }
+    ]
+    description = (
+        "论断“氢气是第一优先排查项并直接决定熔指”中，"
+        "“第一优先排查项”这一子句缺乏证据支持；未从公开网络补充依据。"
+    )
+    assessment = {
+        "status": "FAILED",
+        "current_section": "引言",
+        "issues": [
+            {
+                "code": "CLAIM_PARTIALLY_SUPPORTED",
+                "category": "EVIDENCE_GAP",
+                "description": description,
+                "suggestion": "收缩该子句，或查询公开网络补充证据。",
+                "severity": "major",
+                "requirement_ids": ["REQ-EVIDENCE", "REQ-UNKNOWN"],
+                "retrieval_query": "公开网络 氢气 第一优先排查项 熔指",
+            }
+        ],
+        "requirements_met": [],
+        "requirements_missing": ["论断支持"],
+    }
+
+    sanitized = auto_verifier_module._sanitize_assessment(assessment, state)
+    issue = sanitized["issues"][0]
+    routed = decide_recovery_action({**state, "assessment": sanitized}, sanitized)
+    routed_issue = routed["section_status"]["T1"]["issues"][0]
+
+    assert issue["code"] == "CLAIM_PARTIALLY_SUPPORTED"
+    assert issue["category"] == "EVIDENCE_GAP"
+    assert issue["description"] == description
+    assert "收缩" in issue["suggestion"]
+    assert "当前已授权来源" in issue["suggestion"]
+    assert "公开网络" not in issue["suggestion"]
+    assert "retrieval_query" not in issue
+    assert issue["requirement_ids"] == ["REQ-EVIDENCE"]
+    assert routed["workflow_action"] == "EVIDENCE_RECOVERY"
+    assert routed_issue == issue
+
+
 def test_contract_failure_is_repaired_locally_before_pass(monkeypatch, caplog):
     caplog.set_level("INFO", logger="src.nodes.verifier")
     state = _state()

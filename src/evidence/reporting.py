@@ -14,6 +14,14 @@ from .text_projection import normalize_evidence_text, presentation_evidence_exce
 
 _NATURAL_EVIDENCE_ID = re.compile(r"^E(\d+)$", re.IGNORECASE)
 _URL_REFERENCE = re.compile(r"(?:https?|file)://[^\s|，。；、]+", re.IGNORECASE)
+_SPACED_FILE_PATH_REFERENCE = re.compile(
+    r"(?:"
+    r"[A-Za-z]:[\\/](?=[^|，。；、\r\n]*\s)[^|，。；、\r\n]*?\.[A-Za-z0-9]{1,12}"
+    r"|(?<![\w/])/(?![\s/])(?=[^|，。；、\r\n]*\s)"
+    r"[^|，。；、\r\n]*?\.[A-Za-z0-9]{1,12}"
+    r")(?=$|[\s|，。；、])",
+    re.IGNORECASE,
+)
 _PATH_REFERENCE = re.compile(
     r"(?:"
     r"[A-Za-z]:[\\/][^\s|，。；、]+"
@@ -135,7 +143,8 @@ def _literal_internal_host(hostname: str) -> bool:
 def _internal_payload(value: str) -> bool:
     decoded = unquote(str(value or ""))
     if (
-        _PATH_REFERENCE.search(decoded)
+        _SPACED_FILE_PATH_REFERENCE.search(decoded)
+        or _PATH_REFERENCE.search(decoded)
         or _IDENTIFIER_REFERENCE.search(decoded)
         or _RAG_REFERENCE.search(decoded)
     ):
@@ -185,6 +194,7 @@ def _redact_internal_references(value: str) -> str:
         return placeholder
 
     text = _URL_REFERENCE.sub(classify_url, str(value or ""))
+    text = _SPACED_FILE_PATH_REFERENCE.sub(_REDACTION, text)
     text = _PATH_REFERENCE.sub(_REDACTION, text)
     text = _IDENTIFIER_REFERENCE.sub(_REDACTION, text)
     text = _RAG_REFERENCE.sub(_REDACTION, text)
