@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import ipaddress
 import ntpath
 import os
 import re
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .projection import canonical_source_identity
 from .text_projection import normalize_evidence_text, presentation_evidence_excerpt
@@ -25,9 +26,10 @@ _IDENTIFIER_REFERENCE = re.compile(
     r"\b(?:user|conversation|job|chunk|cache)[_-]?id\s*[:=]\s*[^\s|，。；、;&]+",
     re.IGNORECASE,
 )
-_RAG_REFERENCE = re.compile(r"\brag[_-][\w.-]+", re.IGNORECASE)
+_RAG_REFERENCE = re.compile(r"\brag_[\w.-]+", re.IGNORECASE)
 _SENSITIVE_LABEL = re.compile(
-    r"^(?:(?:u|c|j)[-_][\w.-]+|(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+)$",
+    r"^(?:(?:u|c)[-_][\w.-]+|j-(?:\d[\w.-]*|[0-9a-f]{8,}[\w.-]*)|"
+    r"(?:user|conversation|job|chunk|cache)(?:_id)?[-_=][\w.-]+)$",
     re.IGNORECASE,
 )
 _SAFE_FILE_NAME = re.compile(r"[^./\\]+\.[A-Za-z0-9]{1,12}$")
@@ -103,18 +105,59 @@ def _safe_group_label(citation: Mapping[str, Any]) -> str:
     }.get(source_type, "证据来源")
 
 
+def _normalized_identifier_key(value: str) -> str:
+    return re.sub(r"[_-]", "", str(value or "").casefold())
+
+
+def _literal_internal_host(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return bool(
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+    )
+
+
+def _internal_payload(value: str) -> bool:
+    decoded = unquote(str(value or ""))
+    if (
+        _PATH_REFERENCE.search(decoded)
+        or _IDENTIFIER_REFERENCE.search(decoded)
+        or _RAG_REFERENCE.search(decoded)
+    ):
+        return True
+    parsed = urlsplit(decoded)
+    path_parts = {
+        part.casefold() for part in unquote(parsed.path).split("/") if part
+    }
+    return bool(
+        parsed.scheme.casefold() == "file"
+        or _INTERNAL_URL_HOST.search(parsed.hostname or "")
+        or _literal_internal_host(parsed.hostname or "")
+        or path_parts.intersection(_INTERNAL_PATH_PARTS)
+    )
+
+
 def _redact_url(match: re.Match[str]) -> str:
     value = match.group(0)
     parsed = urlsplit(value)
-    query_keys = {
-        re.sub(r"[_-]", "", key.casefold()) for key, _ in parse_qsl(parsed.query)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query_keys = {_normalized_identifier_key(key) for key, _ in query}
+    path_parts = {
+        part.casefold() for part in unquote(parsed.path).split("/") if part
     }
-    path_parts = {part.casefold() for part in parsed.path.split("/") if part}
     if (
         parsed.scheme.casefold() == "file"
         or _INTERNAL_URL_HOST.search(parsed.hostname or "")
+        or _literal_internal_host(parsed.hostname or "")
         or query_keys.intersection(_SENSITIVE_QUERY_KEYS)
         or path_parts.intersection(_INTERNAL_PATH_PARTS)
+        or any(_internal_payload(query_value) for _, query_value in query)
+        or _internal_payload(parsed.fragment)
     ):
         return _REDACTION
     return value

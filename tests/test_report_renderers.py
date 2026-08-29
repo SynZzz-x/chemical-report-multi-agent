@@ -251,7 +251,17 @@ def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
             "url": "https://example.org/report",
             "locator": "§5 / page 6 / table 2 / https://example.org/report",
             "section_title": "传质速率 kg/m/s",
-            "supporting_text": "速率单位 kg/m/s、mol/L/min；比较 RAG1/RAG2。",
+            "supporting_text": (
+                "速率单位 kg/m/s、mol/L/min；比较 RAG1/RAG2 与 "
+                "RAG-1/RAG-2 assay。"
+            ),
+        },
+        {
+            "evidence_id": "E2",
+            "source_type": "rag",
+            "title": "/public/plots/j-curve.pdf",
+            "file_path": "/public/plots/j-curve.pdf",
+            "supporting_text": "公开曲线文件。",
         }
     ]
     original = copy.deepcopy(citations)
@@ -264,6 +274,46 @@ def test_grouped_appendix_preserves_scientific_text_and_public_url_exactly():
     assert "kg/m/s" in appendix
     assert "mol/L/min" in appendix
     assert "RAG1/RAG2" in appendix
+    assert "RAG-1/RAG-2 assay" in appendix
+    assert "#### j-curve.pdf" in appendix
+
+
+def test_grouped_appendix_redacts_url_fragments_decoded_values_and_private_ips():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "source_type": "web",
+            "title": "URL 边界测试",
+            "locator": (
+                "§5；https://example.org/report#jobId=j-frag&"
+                "conversation-id=c-frag&user_id=u-frag；"
+                "https://example.org/go?redirect=%2Fcache%2Fusers%2Falice%2Fjobs%2Fj-9；"
+                "http://127.0.0.1/private/report"
+            ),
+            "supporting_text": "公开说明 page 6 table 2。",
+        }
+    ]
+    original = copy.deepcopy(citations)
+
+    appendix = reporting.format_grouped_evidence_appendix(citations)
+
+    assert citations == original
+    assert "§5" in appendix
+    assert "page 6 table 2" in appendix
+    for internal_value in (
+        "j-frag",
+        "c-frag",
+        "u-frag",
+        "jobId",
+        "conversation-id",
+        "user_id",
+        "redirect=",
+        "%2Fcache",
+        "alice",
+        "j-9",
+        "127.0.0.1",
+    ):
+        assert internal_value not in appendix
 
 
 def test_docx_heading_number_never_starts_with_zero_when_parent_is_missing(tmp_path):
