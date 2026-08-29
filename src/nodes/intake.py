@@ -264,7 +264,7 @@ def llm_parse_user_need(raw_request: str, config: RunnableConfig) -> Dict[str, A
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", system_template),
-            ("human", "请生成 JSON 输出"),
+            ("human", "{user_input}"),
         ]
     )
     messages = prompt.format_messages(user_input=raw_request)

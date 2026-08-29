@@ -442,6 +442,7 @@ def test_offline_benchmark_metrics_are_deterministic():
 
     assert first == second
     baseline_metrics = baseline["measurement"]["metrics"]
+    optimized = baseline["optimized"]
     optimized_metrics = {
         "worker_llm_calls",
         "worker_generations",
@@ -460,6 +461,7 @@ def test_offline_benchmark_metrics_are_deterministic():
         if key not in character_metrics | optimized_metrics
     }
     assert first["serialized_prompt_chars"] <= baseline_metrics["serialized_prompt_chars"]
+    assert first["serialized_prompt_chars"] < 14500
     assert first["mock_completion_chars"] <= baseline_metrics["mock_completion_chars"]
     assert first["worker_llm_calls"] == 2
     assert first["worker_generations"] == 2
@@ -476,3 +478,9 @@ def test_offline_benchmark_metrics_are_deterministic():
     assert first["total_llm_calls"] >= 1
     assert first["serialized_prompt_chars"] > 0
     assert first["mock_completion_chars"] > 0
+    assert optimized["metrics"] == first
+    assert optimized["offline_local_execution"]["offline_only"] is True
+    assert optimized["offline_local_execution"]["not_an_online_latency_claim"] is True
+    assert optimized["provider_tokens"] is None
+    assert optimized["online_latency_seconds"] is None
+    assert optimized["requires_real_run"] is True

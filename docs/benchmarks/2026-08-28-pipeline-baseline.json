@@ -22,5 +22,31 @@
       "serialized_prompt_chars": 20640,
       "mock_completion_chars": 1301
     }
+  },
+  "optimized": {
+    "method": "The same fixed offline fixtures after claim grounding, Worker prefetch reuse, compact Verifier output, and Intake/Planner prompt compression. Character counts are deterministic proxies, not provider tokens.",
+    "metrics": {
+      "intake_llm_calls": 1,
+      "planner_llm_calls": 1,
+      "worker_llm_calls": 2,
+      "verifier_llm_calls": 1,
+      "worker_generations": 2,
+      "worker_tool_loop_iterations": 2,
+      "prefetch_retrieval_calls": 1,
+      "adaptive_retrieval_calls": 0,
+      "duplicate_retrievals": 0,
+      "failed_semantic_verifier_issues": 1,
+      "total_llm_calls": 5,
+      "serialized_prompt_chars": 12201,
+      "mock_completion_chars": 1301
+    },
+    "offline_local_execution": {
+      "seconds": 0.678574,
+      "offline_only": true,
+      "not_an_online_latency_claim": true
+    },
+    "provider_tokens": null,
+    "online_latency_seconds": null,
+    "requires_real_run": true
   }
 }

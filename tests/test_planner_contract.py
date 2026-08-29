@@ -1915,6 +1915,51 @@ def test_all_planner_prompts_share_rag_semantics_and_catalog_boundary():
         assert "不能填写到 `use_resources`" in prompt
 
 
+def test_planner_prompts_are_compact_and_keep_all_execution_contract_anchors():
+    root = Path(__file__).parents[1]
+    limits = {
+        "planner_to_worker.md": 3400,
+        "planner_replan.md": 2500,
+        "planner_intake_replan.md": 2500,
+    }
+    contract_fields = {
+        "task_id",
+        "task_name",
+        "task_description",
+        "task_type",
+        "use_rag",
+        "use_web",
+        "query",
+        "use_resources",
+        "generate_figure",
+        "generate_table",
+        "visualization",
+        "covers_sections",
+        "requirement_ids",
+        "depends_on_task_ids",
+    }
+    semantic_anchors = (
+        "稳定 ID",
+        "真实执行依赖",
+        "当前任务是否需要新增知识库证据",
+        "不得新增事实",
+        "公开网络授权",
+        "CSV",
+        "causal",
+        "研究对象",
+        "约束",
+    )
+
+    for name, limit in limits.items():
+        prompt = (root / "src" / "prompts" / name).read_text(encoding="utf-8")
+        assert len(prompt) < limit
+        assert contract_fields <= set(
+            field for field in contract_fields if field in prompt
+        )
+        for anchor in semantic_anchors:
+            assert anchor in prompt
+
+
 def test_planner_and_verifier_share_investigative_evidence_gap_semantics():
     root = Path(__file__).parents[1]
     for name in (
