@@ -48,9 +48,16 @@ def test_non_factual_or_non_prose_material_words_do_not_trigger(text):
     "| 参数 | 结论 |\n| --- | --- |\n| 共聚单体/乙烯比 | 是密度档位的核心控制变量。 |",
     "~~~text\n共聚单体/乙烯比是密度档位的核心控制变量。\n~~~",
     "`共聚单体/乙烯比是密度档位的核心控制变量。`",
+    "``共聚单体/乙烯比是密度档位的核心控制变量。`仍是代码``",
+    "参数 | 结论\n--- | ---\n共聚单体/乙烯比 | 是密度档位的核心控制变量。",
 ])
 def test_uncited_detector_masks_structural_and_code_content_before_splitting(text):
     assert find_uncited_material_claims(text) == []
+
+
+def test_prose_with_pipe_without_markdown_separator_remains_checked():
+    text = "共聚单体/乙烯比是密度档位的核心控制变量 | 需要相邻引用。"
+    assert find_uncited_material_claims(text) == [{"text": text, "claim_type": "factual"}]
 
 
 def test_heading_is_masked_without_hiding_following_material_prose():
@@ -89,6 +96,18 @@ def test_ascii_period_preserves_citation_adjacency_for_detector_and_claim_deriva
         "claim_type": "factual",
     }]
     assert derive_claims(text, citations)[0]["text"] == "氢气影响熔指.[E1]"
+
+
+@pytest.mark.parametrize("first_sentence", ["氢气影响MFR.", "反应温度为80°C."])
+def test_ascii_period_after_acronym_or_unit_preserves_citation_adjacency(first_sentence):
+    citations = [{"evidence_id": "E1", "title": "趋势", "supporting_text": "已知。"}]
+    text = f"{first_sentence}[E1] 共聚单体/乙烯比是密度档位的核心控制变量。"
+
+    assert find_uncited_material_claims(text) == [{
+        "text": "共聚单体/乙烯比是密度档位的核心控制变量。",
+        "claim_type": "factual",
+    }]
+    assert derive_claims(text, citations)[0]["text"] == f"{first_sentence}[E1]"
 
 
 @pytest.mark.parametrize("text", [

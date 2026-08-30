@@ -12,9 +12,9 @@ from .text_projection import semantic_evidence_excerpt
 
 
 _PARAGRAPH_BOUNDARY = re.compile(r"(?:\r?\n\s*){2,}")
-_ASCII_CJK_SENTENCE_END = r"(?<=[\u3400-\u9fff])\.(?=\s*(?:\[[^\]\r\n]+\]|[\u3400-\u9fff]|$))"
+_ASCII_SENTENCE_END = r"\.(?=\s*(?:\[[^\]\r\n]+\]|[\u3400-\u9fff]|$))"
 _SENTENCE = re.compile(
-    rf".*?(?:[。！？!?]|{_ASCII_CJK_SENTENCE_END})(?:\s*\[[^\]]+\])*|.+$",
+    rf".*?(?:[。！？!?]|{_ASCII_SENTENCE_END})(?:\s*\[[^\]]+\])*|.+$",
     re.DOTALL,
 )
 _CLAIM_TEXT_LIMIT = 1000
@@ -47,7 +47,9 @@ _INFERENCE_MARKERS = (
 _FENCED_CODE_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[^\n]*(?:\n|$)"
 )
-_INLINE_CODE = re.compile(r"`[^`\r\n]*`")
+_INLINE_CODE = re.compile(
+    r"(?s)(?P<delimiter>`{2,})(?:(?!(?P=delimiter)).)*(?P=delimiter)|`[^`\r\n]*`"
+)
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -121,8 +123,20 @@ def _mask_non_prose_content(content: str) -> str:
     """Remove code and Markdown-only lines before sentence splitting."""
 
     text = _INLINE_CODE.sub("", _FENCED_CODE_BLOCK.sub("", str(content or "")))
+    lines = text.splitlines(keepends=True)
     prose_lines: list[str] = []
-    for line in text.splitlines(keepends=True):
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if (
+            index + 1 < len(lines)
+            and "|" in line
+            and _TABLE_SEPARATOR.match(lines[index + 1].strip())
+        ):
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                index += 1
+            continue
         stripped = line.strip()
         if (
             _MARKDOWN_HEADING.match(stripped)
@@ -130,8 +144,10 @@ def _mask_non_prose_content(content: str) -> str:
             or _TABLE_SEPARATOR.match(stripped)
             or _LABEL_ONLY.match(stripped)
         ):
+            index += 1
             continue
         prose_lines.append(line)
+        index += 1
     return "".join(prose_lines)
 
 
