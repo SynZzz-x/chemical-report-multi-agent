@@ -220,8 +220,12 @@ def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_pa
     assert markdown.count("## 证据来源") == 1
     assert markdown.count("### 质量指南") == 1
     assert markdown.count("### 工艺手册") == 1
-    assert "| [E1] | 第1章 | 引言 | 质量控制背景 |" in markdown
-    assert "| [E2] | 第2章 | 工艺分析 | 温度与质量关系 |" in markdown
+    assert "**[E1] 第1章**" in markdown
+    assert "支撑章节：引言" in markdown
+    assert "摘要：质量控制背景" in markdown
+    assert "**[E2] 第2章**" in markdown
+    assert "支撑章节：工艺分析" in markdown
+    assert "摘要：温度与质量关系" in markdown
     assert "工艺分析正文 [E2]" in markdown
     assert "LLM Generation Failed" not in markdown
 
@@ -329,9 +333,9 @@ def test_knowledge_base_file_list_is_deterministically_aggregated(monkeypatch, t
     assert "| 2 |" in markdown
     assert "### 证据索引" in markdown
     assert markdown.count("#### 聚乙烯生产工艺与质量控制概述.docx") == 1
-    assert "| 证据编号 | 定位 | 支撑章节 | 摘要 |" in markdown
-    assert "| [E1] | rag / /srv/private" not in markdown
-    assert "| [E1] |" in markdown
+    assert "| 证据编号 | 定位 | 支撑章节 | 摘要 |" not in markdown
+    assert "**[E1] rag / /srv/private" not in markdown
+    assert "**[E1] 第1章**" in markdown
     assert "第1章" in markdown
     assert "/srv/private" not in markdown
 

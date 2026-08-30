@@ -1,6 +1,7 @@
 import copy
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 from src.evidence import reporting
@@ -9,7 +10,7 @@ from src.utils.md_to_docx import md_to_docx
 from src.utils.md_to_pdf import md_to_pdf
 
 
-def test_long_four_column_evidence_appendix_renders_to_pdf(tmp_path):
+def test_long_evidence_block_appendix_renders_to_pdf(tmp_path):
     citations = [
         {
             "evidence_id": f"E{index}",
@@ -36,6 +37,74 @@ def test_long_four_column_evidence_appendix_renders_to_pdf(tmp_path):
     assert output.exists()
     assert output.stat().st_size > 0
     assert "/home/zsy" not in evidence
+
+
+def test_grouped_appendix_uses_evidence_blocks_without_table_columns():
+    citations = [
+        {
+            "evidence_id": "E1",
+            "title": "工艺手册",
+            "locator": "section 1",
+            "section_title": "工艺控制",
+            "supporting_text": "温度影响分子量。",
+        }
+    ]
+
+    markdown = reporting.format_grouped_evidence_appendix(citations)
+
+    assert "| 证据编号 |" not in markdown
+    assert "**[E1] section 1**" in markdown
+    assert "支撑章节：工艺控制" in markdown
+    assert "摘要：温度影响分子量。" in markdown
+
+
+def test_sanitizer_removes_ascii_and_fullwidth_table_noise():
+    item = {
+        "evidence_id": "E1",
+        "title": "工艺手册",
+        "locator": "section 1",
+        "supporting_text": "甲 |||| 乙 ｜｜｜｜ 丙",
+    }
+
+    markdown = reporting.format_grouped_evidence_appendix([item])
+
+    assert "|||" not in markdown
+    assert "｜｜" not in markdown
+    assert all(value in markdown for value in ("甲", "乙", "丙"))
+
+
+def test_appendix_dedupes_only_exact_identity_without_mutation():
+    citation = {
+        "evidence_id": "E1",
+        "file_path": "/docs/a.docx",
+        "locator": "1",
+        "supporting_text": "甲",
+    }
+    citations = [citation, copy.deepcopy(citation)]
+    original = copy.deepcopy(citations)
+
+    markdown = reporting.format_grouped_evidence_appendix(citations)
+
+    assert markdown.count("[E1]") == 1
+    assert citations == original
+
+
+def test_appendix_never_dedupes_conflicting_display_identity():
+    left = {
+        "evidence_id": "E1",
+        "file_path": "/docs/a.docx",
+        "locator": "1",
+        "supporting_text": "甲",
+    }
+    right = {
+        "evidence_id": "E1",
+        "file_path": "/docs/b.docx",
+        "locator": "2",
+        "supporting_text": "乙",
+    }
+
+    with pytest.raises(ValueError, match="FINAL_DISPLAY_IDENTITY_CONFLICT"):
+        reporting.format_grouped_evidence_appendix([left, right])
 
 
 def test_grouped_evidence_appendix_is_stable_safe_bounded_and_read_only():

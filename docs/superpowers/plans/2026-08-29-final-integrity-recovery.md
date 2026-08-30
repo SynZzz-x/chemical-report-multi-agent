@@ -1088,7 +1088,7 @@ Preserve group insertion order and natural E sort, then emit:
 lines.extend(["", f"**[{evidence_id}] {locator}**", f"支撑章节：{section_title}", f"摘要：{summary}"])
 ```
 
-Presentation dedupe keys are `(display_id, canonical_citation_identity)`. If one display ID has multiple identities, raise `ValueError("FINAL_DISPLAY_IDENTITY_CONFLICT")` rather than choosing one; exact duplicate pairs render once. In the integrated report path, Task 2 blocks the same conflict before formatting. Never expose identity components.
+Presentation dedupe keys are `(display_id, canonical_citation_identity)`. If one display ID has multiple identities, raise `ValueError("FINAL_DISPLAY_IDENTITY_CONFLICT")` rather than choosing one; exact duplicate pairs render once. In the integrated report path, a known formatter identity conflict is adapted to the existing blocked citation-integrity result before any path resolution, files, or renderers; the normal path remains preflight → normalize → one assembly → final gate. Never expose identity components.
 
 - [ ] **Step 5: Run GREEN integration tests**
 

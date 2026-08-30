@@ -8,6 +8,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from .identity import canonical_citation_identity
 from .projection import canonical_source_identity
 from .text_projection import normalize_evidence_text, presentation_evidence_excerpt
 
@@ -246,7 +247,19 @@ def format_grouped_evidence_appendix(
         return ""
     level = max(1, min(int(heading_level), 6))
     groups: dict[str, dict[str, Any]] = {}
+    identities_by_display_id: dict[str, set[str]] = {}
+    rendered_pairs: set[tuple[str, str]] = set()
     for citation in citations:
+        evidence_id = str(citation.get("evidence_id") or "").strip()
+        citation_identity = canonical_citation_identity(citation)
+        display_identities = identities_by_display_id.setdefault(evidence_id, set())
+        display_identities.add(citation_identity)
+        if len(display_identities) > 1:
+            raise ValueError("FINAL_DISPLAY_IDENTITY_CONFLICT")
+        rendered_pair = (evidence_id, citation_identity)
+        if rendered_pair in rendered_pairs:
+            continue
+        rendered_pairs.add(rendered_pair)
         identity = canonical_source_identity(citation)
         key = identity.casefold()
         group = groups.setdefault(
@@ -267,19 +280,20 @@ def format_grouped_evidence_appendix(
             [
                 "",
                 f"{'#' * source_level} {_escape_cell(group['label'])}",
-                "",
-                "| 证据编号 | 定位 | 支撑章节 | 摘要 |",
-                "| --- | --- | --- | --- |",
             ]
         )
         for citation in sorted(group["citations"], key=_evidence_sort_key):
-            lines.append(
-                "| [{evidence_id}] | {locator} | {section_title} | {summary} |".format(
-                    evidence_id=_escape_cell(citation.get("evidence_id")),
-                    locator=_escape_cell(_safe_locator(citation)),
-                    section_title=_escape_cell(_safe_section_title(citation)),
-                    summary=_escape_cell(_presentation_text(citation)) or "—",
-                )
+            evidence_id = _escape_cell(citation.get("evidence_id")) or "—"
+            locator = _safe_locator(citation)
+            section_title = _safe_section_title(citation)
+            summary = _presentation_text(citation) or "—"
+            lines.extend(
+                [
+                    "",
+                    f"**[{evidence_id}] {locator}**",
+                    f"支撑章节：{section_title}",
+                    f"摘要：{summary}",
+                ]
             )
     return "\n".join(lines)
 

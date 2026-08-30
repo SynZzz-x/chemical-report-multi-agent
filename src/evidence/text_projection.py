@@ -8,7 +8,7 @@ from typing import Any
 
 
 _WHITESPACE = re.compile(r"\s+")
-_REPEATED_TABLE_SEPARATORS = re.compile(r"\|(?:\s*\|){2,}")
+_REPEATED_TABLE_SEPARATORS = re.compile(r"[|｜](?:\s*[|｜]){2,}")
 _SEMANTIC_ELLIPSIS = " … "
 
 

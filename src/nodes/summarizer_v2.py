@@ -15,6 +15,7 @@ from PIL import Image as PILImage
 
 from ..evidence.identity import normalize_sections_evidence
 from ..evidence.integrity import (
+    CitationIntegrityIssue,
     CitationIntegrityValidation,
     project_lossless_used_citations,
     validate_final_citation_integrity,
@@ -787,7 +788,21 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         return _citation_integrity_blocked_update(preflight)
 
     sections, evidence_display_map = normalize_sections_evidence(sections)
-    final_markdown = _assemble_markdown(state, sections, report_status)
+    try:
+        final_markdown = _assemble_markdown(state, sections, report_status)
+    except ValueError as exc:
+        if str(exc) != "FINAL_DISPLAY_IDENTITY_CONFLICT":
+            raise
+        return _citation_integrity_blocked_update(
+            CitationIntegrityValidation(
+                issues=(
+                    CitationIntegrityIssue(
+                        code="FINAL_DISPLAY_IDENTITY_CONFLICT",
+                        description="同一最终证据编号对应多个不同证据来源或定位。",
+                    ),
+                )
+            )
+        )
     final_citations = project_lossless_used_citations(sections)
     final_validation = validate_final_citation_integrity(
         sections, final_markdown, final_citations
