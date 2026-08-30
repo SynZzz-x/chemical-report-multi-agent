@@ -31,6 +31,8 @@ def capture_request(
     *,
     bound_kwargs: dict[str, object] | None = None,
     apply_completion_budget: bool = True,
+    with_listener: bool = False,
+    with_types: bool = False,
 ) -> dict[str, object]:
     captured: dict[str, object] = {}
     probe_env = {
@@ -71,9 +73,35 @@ def capture_request(
     ):
         model = get_llm({}, json_mode=True, purpose="assessment")
         runnable = model.bind(**bound_kwargs) if bound_kwargs else model
+        listener_events: list[str] = []
+        if with_listener:
+            runnable = runnable.with_listeners(
+                on_start=lambda *_args: listener_events.append("start")
+            )
+        if with_types:
+            runnable = runnable.with_types(str, str)
+        captured["config_factories_before"] = len(
+            getattr(runnable, "config_factories", [])
+        )
+        captured["input_type_before"] = getattr(
+            runnable, "custom_input_type", None
+        ).__name__ if getattr(runnable, "custom_input_type", None) else None
+        captured["output_type_before"] = getattr(
+            runnable, "custom_output_type", None
+        ).__name__ if getattr(runnable, "custom_output_type", None) else None
         if apply_completion_budget:
             runnable, _ = with_completion_budget(runnable, "assessment")
+        captured["config_factories_after"] = len(
+            getattr(runnable, "config_factories", [])
+        )
+        captured["input_type_after"] = getattr(
+            runnable, "custom_input_type", None
+        ).__name__ if getattr(runnable, "custom_input_type", None) else None
+        captured["output_type_after"] = getattr(
+            runnable, "custom_output_type", None
+        ).__name__ if getattr(runnable, "custom_output_type", None) else None
         runnable.invoke([HumanMessage(content="offline verifier probe")])
+        captured["listener_events"] = listener_events
     return captured
 
 
@@ -93,6 +121,13 @@ def _request_fields(
                 "bound_flag": payload.get("bound_flag"),
                 "tool_choice": payload.get("tool_choice"),
                 "tools": payload.get("tools"),
+                "listener_events": payload.get("listener_events"),
+                "config_factories_before": payload.get("config_factories_before"),
+                "config_factories_after": payload.get("config_factories_after"),
+                "input_type_before": payload.get("input_type_before"),
+                "input_type_after": payload.get("input_type_after"),
+                "output_type_before": payload.get("output_type_before"),
+                "output_type_after": payload.get("output_type_after"),
             }
         )
     return fields
@@ -103,6 +138,8 @@ def run_verifier_control_probe(
     *,
     bound_kwargs: dict[str, object] | None = None,
     apply_completion_budget: bool = True,
+    with_listener: bool = False,
+    with_types: bool = False,
 ) -> dict[str, object]:
     """Run the installed wrapper in a child process outside pytest's stubs."""
 
@@ -111,6 +148,10 @@ def run_verifier_control_probe(
         command.extend(["--bound-json", json.dumps(bound_kwargs)])
     if not apply_completion_budget:
         command.append("--skip-completion-budget")
+    if with_listener:
+        command.append("--with-listener")
+    if with_types:
+        command.append("--with-types")
     safe_environment = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONUTF8": "1",
@@ -161,6 +202,8 @@ def main() -> None:
     parser.add_argument("--capture", action="store_true")
     parser.add_argument("--bound-json")
     parser.add_argument("--skip-completion-budget", action="store_true")
+    parser.add_argument("--with-listener", action="store_true")
+    parser.add_argument("--with-types", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -174,8 +217,12 @@ def main() -> None:
                         {},
                         bound_kwargs=bound_kwargs,
                         apply_completion_budget=not args.skip_completion_budget,
+                        with_listener=args.with_listener,
+                        with_types=args.with_types,
                     ),
-                    include_bound_fields=bound_kwargs is not None,
+                    include_bound_fields=(
+                        bound_kwargs is not None or args.with_listener or args.with_types
+                    ),
                 ),
                 sort_keys=True,
             )

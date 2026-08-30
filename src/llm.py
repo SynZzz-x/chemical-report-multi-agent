@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import uuid
+from copy import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -78,10 +79,8 @@ def _deepseek_extra_body(
     }
 
 
-def _split_bound_request_options(
-    runnable: Any,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    """Return an unbound model plus effective request and config options."""
+def _bound_request_layers(runnable: Any) -> tuple[list[Any], Any]:
+    """Return RunnableBinding-like layers from outermost to innermost."""
 
     layers: list[Any] = []
     base = runnable
@@ -92,22 +91,48 @@ def _split_bound_request_options(
         layers.append(base)
         base = base.bound
 
-    request_options: dict[str, Any] = {}
+    return layers, base
+
+
+def _copy_binding(layer: Any, *, bound: Any, kwargs: Mapping[str, Any]) -> Any:
+    """Copy a binding while retaining its concrete class and metadata."""
+
+    model_copy = getattr(layer, "model_copy", None)
+    if callable(model_copy):
+        return model_copy(update={"bound": bound, "kwargs": dict(kwargs)})
+    cloned = copy(layer)
+    cloned.bound = bound
+    cloned.kwargs = dict(kwargs)
+    return cloned
+
+
+def _with_deepseek_budget(runnable: Any, *, max_tokens: int) -> Any:
+    """Apply one budget without dropping binding metadata or request options."""
+
+    layers, base = _bound_request_layers(runnable)
     extra_body = dict(getattr(base, "extra_body", None) or {})
-    config: dict[str, Any] = {}
     for layer in reversed(layers):
-        layer_options = dict(layer.kwargs)
-        extra_body.update(dict(layer_options.pop("extra_body", None) or {}))
-        request_options.update(
-            {
-                key: value
-                for key, value in layer_options.items()
-                if key not in _BUDGET_PARAMETER_NAMES
-            }
-        )
-        config.update(dict(getattr(layer, "config", None) or {}))
-    request_options["extra_body"] = extra_body
-    return base, request_options, config
+        extra_body.update(dict(getattr(layer, "kwargs", {}).get("extra_body") or {}))
+    extra_body = _deepseek_extra_body(extra_body, max_tokens=max_tokens)
+
+    if not layers:
+        return base.bind(extra_body=extra_body)
+
+    rebound = base
+    for position, layer in reversed(list(enumerate(layers))):
+        layer_kwargs = {
+            key: value
+            for key, value in dict(layer.kwargs).items()
+            if key not in _BUDGET_PARAMETER_NAMES
+        }
+        if "extra_body" in layer_kwargs:
+            layer_kwargs["extra_body"] = _deepseek_extra_body(
+                _mapping(layer_kwargs["extra_body"]), max_tokens=max_tokens
+            )
+        if position == 0:
+            layer_kwargs["extra_body"] = extra_body
+        rebound = _copy_binding(layer, bound=rebound, kwargs=layer_kwargs)
+    return rebound
 
 
 def with_completion_budget(
@@ -122,14 +147,7 @@ def with_completion_budget(
         and _model_name(runnable) != "-"
         and not isinstance(getattr(runnable, "steps", None), (list, tuple))
     ):
-        base, request_options, config = _split_bound_request_options(runnable)
-        request_options["extra_body"] = _deepseek_extra_body(
-            _mapping(request_options.get("extra_body")), max_tokens=budget
-        )
-        bounded = base.bind(**request_options)
-        if config:
-            bounded = bounded.with_config(config)
-        return bounded, budget
+        return _with_deepseek_budget(runnable, max_tokens=budget), budget
     return runnable, budget
 
 

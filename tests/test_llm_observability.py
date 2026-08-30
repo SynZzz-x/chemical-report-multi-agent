@@ -102,6 +102,23 @@ def test_assessment_constructor_budget_uses_only_max_tokens():
     assert payload["max_completion_tokens"] is None
 
 
+def test_assessment_budget_preserves_bound_listener_and_type_semantics():
+    payload = run_verifier_control_probe(
+        {},
+        bound_kwargs={"extra_body": {"bound_flag": "retained"}},
+        with_listener=True,
+        with_types=True,
+    )
+
+    assert payload["listener_events"] == ["start"]
+    assert payload["config_factories_before"] == payload["config_factories_after"] == 1
+    assert payload["input_type_before"] == payload["input_type_after"] == "str"
+    assert payload["output_type_before"] == payload["output_type_after"] == "str"
+    assert payload["bound_flag"] == "retained"
+    assert payload["max_tokens"] == 1600
+    assert payload["max_completion_tokens"] is None
+
+
 class StubRunnable:
     model_name = "deepseek-chat"
 
