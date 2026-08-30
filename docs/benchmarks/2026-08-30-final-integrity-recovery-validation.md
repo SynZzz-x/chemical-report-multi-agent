@@ -30,7 +30,9 @@ Additional regressions cover same-visible canonical duplicates with different in
 
 Assembly span metadata is a local list of `(start, end)` offsets. It is not a State/checkpoint field, not returned as report data, and not embedded as control markers in Markdown. Tests verify one assembly, an appendix inserted between body sections, heading-name independence, exact body slices, plain `str` inputs to both renderers, unchanged source State/provenance, and no artifacts or path resolution after a failed gate. Rendering code and appendix presentation were unchanged, so no new presentation rendering was required.
 
-Independent final branch re-review is **pending**; these test results are implementation verification, not an independent-review pass.
+Independent final branch re-review **approved `44ea921`**: all five findings from the review cycle are closed, with no remaining Critical or Important findings. The reviewer independently probed rejection of the unknown raw marker and admission of valid inherited synthesis citations. The existing Python 3.14/Pydantic-v1 warning remains a non-blocking dependency follow-up.
+
+The root agent independently reran the complete offline suite after the final production correction: **941 passed in 27.51s**. Compileall, diff-check, and forbidden-surface checks also passed. No merge or push has been performed; the feature branch and worktree are preserved pending integration direction.
 
 ## Initial Task 8 verification result (historical)
 
