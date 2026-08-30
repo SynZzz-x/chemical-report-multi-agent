@@ -144,6 +144,7 @@ NON_DEGRADABLE_ISSUE_CODES = frozenset(
         "UNCITED_MATERIAL_CLAIM",
     }
 )
+_FATAL_POLICY_CODES = frozenset({"PLAN_PATCH_INTERNAL_ERROR"})
 PLAN_PATCH_SUBTYPES = frozenset(
     {
         "MISSING_TASK",
@@ -747,13 +748,13 @@ def _profile_assessment(
 ) -> _AssessmentPolicyProfile:
     """Classify all unresolved issues and choose a stable policy representative."""
 
-    candidates: list[tuple[int, int, str, IssueCategory, str]] = []
+    candidates: list[tuple[int, int, str, IssueCategory, str, bool]] = []
     for issue in assessment.get("issues") or []:
         if not isinstance(issue, Mapping):
             continue
         code = str(issue.get("code") or "").strip().upper() or "UNKNOWN"
         category = _classify_issue(issue, state)
-        if category is IssueCategory.VERIFIER_FAILURE:
+        if code in _FATAL_POLICY_CODES or category is IssueCategory.VERIFIER_FAILURE:
             tier, tier_name = 0, "verifier_or_fatal"
         elif category is IssueCategory.EXTERNAL_BLOCKER:
             tier, tier_name = 1, "blocking"
@@ -767,8 +768,25 @@ def _profile_assessment(
             tier, tier_name = 3, "ordinary_repair_or_degradation"
         else:
             tier, tier_name = 4, "next"
+        is_degradable = (
+            code not in NON_DEGRADABLE_ISSUE_CODES
+            and code not in _FATAL_POLICY_CODES
+            and category
+            in {
+                IssueCategory.CONTENT_DEFECT,
+                IssueCategory.EVIDENCE_GAP,
+                IssueCategory.LOCAL_PLAN_DEFECT,
+            }
+        )
         candidates.append(
-            (tier, -_CATEGORY_PRIORITY[category], code, category, tier_name)
+            (
+                tier,
+                -_CATEGORY_PRIORITY[category],
+                code,
+                category,
+                tier_name,
+                is_degradable,
+            )
         )
 
     if not candidates:
@@ -781,15 +799,17 @@ def _profile_assessment(
             selected_policy_tier="next",
         )
 
-    _, _, selected_code, selected_category, selected_tier = min(candidates)
+    _, _, selected_code, selected_category, selected_tier, _ = min(candidates)
     has_non_degradable_issue = any(
         code in NON_DEGRADABLE_ISSUE_CODES
-        for _, _, code, _, _ in candidates
+        for _, _, code, _, _, _ in candidates
     )
     return _AssessmentPolicyProfile(
         issue_count=len(candidates),
         has_non_degradable_issue=has_non_degradable_issue,
-        all_unresolved_issues_degradable=not has_non_degradable_issue,
+        all_unresolved_issues_degradable=all(
+            is_degradable for _, _, _, _, _, is_degradable in candidates
+        ),
         selected_policy_issue_code=selected_code,
         selected_policy_category=selected_category,
         selected_policy_tier=selected_tier,
@@ -1133,6 +1153,7 @@ def _rejected_degraded_warning_update(
             assessment,
             failure_class=FailureClass.RETRYABLE_EXECUTION,
             action=FailureAction.RETRY_TASK,
+            policy_profile=profile,
             repair_attempt=retries + 1,
             repair_budget=MAX_CONTENT_RETRIES,
             retryable=True,
@@ -1157,6 +1178,7 @@ def _rejected_degraded_warning_update(
         assessment,
         failure_class=FailureClass.USER_DECISION_REQUIRED,
         action=FailureAction.REGISTER_BLOCKER,
+        policy_profile=profile,
     )
 
 
@@ -1166,11 +1188,13 @@ def _commit_degraded_result(
     assessment: Dict[str, Any],
     *,
     warning_code: str,
+    policy_profile: _AssessmentPolicyProfile | None = None,
 ) -> Dict[str, Any]:
     """Commit a supported partial result as a terminal non-Human outcome."""
 
-    profile = _profile_assessment(assessment, state)
-    if not _can_commit_with_warning(profile):
+    profile = policy_profile or _profile_assessment(assessment, state)
+    _, hard_requirement_ids = _requirement_scope(state, assessment)
+    if not _can_commit_with_warning(profile) or hard_requirement_ids:
         return _rejected_degraded_warning_update(update, state, assessment, profile)
 
     task_id = _current_task_id(state)
@@ -1271,6 +1295,7 @@ def _commit_degraded_result(
         assessment,
         failure_class=FailureClass.DEGRADABLE_QUALITY,
         action=FailureAction.COMMIT_WITH_WARNING,
+        policy_profile=profile,
         retryable=False,
     )
 
@@ -1284,6 +1309,7 @@ def _fatal_system_update(
     component: str,
     operation: str,
     metadata: Mapping[str, Any] | None = None,
+    policy_profile: _AssessmentPolicyProfile | None = None,
 ) -> Dict[str, Any]:
     task_id = _current_task_id(state)
     safe_metadata = {
@@ -1327,6 +1353,7 @@ def _fatal_system_update(
         subtype=subtype,
         retryable=False,
         metadata=safe_metadata,
+        policy_profile=policy_profile,
     )
 
 
@@ -1334,6 +1361,7 @@ def _fatal_verifier_update(
     update: Dict[str, Any],
     state: Dict[str, Any],
     assessment: Dict[str, Any],
+    policy_profile: _AssessmentPolicyProfile | None = None,
 ) -> Dict[str, Any]:
     return _fatal_system_update(
         update,
@@ -1342,6 +1370,7 @@ def _fatal_verifier_update(
         subtype="VERIFIER_UNAVAILABLE",
         component="Verifier",
         operation="assessment",
+        policy_profile=policy_profile,
     )
 
 
@@ -1446,6 +1475,21 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         return update
 
     profile = _profile_assessment(assessment, state)
+
+    def set_profile_decision(
+        decision_update: Dict[str, Any],
+        decision_state: Mapping[str, Any],
+        decision_assessment: Mapping[str, Any],
+        **decision: Any,
+    ) -> Dict[str, Any]:
+        return _set_decision(
+            decision_update,
+            decision_state,
+            decision_assessment,
+            policy_profile=profile,
+            **decision,
+        )
+
     category = profile.selected_policy_category
     task = _current_task(state)
     is_synthesis = str(task.get("task_type") or "") == "synthesis"
@@ -1474,6 +1518,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             component="PlanPatcher",
             operation="plan_patch",
             metadata={"error_type": error_type},
+            policy_profile=profile,
         )
     in_progress_statuses = record_section_status(
         state,
@@ -1490,7 +1535,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if retries < MAX_VERIFIER_RETRIES:
             verifier_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1500,7 +1545,9 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 repair_budget=MAX_VERIFIER_RETRIES,
                 retryable=True,
             )
-        return _fatal_verifier_update(update, state, assessment)
+        return _fatal_verifier_update(
+            update, state, assessment, policy_profile=profile
+        )
 
     if is_synthesis and category in {
         IssueCategory.CONTENT_DEFECT,
@@ -1510,7 +1557,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.SYNTHESIS_REWRITE.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1540,7 +1587,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             ]
             update["current_result"] = current_result
             update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1554,7 +1601,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             if retries < MAX_ASSET_RETRIES:
                 asset_retry_count[task_id] = retries + 1
                 update["workflow_action"] = WorkflowAction.ASSET_RECOVERY.value
-                return _set_decision(
+                return set_profile_decision(
                     update,
                     state,
                     assessment,
@@ -1571,6 +1618,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                     state,
                     assessment,
                     warning_code="ASSET_RETRY_LIMIT_REACHED",
+                    policy_profile=profile,
                 )
 
             statuses = record_section_status(
@@ -1588,7 +1636,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                     ),
                 }
             )
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1614,7 +1662,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 length_rewrite_attempts[attempt_key] = 1
                 task_retry_count[task_id] = task_retry_count.get(task_id, 0) + 1
                 update["workflow_action"] = WorkflowAction.LENGTH_REWRITE.value
-                return _set_decision(
+                return set_profile_decision(
                     update,
                     state,
                     assessment,
@@ -1639,7 +1687,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                         current_result[content_field] = trimmed
                         update["current_result"] = current_result
                         update["workflow_action"] = WorkflowAction.RETRY_VERIFIER.value
-                        return _set_decision(
+                        return set_profile_decision(
                             update,
                             state,
                             assessment,
@@ -1654,7 +1702,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         if retries < MAX_CONTENT_RETRIES:
             task_retry_count[task_id] = retries + 1
             update["workflow_action"] = WorkflowAction.REWORK.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1672,6 +1720,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 state,
                 assessment,
                 warning_code="CONTENT_RETRY_LIMIT_REACHED",
+                policy_profile=profile,
             )
 
         warning = _content_retry_warning(
@@ -1700,7 +1749,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 ),
             }
         )
-        return _set_decision(
+        return set_profile_decision(
             update,
             state,
             assessment,
@@ -1716,7 +1765,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         ):
             evidence_recovery_count[task_id] = recoveries + 1
             update["workflow_action"] = WorkflowAction.EVIDENCE_RECOVERY.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1731,7 +1780,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             if retries < MAX_CONTENT_RETRIES:
                 task_retry_count[task_id] = retries + 1
                 update["workflow_action"] = WorkflowAction.REWORK.value
-                return _set_decision(
+                return set_profile_decision(
                     update,
                     state,
                     assessment,
@@ -1748,13 +1797,14 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 state,
                 assessment,
                 warning_code="EVIDENCE_RECOVERY_EXHAUSTED",
+                policy_profile=profile,
             )
 
     if category is IssueCategory.LOCAL_PLAN_DEFECT:
         patches = task_patch_count.get(task_id, 0)
         if patches < MAX_TASK_PATCHES and job_patch_count < MAX_JOB_PATCHES:
             update["workflow_action"] = WorkflowAction.PLAN_PATCH.value
-            return _set_decision(
+            return set_profile_decision(
                 update,
                 state,
                 assessment,
@@ -1771,6 +1821,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                     state,
                     assessment,
                     warning_code="PLAN_PATCH_BUDGET_EXHAUSTED",
+                    policy_profile=profile,
                 )
             return _fatal_system_update(
                 update,
@@ -1779,6 +1830,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 subtype="PLAN_PATCH_BUDGET_EXHAUSTED",
                 component="DecisionPolicy",
                 operation="plan_patch_budget",
+                policy_profile=profile,
             )
 
     blocking_status = (
@@ -1802,7 +1854,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             ),
         }
     )
-    return _set_decision(
+    return set_profile_decision(
         update,
         state,
         assessment,

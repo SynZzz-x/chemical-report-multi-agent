@@ -5,6 +5,7 @@ from src.failure_semantics import FailureAction, FailureClass
 from src.recovery.policy import (
     MAX_ASSET_RETRIES,
     _can_commit_with_warning,
+    _commit_degraded_result,
     _profile_assessment,
     decide_recovery_action,
 )
@@ -185,6 +186,64 @@ def test_shared_warning_gate_rejects_semantic_issue_and_allows_waivable_gaps():
 
     assert not _can_commit_with_warning(semantic)
     assert _can_commit_with_warning(gaps)
+
+
+@pytest.mark.parametrize(
+    "assessment",
+    [
+        {"status": "FAILED", "issues": [{"code": "EXTERNAL_BLOCKER"}]},
+        {"status": "FAILED", "issues": [{"code": "VERIFIER_ERROR"}]},
+        {
+            "status": "FAILED",
+            "issues": [
+                {"code": "CLAIM_PARTIALLY_SUPPORTED", "category": "EVIDENCE_GAP"},
+                {"code": "PLAN_PATCH_INTERNAL_ERROR", "category": "CONTENT_DEFECT"},
+            ],
+        },
+    ],
+)
+def test_shared_warning_gate_rejects_blocker_verifier_and_fatal_profiles(assessment):
+    profile = _profile_assessment(assessment, _state(code="EVIDENCE_GAP"))
+
+    assert not profile.all_unresolved_issues_degradable
+    assert not _can_commit_with_warning(profile)
+
+
+def test_defensive_warning_helper_blocks_external_assessment_without_commit():
+    state = _state(code="EXTERNAL_BLOCKER")
+    assessment = {"status": "FAILED", "issues": [{"code": "EXTERNAL_BLOCKER"}]}
+
+    update = _commit_degraded_result(
+        {
+            "verification_warnings": [],
+            "degraded_issue_registry": [],
+            "pending_user_blockers": [],
+            "task_outcome_registry": {},
+        },
+        state,
+        assessment,
+        warning_code="DEFENSIVE_WARNING_TEST",
+    )
+
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert update["failure_decision"]["action"] == "REGISTER_BLOCKER"
+    assert update.get("results", []) == []
+
+
+def test_fatal_profile_outranks_semantic_issue():
+    profile = _profile_assessment(
+        {
+            "status": "FAILED",
+            "issues": [
+                {"code": "CLAIM_PARTIALLY_SUPPORTED", "category": "EVIDENCE_GAP"},
+                {"code": "PLAN_PATCH_INTERNAL_ERROR", "category": "CONTENT_DEFECT"},
+            ],
+        },
+        _state(code="EVIDENCE_GAP"),
+    )
+
+    assert profile.selected_policy_issue_code == "PLAN_PATCH_INTERNAL_ERROR"
+    assert profile.selected_policy_tier == "verifier_or_fatal"
 
 
 def test_semantic_issue_recovers_reworks_then_blocks_without_warning(caplog):
