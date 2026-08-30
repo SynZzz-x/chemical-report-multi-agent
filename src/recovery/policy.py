@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import logging
@@ -134,6 +135,15 @@ _EVIDENCE_CODES = {
     "INVALID_CITATION_ID",
     "MISSING_INLINE_CITATION",
 }
+NON_DEGRADABLE_ISSUE_CODES = frozenset(
+    {
+        "CLAIM_UNSUPPORTED",
+        "CLAIM_PARTIALLY_SUPPORTED",
+        "CLAIM_EVIDENCE_MISMATCH",
+        "UNLABELED_INFERENCE",
+        "UNCITED_MATERIAL_CLAIM",
+    }
+)
 PLAN_PATCH_SUBTYPES = frozenset(
     {
         "MISSING_TASK",
@@ -195,16 +205,6 @@ def _current_task_id(state: Dict[str, Any]) -> str:
     return str(int(state.get("cursor", 0) or 0))
 
 
-def _assessment_subtype(assessment: Mapping[str, Any], default: str) -> str:
-    for issue in assessment.get("issues") or []:
-        if not isinstance(issue, Mapping):
-            continue
-        code = str(issue.get("code") or "").strip().upper()
-        if code:
-            return code
-    return default
-
-
 def _requirement_scope(
     state: Mapping[str, Any], assessment: Mapping[str, Any]
 ) -> tuple[list[str], list[str]]:
@@ -254,6 +254,7 @@ def _failure_decision(
     failure_class: FailureClass,
     action: FailureAction,
     subtype: str | None = None,
+    selected_policy_issue_code: str | None = None,
     repair_attempt: int = 0,
     repair_budget: int = 0,
     retryable: bool = False,
@@ -261,7 +262,7 @@ def _failure_decision(
 ) -> Dict[str, Any]:
     validate_failure_action_pair(failure_class, action)
     requirement_ids, hard_requirement_ids = _requirement_scope(state, assessment)
-    normalized_subtype = subtype or _assessment_subtype(assessment, "UNKNOWN")
+    normalized_subtype = subtype or selected_policy_issue_code or "UNKNOWN"
     return {
         "failure_class": failure_class.value,
         "subtype": normalized_subtype,
@@ -282,11 +283,14 @@ def _set_decision(
     update: Dict[str, Any],
     state: Mapping[str, Any],
     assessment: Mapping[str, Any],
+    policy_profile: _AssessmentPolicyProfile | None = None,
     **decision: Any,
 ) -> Dict[str, Any]:
+    profile = policy_profile or _profile_assessment(assessment, state)
     canonical = _failure_decision(
         state,
         assessment,
+        selected_policy_issue_code=profile.selected_policy_issue_code,
         **decision,
     )
     update["failure_decision"] = canonical
@@ -323,6 +327,14 @@ def _set_decision(
         blocker_id,
         ",".join(canonical.get("requirement_ids") or []) or "-",
         "hard" if canonical.get("hard_requirement_ids") else "soft",
+    )
+    logger.info(
+        "FAILURE_POLICY_PROFILE issue_count=%s selected_policy_issue_code=%s "
+        "selected_policy_action=%s has_non_degradable_issue=%s",
+        profile.issue_count,
+        profile.selected_policy_issue_code,
+        canonical.get("action") or "-",
+        str(profile.has_non_degradable_issue).lower(),
     )
     return update
 
@@ -720,6 +732,78 @@ def classify_issue(
     return _classify_issue(issue, state)
 
 
+@dataclass(frozen=True)
+class _AssessmentPolicyProfile:
+    issue_count: int
+    has_non_degradable_issue: bool
+    all_unresolved_issues_degradable: bool
+    selected_policy_issue_code: str
+    selected_policy_category: IssueCategory
+    selected_policy_tier: str
+
+
+def _profile_assessment(
+    assessment: Mapping[str, Any], state: Mapping[str, Any]
+) -> _AssessmentPolicyProfile:
+    """Classify all unresolved issues and choose a stable policy representative."""
+
+    candidates: list[tuple[int, int, str, IssueCategory, str]] = []
+    for issue in assessment.get("issues") or []:
+        if not isinstance(issue, Mapping):
+            continue
+        code = str(issue.get("code") or "").strip().upper() or "UNKNOWN"
+        category = _classify_issue(issue, state)
+        if category is IssueCategory.VERIFIER_FAILURE:
+            tier, tier_name = 0, "verifier_or_fatal"
+        elif category is IssueCategory.EXTERNAL_BLOCKER:
+            tier, tier_name = 1, "blocking"
+        elif code in NON_DEGRADABLE_ISSUE_CODES:
+            tier, tier_name = 2, "non_degradable_repair"
+        elif category in {
+            IssueCategory.CONTENT_DEFECT,
+            IssueCategory.EVIDENCE_GAP,
+            IssueCategory.LOCAL_PLAN_DEFECT,
+        }:
+            tier, tier_name = 3, "ordinary_repair_or_degradation"
+        else:
+            tier, tier_name = 4, "next"
+        candidates.append(
+            (tier, -_CATEGORY_PRIORITY[category], code, category, tier_name)
+        )
+
+    if not candidates:
+        return _AssessmentPolicyProfile(
+            issue_count=0,
+            has_non_degradable_issue=False,
+            all_unresolved_issues_degradable=False,
+            selected_policy_issue_code="UNKNOWN",
+            selected_policy_category=IssueCategory.CONTENT_DEFECT,
+            selected_policy_tier="next",
+        )
+
+    _, _, selected_code, selected_category, selected_tier = min(candidates)
+    has_non_degradable_issue = any(
+        code in NON_DEGRADABLE_ISSUE_CODES
+        for _, _, code, _, _ in candidates
+    )
+    return _AssessmentPolicyProfile(
+        issue_count=len(candidates),
+        has_non_degradable_issue=has_non_degradable_issue,
+        all_unresolved_issues_degradable=not has_non_degradable_issue,
+        selected_policy_issue_code=selected_code,
+        selected_policy_category=selected_category,
+        selected_policy_tier=selected_tier,
+    )
+
+
+def _can_commit_with_warning(profile: _AssessmentPolicyProfile) -> bool:
+    return (
+        profile.issue_count > 0
+        and profile.all_unresolved_issues_degradable
+        and not profile.has_non_degradable_issue
+    )
+
+
 def _allows_accept_as_draft(
     state: Mapping[str, Any],
     issues: Iterable[Mapping[str, Any]],
@@ -1027,6 +1111,55 @@ def _content_retry_warning(
     }
 
 
+def _rejected_degraded_warning_update(
+    update: Dict[str, Any],
+    state: Dict[str, Any],
+    assessment: Dict[str, Any],
+    profile: _AssessmentPolicyProfile,
+) -> Dict[str, Any]:
+    """Keep a rejected warning on the established rework-or-blocker paths."""
+
+    task_id = _current_task_id(state)
+    retries = _normalise_counter(state.get("task_retry_count"), state).get(task_id, 0)
+    if profile.has_non_degradable_issue and retries < MAX_CONTENT_RETRIES:
+        task_retry_count = update.setdefault(
+            "task_retry_count", _counter_update(state, "task_retry_count")
+        )
+        task_retry_count[task_id] = retries + 1
+        update["workflow_action"] = WorkflowAction.REWORK.value
+        return _set_decision(
+            update,
+            state,
+            assessment,
+            failure_class=FailureClass.RETRYABLE_EXECUTION,
+            action=FailureAction.RETRY_TASK,
+            repair_attempt=retries + 1,
+            repair_budget=MAX_CONTENT_RETRIES,
+            retryable=True,
+        )
+
+    statuses = record_section_status(
+        state, BLOCKED, accepted_by="system", issues=assessment.get("issues") or []
+    )
+    update.update(
+        {
+            "workflow_action": WorkflowAction.NEEDS_USER_INPUT.value,
+            "pending_user_action": _pending_user_action(
+                profile.selected_policy_category, state, assessment
+            ),
+            "section_status": statuses,
+            "report_status": derive_report_status(state.get("tasks") or [], statuses),
+        }
+    )
+    return _set_decision(
+        update,
+        state,
+        assessment,
+        failure_class=FailureClass.USER_DECISION_REQUIRED,
+        action=FailureAction.REGISTER_BLOCKER,
+    )
+
+
 def _commit_degraded_result(
     update: Dict[str, Any],
     state: Dict[str, Any],
@@ -1035,6 +1168,10 @@ def _commit_degraded_result(
     warning_code: str,
 ) -> Dict[str, Any]:
     """Commit a supported partial result as a terminal non-Human outcome."""
+
+    profile = _profile_assessment(assessment, state)
+    if not _can_commit_with_warning(profile):
+        return _rejected_degraded_warning_update(update, state, assessment, profile)
 
     task_id = _current_task_id(state)
     warning = {
@@ -1052,7 +1189,7 @@ def _commit_degraded_result(
         )
     ]
     warnings.append(warning)
-    subtype = _assessment_subtype(assessment, warning_code)
+    subtype = profile.selected_policy_issue_code
     requirement_ids, _ = _requirement_scope(state, assessment)
     affected_claims = [
         claim
@@ -1308,7 +1445,8 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
         update.update(_terminal_scheduler_update(state, terminal_status="committed"))
         return update
 
-    category = classify_assessment(assessment, state)
+    profile = _profile_assessment(assessment, state)
+    category = profile.selected_policy_category
     task = _current_task(state)
     is_synthesis = str(task.get("task_type") or "") == "synthesis"
     issue_codes = {
@@ -1427,7 +1565,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 )
 
             _, hard_requirement_ids = _requirement_scope(state, assessment)
-            if not hard_requirement_ids:
+            if not hard_requirement_ids and _can_commit_with_warning(profile):
                 return _commit_degraded_result(
                     update,
                     state,
@@ -1528,7 +1666,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
             )
 
         _, hard_requirement_ids = _requirement_scope(state, assessment)
-        if not hard_requirement_ids:
+        if not hard_requirement_ids and _can_commit_with_warning(profile):
             return _commit_degraded_result(
                 update,
                 state,
@@ -1588,8 +1726,23 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 repair_budget=MAX_EVIDENCE_RECOVERIES,
                 retryable=True,
             )
+        if profile.has_non_degradable_issue:
+            retries = task_retry_count.get(task_id, 0)
+            if retries < MAX_CONTENT_RETRIES:
+                task_retry_count[task_id] = retries + 1
+                update["workflow_action"] = WorkflowAction.REWORK.value
+                return _set_decision(
+                    update,
+                    state,
+                    assessment,
+                    failure_class=FailureClass.RETRYABLE_EXECUTION,
+                    action=FailureAction.RETRY_TASK,
+                    repair_attempt=retries + 1,
+                    repair_budget=MAX_CONTENT_RETRIES,
+                    retryable=True,
+                )
         _, hard_requirement_ids = _requirement_scope(state, assessment)
-        if not hard_requirement_ids:
+        if not hard_requirement_ids and _can_commit_with_warning(profile):
             return _commit_degraded_result(
                 update,
                 state,
@@ -1611,7 +1764,7 @@ def decide_recovery_action(state: Dict[str, Any], assessment: Dict[str, Any]) ->
                 repair_budget=MAX_TASK_PATCHES,
             )
         _, hard_requirement_ids = _requirement_scope(state, assessment)
-        if not hard_requirement_ids:
+        if not hard_requirement_ids and _can_commit_with_warning(profile):
             if state.get("current_result"):
                 return _commit_degraded_result(
                     update,

@@ -1,5 +1,13 @@
+import logging
+from itertools import permutations
+
 from src.failure_semantics import FailureAction, FailureClass
-from src.recovery.policy import MAX_ASSET_RETRIES, decide_recovery_action
+from src.recovery.policy import (
+    MAX_ASSET_RETRIES,
+    _can_commit_with_warning,
+    _profile_assessment,
+    decide_recovery_action,
+)
 import pytest
 
 
@@ -73,6 +81,190 @@ def _assessment(code: str):
             }
         ],
     }
+
+
+def mixed_assessment() -> dict:
+    return {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "EVIDENCE_GAP",
+                "category": "EVIDENCE_GAP",
+                "description": "缺少次要来源",
+                "suggestion": "保留缺口",
+                "severity": "minor",
+                "requirement_ids": [],
+            },
+            {
+                "code": "CLAIM_PARTIALLY_SUPPORTED",
+                "category": "EVIDENCE_GAP",
+                "description": "优先级没有证据",
+                "suggestion": "收缩论断",
+                "severity": "major",
+                "requirement_ids": [],
+                "affected_claims": [
+                    {"claim_id": "C2", "text": "氢气是第一优先项"}
+                ],
+            },
+        ],
+    }
+
+
+def test_mixed_gap_and_semantic_issue_never_commits_warning():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="soft")
+    state["evidence_recovery_count"] = {"T1": 1}
+
+    update = decide_recovery_action(state, mixed_assessment())
+
+    assert update["workflow_action"] == "REWORK"
+    assert update.get("results", []) == []
+    assert update["failure_decision"]["action"] == "RETRY_TASK"
+
+
+def test_multi_issue_policy_is_order_independent():
+    outcomes = []
+    for order in permutations(mixed_assessment()["issues"]):
+        state = _state(code="EVIDENCE_GAP", requirement_severity="soft")
+        state["evidence_recovery_count"] = {"T1": 1}
+        update = decide_recovery_action(
+            state, {"status": "FAILED", "issues": list(order)}
+        )
+        outcomes.append(
+            (
+                update["workflow_action"],
+                update["failure_decision"]["action"],
+                update["failure_decision"]["subtype"],
+                update["task_retry_count"],
+            )
+        )
+    assert len(set(map(repr, outcomes))) == 1
+
+
+def test_two_degradable_gaps_keep_existing_warning_delivery():
+    state = _state(code="EVIDENCE_GAP", requirement_severity="soft")
+    state["evidence_recovery_count"] = {"T1": 1}
+    issues = [
+        {
+            "code": "EVIDENCE_GAP",
+            "category": "EVIDENCE_GAP",
+            "description": "gap one",
+            "suggestion": "disclose",
+            "severity": "minor",
+            "requirement_ids": [],
+        },
+        {
+            "code": "MISSING_EVIDENCE",
+            "category": "EVIDENCE_GAP",
+            "description": "gap two",
+            "suggestion": "disclose",
+            "severity": "minor",
+            "requirement_ids": [],
+        },
+    ]
+
+    update = decide_recovery_action(state, {"status": "FAILED", "issues": issues})
+
+    assert update["failure_decision"]["action"] == "COMMIT_WITH_WARNING"
+    assert update["results"]
+    assert update["section_status"]["T1"]["status"] == "ACCEPT_WITH_WARNING"
+
+
+def test_shared_warning_gate_rejects_semantic_issue_and_allows_waivable_gaps():
+    state = _state(code="EVIDENCE_GAP")
+    semantic = _profile_assessment(mixed_assessment(), state)
+    gaps = _profile_assessment(
+        {
+            "status": "FAILED",
+            "issues": [
+                {"code": "EVIDENCE_GAP", "category": "EVIDENCE_GAP"},
+                {"code": "MISSING_EVIDENCE", "category": "EVIDENCE_GAP"},
+            ],
+        },
+        state,
+    )
+
+    assert not _can_commit_with_warning(semantic)
+    assert _can_commit_with_warning(gaps)
+
+
+def test_semantic_issue_recovers_reworks_then_blocks_without_warning(caplog):
+    assessment = mixed_assessment()
+    state = _state(code="EVIDENCE_GAP", requirement_severity="soft")
+    actions = []
+
+    caplog.set_level(logging.INFO, logger="src.recovery.policy")
+    first = decide_recovery_action(state, assessment)
+    actions.append(first["workflow_action"])
+    second = decide_recovery_action(
+        {**state, **first, "evidence_recovery_count": first["evidence_recovery_count"]},
+        assessment,
+    )
+    actions.append(second["workflow_action"])
+    third = decide_recovery_action(
+        {**state, **second, "task_retry_count": second["task_retry_count"]},
+        assessment,
+    )
+    actions.append(third["workflow_action"])
+    final = decide_recovery_action(
+        {**state, **third, "task_retry_count": third["task_retry_count"]},
+        assessment,
+    )
+    actions.append(final["workflow_action"])
+
+    assert actions == ["EVIDENCE_RECOVERY", "REWORK", "REWORK", "NEEDS_USER_INPUT"]
+    assert final["failure_decision"]["action"] == "REGISTER_BLOCKER"
+    assert final.get("results", []) == []
+    assert {issue["code"] for issue in final["section_status"]["T1"]["issues"]} == {
+        "EVIDENCE_GAP",
+        "CLAIM_PARTIALLY_SUPPORTED",
+    }
+    assert "issue_count=2" in caplog.text
+    assert "selected_policy_issue_code=CLAIM_PARTIALLY_SUPPORTED" in caplog.text
+    assert "selected_policy_action=RETRY_TASK" in caplog.text
+    assert "has_non_degradable_issue=true" in caplog.text
+
+    caplog.clear()
+    reversed_assessment = {
+        "status": "FAILED", "issues": list(reversed(assessment["issues"]))
+    }
+    reversed_update = decide_recovery_action(
+        {
+            **state,
+            "evidence_recovery_count": {"T1": 1},
+            "task_retry_count": {},
+        },
+        reversed_assessment,
+    )
+    assert reversed_update["failure_decision"]["subtype"] == "CLAIM_PARTIALLY_SUPPORTED"
+    assert reversed_update["workflow_action"] == "REWORK"
+    assert "issue_count=2" in caplog.text
+    assert "selected_policy_issue_code=CLAIM_PARTIALLY_SUPPORTED" in caplog.text
+    assert "selected_policy_action=RETRY_TASK" in caplog.text
+    assert "has_non_degradable_issue=true" in caplog.text
+
+
+def test_uncited_material_claim_is_non_degradable_after_rework_exhaustion():
+    state = _state(code="UNCITED_MATERIAL_CLAIM", requirement_severity="soft")
+    state["task_retry_count"] = {"T1": 2}
+    assessment = {
+        "status": "FAILED",
+        "issues": [
+            {
+                "code": "UNCITED_MATERIAL_CLAIM",
+                "category": "CONTENT_DEFECT",
+                "description": "强断言缺少显式引用",
+                "suggestion": "补引用或收缩断言",
+                "severity": "major",
+                "requirement_ids": [],
+            }
+        ],
+    }
+
+    update = decide_recovery_action(state, assessment)
+
+    assert update["workflow_action"] == "NEEDS_USER_INPUT"
+    assert update["failure_decision"]["action"] == "REGISTER_BLOCKER"
+    assert update.get("results", []) == []
 
 
 def test_evidence_recovery_publishes_canonical_retry_decision():

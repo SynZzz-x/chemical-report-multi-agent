@@ -493,8 +493,10 @@ Implement `test_semantic_issue_recovers_reworks_then_blocks_without_warning` by 
 assert actions == ["EVIDENCE_RECOVERY", "REWORK", "REWORK", "NEEDS_USER_INPUT"]
 assert final["failure_decision"]["action"] == "REGISTER_BLOCKER"
 assert final.get("results", []) == []
-assert {issue["code"] for issue in final["pending_user_blockers"][0]["issues"]} == {"EVIDENCE_GAP", "CLAIM_PARTIALLY_SUPPORTED"}
+assert {issue["code"] for issue in final["section_status"]["T1"]["issues"]} == {"EVIDENCE_GAP", "CLAIM_PARTIALLY_SUPPORTED"}
 ```
+
+The complete issue list is retained in the existing section-status record; the frozen blocker schema has no `issues` field and must not be extended for this assertion (user-approved refinement).
 
 Use `caplog` to require `issue_count=2`, `selected_policy_issue_code=CLAIM_PARTIALLY_SUPPORTED`, `selected_policy_action=RETRY_TASK`, and `has_non_degradable_issue=true`; repeat with reversed issue order.
 
