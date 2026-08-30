@@ -649,8 +649,11 @@ def _assemble_markdown(
     state: State,
     sections: Sequence[Mapping[str, Any]],
     report_status: str,
+    *,
+    body_spans: list[tuple[int, int]] | None = None,
 ) -> str:
     blocks = [f"# {find_title(state)}"]
+    body_block_indices: set[int] = set()
     if report_status == DRAFT_WITH_GAPS:
         blocks.append(_draft_warning(state))
     outline = classify_outline(_intake_sections(state))
@@ -753,11 +756,22 @@ def _assemble_markdown(
         section_markdown = append_missing_figures(
             section_markdown, section.get("figures") or []
         )
+        body_block_indices.add(len(blocks))
         blocks.append(section_markdown)
     if reference_markdown and not reference_inserted:
         append_container_headings(reference_container_path)
         blocks.append(reference_markdown)
-    return "\n\n".join(block for block in blocks if block).rstrip() + "\n"
+    final_markdown = "\n\n".join(block for block in blocks if block).rstrip() + "\n"
+    if body_spans is not None:
+        offset = 0
+        for index, block in enumerate(blocks):
+            if not block:
+                continue
+            end = offset + len(block)
+            if index in body_block_indices:
+                body_spans.append((offset, min(end, len(final_markdown))))
+            offset = end + 2  # The exact separator used by the single join above.
+    return final_markdown
 
 
 def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
@@ -788,8 +802,11 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         return _citation_integrity_blocked_update(preflight)
 
     sections, evidence_display_map = normalize_sections_evidence(sections)
+    body_spans: list[tuple[int, int]] = []
     try:
-        final_markdown = _assemble_markdown(state, sections, report_status)
+        final_markdown = _assemble_markdown(
+            state, sections, report_status, body_spans=body_spans
+        )
     except ValueError as exc:
         if str(exc) != "FINAL_DISPLAY_IDENTITY_CONFLICT":
             raise
@@ -805,7 +822,7 @@ def summarizer(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]
         )
     final_citations = project_lossless_used_citations(sections)
     final_validation = validate_final_citation_integrity(
-        sections, final_markdown, final_citations
+        sections, final_markdown, final_citations, body_spans=body_spans
     )
     if not final_validation.is_valid:
         return _citation_integrity_blocked_update(final_validation)

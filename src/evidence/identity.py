@@ -10,6 +10,7 @@ import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from .citations import extract_inline_evidence_ids
 from .projection import collect_used_evidence_ids
 
 
@@ -110,7 +111,9 @@ def evidence_key(task_id: str, local_id: str) -> str:
     return f"{task}:{evidence_id}"
 
 
-def _citation_key(task_id: str, citation: Mapping[str, Any]) -> str:
+def citation_binding_key(task_id: str, citation: Mapping[str, Any]) -> str:
+    """Preserve inherited task scope, otherwise bind the current local ID."""
+
     existing = str(citation.get("evidence_key") or "").strip()
     if existing:
         return existing
@@ -143,14 +146,40 @@ def build_display_evidence_map(
             raw_citations,
         )
         for evidence_id in cited_order:
+            display_by_identity: dict[str, str] = {}
             for citation in raw_citations:
                 local_id = str(citation.get("evidence_id") or "").strip().upper()
                 if local_id != evidence_id:
                     continue
-                key = _citation_key(task_id, citation)
-                if key and key not in display_map:
+                key = citation_binding_key(task_id, citation)
+                if not key:
+                    continue
+                identity = canonical_citation_identity(citation)
+                shared_display = display_by_identity.get(identity)
+                if shared_display is not None:
+                    previous_display = display_map.get(key)
+                    if previous_display and previous_display != shared_display:
+                        # A same-visible canonical duplicate can join two
+                        # inherited keys that already appeared in prior tasks.
+                        first, other = sorted(
+                            (previous_display, shared_display),
+                            key=lambda value: int(value[1:]),
+                        )
+                        display_map = {
+                            bound_key: first if value == other else value
+                            for bound_key, value in display_map.items()
+                        }
+                        shared_display = first
+                    display_map[key] = shared_display
+                elif key not in display_map:
                     display_map[key] = f"E{len(display_map) + 1}"
-    return display_map
+                display_by_identity[identity] = display_map[key]
+    # Coalescing aliases must not leave gaps or allocate by alias-key count.
+    compact_ids = {
+        value: f"E{index}"
+        for index, value in enumerate(dict.fromkeys(display_map.values()), start=1)
+    }
+    return {key: compact_ids[value] for key, value in display_map.items()}
 
 
 def _rewrite_markers(text: str, local_display: Mapping[str, str]) -> str:
@@ -207,6 +236,29 @@ def normalize_sections_evidence(
     """Return report-only copies with stable global evidence display IDs."""
 
     display_map = build_display_evidence_map(sections)
+    # Keep every raw entry, but never let an unused local ID alias a used
+    # display ID. This private extension does not change the public used map.
+    all_display_ids = dict(display_map)
+    reserved_ids = set(display_map.values())
+    for section in sections:
+        reserved_ids.update(
+            extract_inline_evidence_ids(str(
+                section.get("text") or section.get("content")
+                or section.get("text_output") or ""
+            ))
+        )
+    next_unused_id = len(set(display_map.values())) + 1
+    for section in sections:
+        task_id = str(section.get("task_id") or "").strip()
+        for citation in section.get("citations") or []:
+            if not isinstance(citation, Mapping):
+                continue
+            key = citation_binding_key(task_id, citation)
+            if key and key not in all_display_ids:
+                while f"E{next_unused_id}" in reserved_ids:
+                    next_unused_id += 1
+                all_display_ids[key] = f"E{next_unused_id}"
+                reserved_ids.add(f"E{next_unused_id}")
     normalized: list[dict[str, Any]] = []
     for original in sections:
         section = deepcopy(dict(original))
@@ -218,8 +270,8 @@ def normalize_sections_evidence(
                 continue
             citation = dict(raw_citation)
             local_id = str(citation.get("evidence_id") or "").strip().upper()
-            key = _citation_key(task_id, citation)
-            display_id = display_map.get(key, local_id)
+            key = citation_binding_key(task_id, citation)
+            display_id = all_display_ids.get(key, local_id)
             if local_id and display_id:
                 local_display[local_id] = display_id
             citation["local_evidence_id"] = str(

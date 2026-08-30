@@ -8,9 +8,29 @@ Baseline production commit: `cebebea8fc38a5c7d9abff8512c9dee6d1d8d8cb`
 
 Branch start: `1e7ef1b5a1084f84c769661c8546c2d8d252d0e3`
 
-Final commit before this report: `6b38d8f` (`report: simplify evidence appendix projection`)
+Initial Task 8 verification base: `6b38d8f` (`report: simplify evidence appendix projection`). Final-review correction base: `afdf678` (`docs: clarify final verification evidence`).
 
-## Verification result
+## Final-review correction verification
+
+The four final-review findings were reproduced before production edits: the citation-integrity and Summarizer suites reported **11 failed, 51 passed**. Corrections now preserve inherited binding scope, check current per-section visible IDs before remapping, allocate collision-free unused report IDs without dropping raw records, and validate actual body slices from the single assembled Markdown independently of the appendix. Both removed unused-E2 fixtures have been restored.
+
+Fresh offline verification on 2026-08-31 used `/Users/synzzz/Documents/work_space/agent/agent-master/.venv/bin/python`:
+
+| Command | Result |
+| --- | --- |
+| `.../.venv/bin/python -m pytest -q tests/test_citation_integrity.py tests/test_report_evidence_integration.py tests/test_summarizer_deterministic.py tests/test_synthesis.py tests/test_evidence_pipeline.py tests/test_report_renderers.py` | **120 passed in 10.25s** |
+| `.../.venv/bin/python -m pytest -q` | **935 passed in 26.86s** |
+| `.../.venv/bin/python -m compileall -q src app.py run.py` | exit 0, silent |
+| `git diff --check` | exit 0, silent |
+| `git diff --exit-code cebebea8fc38a5c7d9abff8512c9dee6d1d8d8cb -- src/state.py src/persistence.py src/job_store.py src/graph.py` | exit 0, silent |
+
+Additional regressions cover same-visible canonical duplicates with different inherited keys, including keys allocated by prior sections; ambiguous uncited records still fail preflight. Unused allocation also reserves existing body IDs so it cannot accidentally bind an unknown marker. The real synthesis-context → synthesis-consistency → Summarizer delivery regression uses VERIFIED_PASS sections and stubs only model/provider and rendering boundaries.
+
+Assembly span metadata is a local list of `(start, end)` offsets. It is not a State/checkpoint field, not returned as report data, and not embedded as control markers in Markdown. Tests verify one assembly, an appendix inserted between body sections, heading-name independence, exact body slices, plain `str` inputs to both renderers, unchanged source State/provenance, and no artifacts or path resolution after a failed gate. Rendering code and appendix presentation were unchanged, so no new presentation rendering was required.
+
+Independent final branch re-review is **pending**; these test results are implementation verification, not an independent-review pass.
+
+## Initial Task 8 verification result (historical)
 
 All required focused suites and the full suite passed offline. The required relative `.venv/bin/python` path is not present inside the worktree; the same configured interpreter was invoked by its explicit path, `/Users/synzzz/Documents/work_space/agent/agent-master/.venv/bin/python`.
 
@@ -38,7 +58,7 @@ Each invariant has a passing regression and an exact authority function:
 
 | Invariant | Authority | Passing regression |
 | --- | --- | --- |
-| Local and global E-IDs cannot alias | `canonical_citation_identity()`, `evidence_key()`, `validate_pre_remap_citation_integrity()`, `normalize_sections_evidence()`, and `validate_final_citation_integrity()` in `src/evidence/identity.py` and `src/evidence/integrity.py` | `test_pre_remap_scopes_same_local_id_by_task`, `test_cross_task_local_ids_receive_distinct_deterministic_display_ids`, `test_final_gate_rejects_one_display_id_with_two_identities` |
+| Local and global E-IDs cannot alias | `canonical_citation_identity()`, `citation_binding_key()`, `evidence_key()`, `validate_pre_remap_citation_integrity()`, `normalize_sections_evidence()`, and `validate_final_citation_integrity()` in `src/evidence/identity.py` and `src/evidence/integrity.py` | `test_pre_remap_scopes_same_local_id_by_task`, `test_normalized_synthesis_is_delivered_with_original_citation_scopes`, `test_visible_id_conflict_blocks_before_remap_and_delivery`, `test_unused_raw_ids_do_not_alias_allocated_display_ids_or_mutate_sources` |
 | Lossless registry reaches both validation phases | `validate_pre_remap_citation_integrity()` → `normalize_sections_evidence()` → `project_lossless_used_citations()` → `validate_final_citation_integrity()` | `test_pre_remap_rejects_same_task_local_id_with_two_identities`, `test_lossless_projection_retains_conflicting_entries`, `test_final_gate_rejects_registry_id_unused_by_body` |
 | Raw provenance is not mutated | `normalize_evidence_text()` and copy-based `normalize_sections_evidence()` / appendix projection | `test_text_projection_normalizes_noise_without_mutating_source_object`, `test_appendix_dedupes_only_exact_identity_without_mutation` |
 | Issue permutations choose the identical action and selected code | `_profile_assessment()` and `_set_decision()` in `src/recovery/policy.py` | `test_multi_issue_policy_is_order_independent` |
@@ -48,18 +68,19 @@ Each invariant has a passing regression and an exact authority function:
 | Actual request JSON contains `max_tokens` and optional `reasoning_effort` | `with_completion_budget()` / `_with_deepseek_budget()` and `invoke_llm()` in `src/llm.py` | `test_deepseek_request_uses_max_tokens_not_max_completion_tokens`, `test_verifier_reasoning_effort_reaches_actual_request`, `test_assessment_budget_preserves_bound_extra_body_fields`, `test_assessment_budget_preserves_bound_listener_and_type_semantics` |
 | Presentation dedupe cannot hide an identity conflict | `format_grouped_evidence_appendix()` in `src/evidence/reporting.py` | `test_appendix_never_dedupes_conflicting_display_identity`; exact duplicate behavior is covered by `test_appendix_dedupes_only_exact_identity_without_mutation` |
 | Report failure occurs before path resolution and artifact creation | `summarizer()` preflight/final gate before `get_session_cache_dir()`, `os.makedirs()`, and renderer calls | `test_final_citation_conflict_blocks_before_delivery_paths`, plus `test_blocked_report_does_not_create_delivery_files` |
+| A surviving appendix citation cannot mask loss from the final body | `_assemble_markdown()` invocation-local body offsets and `validate_final_citation_integrity(..., body_spans=...)` | `test_final_body_slice_excludes_appendix_when_body_marker_was_lost`, `test_lost_body_marker_cannot_be_masked_by_surviving_appendix`, `test_assembly_body_spans_are_invocation_local_and_markdown_stays_plain_str`, `test_assembly_body_spans_do_not_classify_body_by_heading_name` |
 
-No checklist item exposed missing evidence or a concrete defect. No production correction was made for Task 8.
+The initial Task 8 checklist missed four concrete defects; its green tests were not sufficient evidence of final citation correctness. The final-review correction regressions and fresh verification above supersede that initial conclusion.
 
 ## Citation and recovery flow
 
 The final citation flow is invocation-local and lossless:
 
 1. `_ordered_sections()` selects admitted sections.
-2. `validate_pre_remap_citation_integrity()` groups raw records by `(task_id, local_evidence_id)` and rejects multiple canonical identities before remapping.
-3. `normalize_sections_evidence()` deep-copies sections, assigns globally unique display IDs from task-scoped `evidence_key()` values, and rewrites report-only fields.
-4. `_assemble_markdown()` creates one report projection; `project_lossless_used_citations()` retains every normalized citation record referenced by a body marker, including conflicting entries rather than overwriting by ID.
-5. `validate_final_citation_integrity()` independently checks body IDs, lossless registry IDs, final Markdown IDs, remap aliases, identity conflicts, missing bindings, and unused bindings.
+2. `validate_pre_remap_citation_integrity()` checks all raw records, including unused ones, by the shared `citation_binding_key()` authority in their original inherited scope, and separately checks each current section's visible-ID canonical identities before remapping.
+3. `normalize_sections_evidence()` deep-copies sections, assigns display IDs from task-scoped binding keys, coalesces only same-visible canonical duplicate aliases, and rewrites report-only fields. Unused records remain intact with deterministic noncolliding IDs; the public display map still describes used bindings.
+4. `_assemble_markdown()` creates one plain-string report projection and records body offsets in a local output list. No heading-name inference, reassembly, report markers, or persistent metadata are used. `project_lossless_used_citations()` retains every normalized citation record referenced by a body marker, including conflicting entries rather than overwriting by ID.
+5. `validate_final_citation_integrity()` slices the exact final Markdown at those offsets and independently checks actual final-body IDs, normalized-body IDs, lossless registry IDs, whole-Markdown pollution, remap aliases, identity conflicts, missing bindings, and unused bindings. Appendix IDs cannot satisfy the body-preservation check.
 6. Only after that gate succeeds does `summarizer()` resolve report paths, create directories, write Markdown, or call PDF/DOCX renderers.
 
 Recovery computes one complete assessment profile in `_profile_assessment()` before action selection. Category priority and explicit requirement linkage make the selected action and representative code independent of input issue order. Any non-degradable issue prevents warning commit; fatal/verifier failures outrank semantic/content issues. Existing `decide_recovery_action()` actions, counters, blocker records, and graph routes remain unchanged.
@@ -120,7 +141,7 @@ Remaining risks include real-provider behavior, the intentionally conservative u
 
 ## Changed files and commits
 
-Before adding the Task 8 validation report, the requested production-baseline range (`cebebea8...` to `6b38d8f`) was 31 files, 4,324 insertions and 145 deletions. Task 8 adds one tracked validation artifact; the final range therefore contains 32 files. The companion `.superpowers/sdd/task-8-report.md` remains a local ignored scratch report and is intentionally not tracked. The pre-existing archive is preserved in the original checkout at `/Users/synzzz/Documents/work_space/agent/agent-master/agent-master-clean-20260828.zip`; it is not a branch change.
+Before adding the initial Task 8 validation report, the production-baseline range (`cebebea8...` to `6b38d8f`) was 31 files, 4,324 insertions and 145 deletions. Task 8 added one tracked validation artifact. Final-review corrections modify existing files only, so the branch still changes 32 files against the production baseline. The correction scope is three production files (`identity.py`, `integrity.py`, `summarizer_v2.py`), two regression suites, the implementation plan, and this report. The companion `.superpowers/sdd/task-8-report.md` and `.superpowers/sdd/final-fix-report.md` remain local ignored reports and are intentionally not tracked. The pre-existing archive is preserved in the original checkout at `/Users/synzzz/Documents/work_space/agent/agent-master/agent-master-clean-20260828.zip`; it is not a branch change.
 
 The branch commits, in order, are:
 
@@ -143,4 +164,8 @@ e6a7517 verifier: split ASCII claim boundaries
 910440e fix: preserve bound verifier request controls
 228b1f1 fix: preserve verifier binding semantics
 6b38d8f report: simplify evidence appendix projection
+5249d95 report: record final integrity verification
+afdf678 docs: clarify final verification evidence
 ```
+
+The bounded citation-correction commit contains the current verification update; its independent final re-review is owned by the root agent.

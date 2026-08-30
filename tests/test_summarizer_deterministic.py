@@ -1,11 +1,12 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
 from PIL import Image as PILImage
 
-from src.nodes import summarizer_v2
+from src.nodes import summarizer_v2, synthesis as synthesis_module
 
 
 def _task(task_id, name):
@@ -194,6 +195,184 @@ def test_markdown_assembly_is_byte_deterministic():
     assert first == second
 
 
+def test_normalized_synthesis_is_delivered_with_original_citation_scopes(monkeypatch, tmp_path):
+    state = _state(statuses={task_id: _status("VERIFIED_PASS") for task_id in ("T1", "T2")})
+    state["results"] = [
+        {"task_id": task_id, "text_output": text, "plan_revision": 1, "task_revision": 1,
+         "citations": [{"evidence_id": "E8", "file_path": path, "supporting_text": text.split("[")[0]}]}
+        for task_id, text, path in (
+            ("T1", "温度影响分子量。[E8]", "/docs/a.docx"),
+            ("T2", "压力影响密度。[E8]", "/docs/b.docx"),
+        )
+    ]
+    state["tasks"].append({**_task("TS", "结论"), "task_type": "synthesis"})
+    state["cursor"] = 2
+    state["plan_revision"] = 1
+    state["task_revisions"] = {task_id: 1 for task_id in ("T1", "T2", "TS")}
+    original_results = deepcopy(state["results"])
+    monkeypatch.setattr(synthesis_module, "get_llm", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(synthesis_module, "with_completion_budget", lambda model, purpose: (model, 1000))
+    monkeypatch.setattr(synthesis_module, "invoke_llm", lambda *_args, **_kwargs: AIMessage(
+        content="温度影响分子量。[E1]\n压力影响密度。[E2]"
+    ))
+    synthesis_result = synthesis_module.synthesis(state, {})["current_result"]
+    assert synthesis_result["status"] == "COMPLETED"
+    assert [item["evidence_key"] for item in synthesis_result["citations"]] == ["T1:E8", "T2:E8"]
+    state["results"].append(synthesis_result)
+    state["section_status"]["TS"] = _status("VERIFIED_PASS")
+    original_state = deepcopy({**state, "messages": [message.content for message in state["messages"]]})
+    _install_render_stubs(monkeypatch, tmp_path)
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert result["report_status"] == "READY_FOR_FINAL"
+    markdown = Path(result["attachments"][0]).read_text(encoding="utf-8")
+    assert "温度影响分子量。[E1]" in markdown
+    assert "压力影响密度。[E2]" in markdown
+    assert {**state, "messages": [message.content for message in state["messages"]]} == original_state
+    assert state["results"][:2] == original_results
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_visible_id_conflict_blocks_before_remap_and_delivery(monkeypatch, tmp_path, reverse):
+    citations = [
+        {"evidence_id": "E1", "evidence_key": "T1:E8", "local_evidence_id": "E8",
+         "file_path": "/docs/a.docx", "supporting_text": "甲"},
+        {"evidence_id": "E1", "evidence_key": "T2:E9", "local_evidence_id": "E9",
+         "file_path": "/docs/b.docx", "supporting_text": "乙"},
+    ]
+    if reverse:
+        citations.reverse()
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")}, results=[{
+        "task_id": "T1", "text_output": "正文 [E1]。", "citations": citations,
+        "plan_revision": 1, "task_revision": 1,
+    }])
+    state["tasks"] = state["tasks"][:1]
+    calls = []
+    original_normalize = summarizer_v2.normalize_sections_evidence
+
+    def record_normalize(sections):
+        calls.append("normalize")
+        return original_normalize(sections)
+
+    monkeypatch.setattr(summarizer_v2, "normalize_sections_evidence", record_normalize)
+    _install_render_stubs(monkeypatch, tmp_path)
+    monkeypatch.setattr(summarizer_v2, "get_session_cache_dir", lambda *_args: (
+        calls.append("paths") or str(tmp_path)
+    ))
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert result["report_status"] == "BLOCKED"
+    assert result["attachments"] == []
+    assert result["path"] is None
+    assert calls == []
+    assert not (tmp_path / "report").exists()
+
+
+def test_lost_body_marker_cannot_be_masked_by_surviving_appendix(monkeypatch, tmp_path):
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")}, results=[{
+        "task_id": "T1", "text_output": "正文 [E1]。", "plan_revision": 1, "task_revision": 1,
+        "citations": [{"evidence_id": "E1", "file_path": "/docs/a.docx", "supporting_text": "甲"}],
+    }])
+    state["tasks"] = state["tasks"][:1]
+    _install_render_stubs(monkeypatch, tmp_path)
+    original_strip = summarizer_v2._strip_duplicate_leading_heading
+    monkeypatch.setattr(summarizer_v2, "_strip_duplicate_leading_heading", lambda text, title: (
+        original_strip(text, title).replace("[E1]", "")
+    ))
+    assembled = []
+    original_assemble = summarizer_v2._assemble_markdown
+
+    def capture_assembly(*args, **kwargs):
+        markdown = original_assemble(*args, **kwargs)
+        assembled.append(markdown)
+        return markdown
+
+    monkeypatch.setattr(summarizer_v2, "_assemble_markdown", capture_assembly)
+    path_calls = []
+    monkeypatch.setattr(summarizer_v2, "get_session_cache_dir", lambda *_args: (
+        path_calls.append(True) or str(tmp_path)
+    ))
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert len(assembled) == 1
+    assert "正文 。" in assembled[0]
+    assert "[E1]" in assembled[0]  # The evidence appendix still contains the marker.
+    assert result["report_status"] == "BLOCKED"
+    assert result["attachments"] == []
+    assert result["path"] is None
+    assert path_calls == []
+    assert not (tmp_path / "report").exists()
+
+
+def test_assembly_body_spans_are_invocation_local_and_markdown_stays_plain_str(monkeypatch, tmp_path):
+    state = _state(statuses={"T1": _status("VERIFIED_PASS"), "T2": _status("VERIFIED_PASS")})
+    state["tasks"][0]["covers_sections"] = ["1. 引言"]
+    state["tasks"][1]["covers_sections"] = ["3. 工艺分析"]
+    state["messages"] = [AIMessage(content=json.dumps({
+        "from": "Intake", "to": "Planner", "title": "报告",
+        "sections": ["1. 引言", "2. 证据来源", "3. 工艺分析"],
+    }, ensure_ascii=False))]
+    original_state = deepcopy({**state, "messages": [message.content for message in state["messages"]]})
+    _install_render_stubs(monkeypatch, tmp_path)
+    assemblies = []
+    original_assemble = summarizer_v2._assemble_markdown
+
+    def record_assembly(*args, **kwargs):
+        markdown = original_assemble(*args, **kwargs)
+        assemblies.append((markdown, kwargs.get("body_spans")))
+        return markdown
+
+    monkeypatch.setattr(summarizer_v2, "_assemble_markdown", record_assembly)
+    rendered = []
+
+    def render(markdown, output_path, **kwargs):
+        rendered.append(markdown)
+        Path(output_path).write_text("artifact", encoding="utf-8")
+
+    monkeypatch.setattr(summarizer_v2.md_to_pdf, "md_to_pdf", render)
+    monkeypatch.setattr(summarizer_v2.md_to_docx, "md_to_docx", render)
+
+    update = summarizer_v2.summarizer(state, {})
+
+    assert update["report_status"] == "READY_FOR_FINAL"
+    assert len(assemblies) == 1
+    markdown, body_spans = assemblies[0]
+    assert body_spans is not None
+    assert len(body_spans) == 2
+    first_body, second_body = [markdown[start:end] for start, end in body_spans]
+    assert "引言正文 [E1]。" in first_body
+    assert "工艺分析正文 [E2]。" in second_body
+    assert "证据来源" not in first_body + second_body
+    assert body_spans[0][1] < markdown.index("## 2. 证据来源") < body_spans[1][0]
+    assert type(markdown) is str
+    assert len(rendered) == 2 and all(type(value) is str and value == markdown for value in rendered)
+    assert Path(update["final_result"]["attachments"][0]).read_text(encoding="utf-8") == markdown
+    assert {**state, "messages": [message.content for message in state["messages"]]} == original_state
+    assert '"body_spans":' not in json.dumps(update, ensure_ascii=False, default=str)
+    assert "body_spans" not in markdown
+
+
+def test_assembly_body_spans_do_not_classify_body_by_heading_name():
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")})
+    body_spans = []
+    sections = [{
+        "task_id": "T1", "title": "引言", "text": "### 证据来源\n\n正文 [E1]。",
+        "citations": [{"evidence_id": "E1", "title": "实际来源", "supporting_text": "甲"}],
+    }]
+
+    markdown = summarizer_v2._assemble_markdown(
+        state, sections, "READY_FOR_FINAL", body_spans=body_spans
+    )
+
+    assert len(body_spans) == 1
+    start, end = body_spans[0]
+    assert "### 证据来源\n\n正文 [E1]。" in markdown[start:end]
+    assert "实际来源" not in markdown[start:end]
+
+
 def test_ready_report_is_assembled_in_task_order_without_llm(monkeypatch, tmp_path):
     statuses = {
         "T1": _status("VERIFIED_PASS"),
@@ -293,6 +472,14 @@ def test_knowledge_base_file_list_is_deterministically_aggregated(monkeypatch, t
             "locator": "第2章",
             "supporting_text": "工艺说明",
         },
+        {
+            "evidence_id": "E2",
+            "source_type": "rag",
+            "title": "聚乙烯生产工艺与质量控制概述",
+            "file_path": "/srv/private/聚乙烯生产工艺与质量控制概述.docx",
+            "locator": "第3章",
+            "supporting_text": "质量说明",
+        },
     ]
     state["results"][1]["citations"] = [
         {
@@ -359,6 +546,12 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
                     "source_type": "rag",
                     "file_path": "/a/source_a.docx",
                     "supporting_text": "a1",
+                },
+                {
+                    "evidence_id": "E2",
+                    "source_type": "rag",
+                    "file_path": "/a/source_a.docx",
+                    "supporting_text": "a2",
                 },
                 {
                     "evidence_id": "E3",

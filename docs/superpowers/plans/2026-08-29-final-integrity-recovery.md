@@ -222,7 +222,7 @@ class CitationIntegrityValidation:
         return not self.issues
 ```
 
-`validate_pre_remap_citation_integrity()` groups every raw list entry by `(task_id, local_evidence_id)` and fails when its canonical identity set contains more than one value. Refactor `build_display_evidence_map()` to iterate validated raw records in stable list order; remove its `citations_by_id` overwrite.
+`validate_pre_remap_citation_integrity()` groups every raw list entry by the shared `citation_binding_key()` authority: retain an inherited `evidence_key` in its original task scope, otherwise derive the task-local key. Independently check each current section's visible `evidence_id` against canonical identity before remapping; differing inherited keys must not hide a visible-ID conflict. Fail when either canonical identity set contains more than one value, including for uncited records. `build_display_evidence_map()` iterates validated raw records in stable list order. Same-visible canonical duplicates may share a deterministic first-appearance display ID while retaining all inherited keys and raw records. Unused records receive collision-free report-only IDs outside the allocated used namespace and existing body markers; the returned public display map remains used-only, and raw input/provenance stays unchanged.
 
 - [ ] **Step 7: Run GREEN and compatibility tests**
 
@@ -255,7 +255,7 @@ git commit -m "evidence: preserve lossless citation identity"
 **Interfaces:**
 - Consumes: Task 1 canonical identity and validation types.
 - Produces: `project_lossless_used_citations(sections) -> list[dict[str, Any]]`.
-- Produces: `validate_final_citation_integrity(normalized_sections, final_markdown, lossless_final_citations) -> CitationIntegrityValidation`.
+- Produces: `validate_final_citation_integrity(normalized_sections, final_markdown, lossless_final_citations, *, body_spans) -> CitationIntegrityValidation`, where spans are invocation-local offsets into the exact final Markdown string.
 - Preserves: Summarizer result schema and renderer inputs.
 
 - [ ] **Step 1: Write RED final-registry tests**
@@ -272,14 +272,14 @@ def test_final_gate_rejects_one_display_id_with_two_identities():
         {"task_id": "T2", "text_output": "维护 [E1]。", "citations": [citation("/docs/maintenance.docx", evidence_id="E1")]},
     ]
     registry = [item for section in sections for item in section["citations"]]
-    result = validate_final_citation_integrity(sections, "工艺 [E1]。\n维护 [E1]。", registry)
+    result = validate_final_citation_integrity(sections, "工艺 [E1]。\n维护 [E1]。", registry, body_spans=[(0, 17)])
     assert result.is_valid is False
     assert {issue.code for issue in result.issues} == {"FINAL_DISPLAY_IDENTITY_CONFLICT"}
 
 
 def test_final_gate_rejects_unbound_body_marker():
     sections = [{"task_id": "T1", "text_output": "工艺 [E9]。", "citations": []}]
-    result = validate_final_citation_integrity(sections, "工艺 [E9]。", [])
+    result = validate_final_citation_integrity(sections, "工艺 [E9]。", [], body_spans=[(0, 8)])
     assert result.is_valid is False
     assert "FINAL_CITATION_BINDING_MISSING" in {issue.code for issue in result.issues}
 
@@ -287,7 +287,7 @@ def test_final_gate_rejects_unbound_body_marker():
 def test_final_gate_allows_exact_duplicate_resolution():
     item = citation("/docs/process.docx", evidence_id="E1")
     sections = [{"task_id": "T1", "text_output": "工艺 [E1]。", "citations": [item, deepcopy(item)]}]
-    result = validate_final_citation_integrity(sections, "工艺 [E1]。\n\n[E1]", [item, deepcopy(item)])
+    result = validate_final_citation_integrity(sections, "工艺 [E1]。\n\n[E1]", [item, deepcopy(item)], body_spans=[(0, 8)])
     assert result.is_valid is True
 ```
 
@@ -296,7 +296,7 @@ Add these named assertions:
 ```python
 def test_appendix_marker_cannot_mask_missing_body_binding():
     sections = [{"task_id": "T1", "text_output": "正文 [E9]。", "citations": []}]
-    result = validate_final_citation_integrity(sections, "正文 [E9]。\n\n证据附录 [E9]", [])
+    result = validate_final_citation_integrity(sections, "正文 [E9]。\n\n证据附录 [E9]", [], body_spans=[(0, 8)])
     assert "FINAL_CITATION_BINDING_MISSING" in {issue.code for issue in result.issues}
 
 
@@ -361,7 +361,7 @@ Expected: the final projection/validator is absent and Summarizer still reaches 
 
 - [ ] **Step 4: Implement lossless projection and final validation**
 
-`project_lossless_used_citations()` must scan every citation list entry whose ID occurs in the normalized body; it must not construct `dict[evidence_id]`. The validator separately derives body IDs, registry IDs, and final Markdown IDs; it groups registry entries into `display_id -> set[canonical_identity]`, permits one canonical identity with exact duplicates, and emits stable sorted issues for conflicts, missing bindings, unused registry bindings, and remap aliases.
+`project_lossless_used_citations()` must scan every citation list entry whose ID occurs in the normalized body; it must not construct `dict[evidence_id]`. The validator separately derives normalized-body IDs, registry IDs, actual final-body IDs sliced from `final_markdown` using assembly offsets, and whole-Markdown IDs for pollution checks. It groups registry entries into `display_id -> set[canonical_identity]`, permits one canonical identity with exact duplicates, and emits stable sorted issues for conflicts, missing bindings, unused registry bindings, remap aliases, or invalid body boundaries. A surviving appendix marker must never mask a lost body marker. `_assemble_markdown()` records body block offsets within its single assembly invocation, without heading-name inference, extra assembly, control markers, or persistent metadata. Its return value and every writer/renderer input remain plain `str`.
 
 ```python
 def project_lossless_used_citations(sections: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -390,9 +390,10 @@ if not preflight.is_valid:
     return _citation_integrity_blocked_update(preflight)
 
 sections, evidence_display_map = normalize_sections_evidence(sections)
-final_markdown = _assemble_markdown(state, sections, report_status)
+body_spans: list[tuple[int, int]] = []
+final_markdown = _assemble_markdown(state, sections, report_status, body_spans=body_spans)
 final_citations = project_lossless_used_citations(sections)
-final_validation = validate_final_citation_integrity(sections, final_markdown, final_citations)
+final_validation = validate_final_citation_integrity(sections, final_markdown, final_citations, body_spans=body_spans)
 if not final_validation.is_valid:
     return _citation_integrity_blocked_update(final_validation)
 

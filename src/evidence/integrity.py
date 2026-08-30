@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .citations import extract_inline_evidence_ids
-from .identity import canonical_citation_identity
+from .identity import canonical_citation_identity, citation_binding_key
 
 
 @dataclass(frozen=True)
@@ -32,32 +32,50 @@ class CitationIntegrityValidation:
 def validate_pre_remap_citation_integrity(
     sections: Sequence[Mapping[str, Any]],
 ) -> CitationIntegrityValidation:
-    """Reject task-local citation IDs that identify more than one raw record."""
+    """Check inherited bindings and current visible IDs before either is lost."""
 
-    identities_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
+    identities_by_key: dict[str, set[str]] = defaultdict(set)
+    key_locations: dict[str, tuple[str, str]] = {}
+    conflicts: set[tuple[str, str]] = set()
     for section in sections:
         if not isinstance(section, Mapping):
             continue
         task_id = str(section.get("task_id") or "").strip()
+        visible_identities: dict[str, set[str]] = defaultdict(set)
         for citation in section.get("citations") or ():
             if not isinstance(citation, Mapping):
                 continue
             evidence_id = str(
                 citation.get("local_evidence_id") or citation.get("evidence_id") or ""
             ).strip().upper()
-            identities_by_key[(task_id, evidence_id)].add(
-                canonical_citation_identity(citation)
+            key = citation_binding_key(task_id, citation)
+            identity = canonical_citation_identity(citation)
+            identities_by_key[key].add(identity)
+            owner, separator, original_id = key.rpartition(":")
+            key_locations.setdefault(
+                key, (owner, original_id) if separator else (task_id, evidence_id)
             )
+            visible_id = _citation_display_id(citation)
+            visible_identities[visible_id].add(identity)
+        conflicts.update(
+            (task_id, visible_id)
+            for visible_id, identities in visible_identities.items()
+            if len(identities) > 1
+        )
+    conflicts.update(
+        key_locations[key]
+        for key, identities in identities_by_key.items()
+        if len(identities) > 1
+    )
 
     issues = tuple(
         CitationIntegrityIssue(
             code="LOCAL_CITATION_IDENTITY_CONFLICT",
-            description="同一任务中的本地证据编号对应多个不同证据来源。",
+            description="证据原始绑定或当前章节可见编号对应多个不同证据绑定。",
             task_id=task_id,
             evidence_id=evidence_id,
         )
-        for (task_id, evidence_id), identities in sorted(identities_by_key.items())
-        if len(identities) > 1
+        for task_id, evidence_id in sorted(conflicts)
     )
     return CitationIntegrityValidation(issues=issues)
 
@@ -97,8 +115,10 @@ def validate_final_citation_integrity(
     normalized_sections: Sequence[Mapping[str, Any]],
     final_markdown: str,
     lossless_final_citations: Sequence[Mapping[str, Any]],
+    *,
+    body_spans: Sequence[tuple[int, int]],
 ) -> CitationIntegrityValidation:
-    """Validate final display IDs before any report artifact can be created."""
+    """Validate exact assembled body slices, independently of appendix markers."""
 
     body_ids: set[str] = set()
     task_by_body_id: dict[str, str] = {}
@@ -175,8 +195,20 @@ def validate_final_citation_integrity(
             )
         )
 
-    final_markdown_ids = extract_inline_evidence_ids(final_markdown)
-    for evidence_id in sorted(body_ids - final_markdown_ids):
+    final_body_ids: set[str] = set()
+    previous_end = 0
+    for start, end in body_spans:
+        if not 0 <= previous_end <= start <= end <= len(final_markdown):
+            issues.append(
+                CitationIntegrityIssue(
+                    code="FINAL_BODY_SPANS_INVALID",
+                    description="最终 Markdown 正文边界无效。",
+                )
+            )
+            break
+        final_body_ids.update(extract_inline_evidence_ids(final_markdown[start:end]))
+        previous_end = end
+    for evidence_id in sorted(body_ids - final_body_ids):
         issues.append(
             CitationIntegrityIssue(
                 code="FINAL_MARKDOWN_CITATION_MISSING",
@@ -185,7 +217,10 @@ def validate_final_citation_integrity(
                 evidence_id=evidence_id,
             )
         )
-    for evidence_id in sorted(final_markdown_ids - body_ids):
+    # Retain the whole-report pollution check, but appendix markers cannot
+    # satisfy the separate requirement that citations survive in the body.
+    final_markdown_ids = extract_inline_evidence_ids(final_markdown)
+    for evidence_id in sorted((final_body_ids | final_markdown_ids) - body_ids):
         issues.append(
             CitationIntegrityIssue(
                 code="FINAL_MARKDOWN_CITATION_INTRODUCED",
