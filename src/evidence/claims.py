@@ -12,7 +12,7 @@ from .text_projection import semantic_evidence_excerpt
 
 
 _PARAGRAPH_BOUNDARY = re.compile(r"(?:\r?\n\s*){2,}")
-_ASCII_SENTENCE_END = r"\.(?=\s*(?:\[[^\]\r\n]+\]|[\u3400-\u9fff]|$))"
+_ASCII_SENTENCE_END = r"\.(?=\s+|\s*\[[^\]\r\n]+\]|$)"
 _SENTENCE = re.compile(
     rf".*?(?:[。！？!?]|{_ASCII_SENTENCE_END})(?:\s*\[[^\]]+\])*|.+$",
     re.DOTALL,

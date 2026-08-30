@@ -110,6 +110,28 @@ def test_ascii_period_after_acronym_or_unit_preserves_citation_adjacency(first_s
     assert derive_claims(text, citations)[0]["text"] == f"{first_sentence}[E1]"
 
 
+def test_ascii_period_whitespace_boundary_does_not_share_preceding_citation():
+    citations = [{"evidence_id": "E1", "title": "趋势", "supporting_text": "氢气影响熔指。"}]
+    text = "氢气影响熔指[E1]. MFR是密度档位的核心控制变量。"
+
+    assert find_uncited_material_claims(text) == [{
+        "text": "MFR是密度档位的核心控制变量。",
+        "claim_type": "factual",
+    }]
+    assert derive_claims(text, citations) == [{
+        "claim_id": "C1",
+        "text": "氢气影响熔指[E1].",
+        "claim_type": "factual",
+        "evidence_ids": ["E1"],
+        "evidence": [{
+            "evidence_id": "E1",
+            "title": "趋势",
+            "locator": "",
+            "semantic_evidence_excerpt": "氢气影响熔指。",
+        }],
+    }]
+
+
 @pytest.mark.parametrize("text", [
     "密度为 0.25 [E1]",
     "来源为 https://example.com [E1]",
