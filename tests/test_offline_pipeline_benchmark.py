@@ -30,6 +30,7 @@ from tests.benchmark_support import (
     SCENARIO_B_REPEATED_ADAPTIVE_RESPONSE,
     SCENARIO_B_TASK,
     VERIFIER_PASS_STATE,
+    measure_template_contributions,
     measure_serialized_messages,
     serialize_emitted_response,
     serialized_chars,
@@ -343,16 +344,43 @@ def _run_verifier_fixture(response_payload: dict[str, Any]):
     recorder = BenchmarkRecorder(
         SimpleNamespace(content=json.dumps(response_payload, ensure_ascii=False))
     )
+
+    def capture_verifier_prompt(model: Any, value: Any, **kwargs: Any) -> Any:
+        recorder.prompt_values = dict(value)
+        return model.invoke(value, **kwargs)
+
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
             verifier_module, "get_llm", lambda *args, **kwargs: recorder
         )
-        monkeypatch.setattr(verifier_module, "invoke_llm", _fake_invoke)
+        monkeypatch.setattr(verifier_module, "invoke_llm", capture_verifier_prompt)
         update = verifier_module.verifier(
             VERIFIER_PASS_STATE,
             {"configurable": {"use_llm": True}},
         )
     return recorder, update
+
+
+def _verifier_prompt_measurement_inputs(
+    values: dict[str, str],
+) -> tuple[str, dict[str, str], dict[str, tuple[str, ...]]]:
+    """Load the production template for the exact live Verifier input values."""
+
+    template_path = Path(verifier_module.__file__).parent.parent / "prompts" / "verifier.md"
+    template = template_path.read_text(encoding="utf-8")
+    groups = {
+        "task_contract": ("task_name", "task_requirements"),
+        "worker_result": ("worker_result",),
+        "claim_payload": ("claim_evidence_pairs",),
+        "worker_assets": ("worker_assets",),
+        "other_deterministic_context": (
+            "deterministic_checks",
+            "source_policy",
+            "synthesis_context",
+            "format_instructions",
+        ),
+    }
+    return template, values, groups
 
 
 def collect_verifier_pass_metrics() -> dict[str, int]:
@@ -361,6 +389,9 @@ def collect_verifier_pass_metrics() -> dict[str, int]:
     if os.environ.get("OFFLINE_VERIFIER_BENCHMARK_CHILD") == "1":
         recorder, update = _run_verifier_fixture(PASS_VERIFIER_RESPONSE)
         assert update["assessment"]["status"] == "PASS"
+        template, values, groups = _verifier_prompt_measurement_inputs(
+            recorder.prompt_values
+        )
         return {
             "serialized_prompt_chars": measure_serialized_messages(recorder.calls)[
                 "serialized_prompt_chars"
@@ -369,6 +400,7 @@ def collect_verifier_pass_metrics() -> dict[str, int]:
                 serialize_emitted_response(recorder.response)
             ),
             "semantic_llm_calls": len(recorder.calls),
+            **measure_template_contributions(template, values, groups),
         }
     command = (
         "import json; "
@@ -450,7 +482,9 @@ def test_verifier_pass_benchmark_records_exact_snapshot_comparison():
         "3ba9fd3eb3ad84b193f699e72e15bc40bea40446"
     )
     assert comparison["baseline"]["semantic_llm_calls"] == 1
-    assert comparison["optimized"] == current
+    assert comparison["optimized"] == {
+        key: current[key] for key in comparison["optimized"]
+    }
     assert comparison["optimized"]["serialized_prompt_chars"] < (
         comparison["baseline"]["serialized_prompt_chars"]
     )

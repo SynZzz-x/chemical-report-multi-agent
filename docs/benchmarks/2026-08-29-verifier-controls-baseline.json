@@ -1,0 +1,25 @@
+{
+  "baseline_commit": "e6a75177fe770b2f63303a1709b8877f564ec432",
+  "character_metrics_are_provider_tokens": false,
+  "offline_only": true,
+  "online_latency_remeasured": false,
+  "request_mapping": {
+    "expected_provider_field": "max_tokens",
+    "observed_budget_field_before_fix": "max_completion_tokens",
+    "reasoning_effort_configured": false,
+    "thinking_controlled": false
+  },
+  "requires_real_run": true,
+  "verifier_prompt_components": {
+    "base_instructions_chars": 2140,
+    "claim_payload_chars": 231,
+    "mock_completion_chars": 144,
+    "other_deterministic_context_chars": 352,
+    "semantic_llm_calls": 1,
+    "serialized_prompt_chars": 3353,
+    "task_contract_chars": 194,
+    "verifier_prompt_total_chars": 3184,
+    "worker_assets_chars": 243,
+    "worker_result_chars": 24
+  }
+}

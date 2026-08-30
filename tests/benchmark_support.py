@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import json
 from types import SimpleNamespace
@@ -38,6 +39,29 @@ def measure_serialized_messages(messages: Any) -> dict[str, int]:
     """Return character-proxy prompt measurements, never provider token counts."""
 
     return {"serialized_prompt_chars": serialized_chars(messages)}
+
+
+def measure_template_contributions(
+    template: str,
+    values: Mapping[str, str],
+    groups: Mapping[str, Sequence[str]],
+) -> dict[str, int]:
+    """Measure independent template-field contributions as characters."""
+
+    blank = {key: "" for key in values}
+    base_chars = len(template.format(**blank))
+    metrics = {"base_instructions_chars": base_chars}
+    for group_name, fields in groups.items():
+        isolated = dict(blank)
+        for field in fields:
+            isolated[field] = values[field]
+        metrics[f"{group_name}_chars"] = len(template.format(**isolated)) - base_chars
+    metrics["verifier_prompt_total_chars"] = len(template.format(**values))
+    component_total = sum(
+        value for key, value in metrics.items() if key != "verifier_prompt_total_chars"
+    )
+    assert component_total == metrics["verifier_prompt_total_chars"]
+    return metrics
 
 
 @dataclass

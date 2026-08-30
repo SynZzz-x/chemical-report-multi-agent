@@ -22,9 +22,19 @@ from src.nodes import intake as intake_module
 from src.nodes import planner as planner_module
 from src.nodes import verifier as verifier_module
 from src.nodes.worker.agent.graph import AutonomousToolNode
+from tests.measure_verifier_controls import run_verifier_control_probe
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_current_deepseek_request_mapping_is_measured_offline():
+    payload = run_verifier_control_probe({})
+
+    assert payload["max_completion_tokens"] == 1600
+    assert payload["max_tokens"] is None
+    assert payload["reasoning_effort"] is None
+    assert payload["thinking_present"] is False
 
 
 class StubRunnable:
