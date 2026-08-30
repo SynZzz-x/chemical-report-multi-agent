@@ -3,6 +3,35 @@
   "character_metrics_are_provider_tokens": false,
   "offline_only": true,
   "online_latency_remeasured": false,
+  "optimized": {
+    "online_latency_remeasured": false,
+    "online_latency_seconds": null,
+    "provider_tokens": null,
+    "request_mapping": {
+      "max_completion_tokens": null,
+      "max_tokens": 1600,
+      "model": "deepseek-v4-flash",
+      "reasoning_effort": null,
+      "thinking_present": false
+    },
+    "requires_real_run": true,
+    "semantic_catalog": {
+      "semantic_llm_calls": 1,
+      "serialized_e3_excerpt_count": 1
+    },
+    "verifier_prompt_components": {
+      "base_instructions_chars": 2147,
+      "claim_payload_chars": 208,
+      "mock_completion_chars": 144,
+      "other_deterministic_context_chars": 352,
+      "semantic_llm_calls": 1,
+      "serialized_prompt_chars": 3340,
+      "task_contract_chars": 194,
+      "verifier_prompt_total_chars": 3168,
+      "worker_assets_chars": 243,
+      "worker_result_chars": 24
+    }
+  },
   "request_mapping": {
     "expected_provider_field": "max_tokens",
     "observed_budget_field_before_fix": "max_completion_tokens",

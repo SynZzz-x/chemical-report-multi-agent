@@ -4,29 +4,32 @@ NEXT、DONE 等节点动作。
 
 # Input
 任务名称：{task_name}
-任务完整要求：
+任务要求：
 {task_requirements}
 
 Worker 正文：
 {worker_result}
 
-Worker 结构化资产：
+Worker 资产：
 {worker_assets}
 
-逐项论断及语义证据（判断证据是否支持论断的权威语义输入）：
-{claim_evidence_pairs}
+逐项论断及语义证据（权威输入；evidence_ids 引用目录）：
+{claims}
 
-程序确定性检查：
+证据目录（evidence_id 唯一映射）：
+{evidence_catalog}
+
+程序检查：
 {deterministic_checks}
 
-当前授权来源策略：
+来源策略：
 {source_policy}
 
-Synthesis 专用来源上下文（普通任务为空）：
+Synthesis 来源上下文（普通任务为空）：
 {synthesis_context}
 
 # Assessment
-状态只能是 `PASS`、`FAILED`、`BLOCKED`。issue category 只能是：
+状态仅为 `PASS`、`FAILED`、`BLOCKED`。issue category 仅为：
 
 - `CONTENT_DEFECT`：内容覆盖、专业逻辑、格式或资产质量问题；
 - `EVIDENCE_GAP`：关键论断缺少来源、引用或语义支持；
@@ -46,7 +49,7 @@ Worker 准确说明未检出关系、检索范围和来源边界且未把缺口�
 缺少必需证据应为 `EVIDENCE_GAP` 且 FAILED/BLOCKED。
 
 引用结构由程序判断；合法 `[E编号]` 只证明引用存在，绝不证明证据支持论断。逐项比较
-claim 与 evidence，并对语义问题使用以下 code（category 均为 `EVIDENCE_GAP`）：
+claim/evidence；语义问题 code（category 均为 `EVIDENCE_GAP`）：
 
 - `CLAIM_UNSUPPORTED`：证据讨论同一主题或对象，但不能推出核心断言；
 - `CLAIM_PARTIALLY_SUPPORTED`：复合论断有实质部分获支持，却增加未获支持的范围、机理、

@@ -28,13 +28,26 @@ from tests.measure_verifier_controls import run_verifier_control_probe
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_current_deepseek_request_mapping_is_measured_offline():
+def test_deepseek_request_uses_max_tokens_not_max_completion_tokens():
     payload = run_verifier_control_probe({})
 
-    assert payload["max_completion_tokens"] == 1600
-    assert payload["max_tokens"] is None
+    assert payload["max_tokens"] == 1600
+    assert payload["max_completion_tokens"] is None
     assert payload["reasoning_effort"] is None
     assert payload["thinking_present"] is False
+
+
+def test_verifier_reasoning_effort_reaches_actual_request():
+    payload = run_verifier_control_probe({"VERIFIER_REASONING_EFFORT": "low"})
+
+    assert payload["reasoning_effort"] == "low"
+    assert payload["max_tokens"] == 1600
+
+
+def test_default_verifier_model_remains_global_model():
+    payload = run_verifier_control_probe({"DEEPSEEK_MODEL": "deepseek-v4-flash"})
+
+    assert payload["model"] == "deepseek-v4-flash"
 
 
 class StubRunnable:
@@ -310,7 +323,7 @@ def test_completion_budget_reaches_bound_model_invocation():
         max_completion_tokens=budget,
     )
 
-    assert captured["bound"] == {"max_tokens": 1200}
+    assert captured["bound"] == {"extra_body": {"max_tokens": 1200}}
     assert captured["invoke"] == ("input", {})
 
 
@@ -364,7 +377,8 @@ def test_llm_factory_injects_purpose_budget(
         task_description=description,
     )
 
-    assert captured["max_tokens"] == expected
+    assert "max_tokens" not in captured
+    assert captured["extra_body"] == {"max_tokens": expected}
 
 
 def test_all_phase_one_llm_call_sites_use_the_observability_taxonomy():

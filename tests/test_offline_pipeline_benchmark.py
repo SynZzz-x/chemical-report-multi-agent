@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 import subprocess
 import sys
@@ -340,7 +341,9 @@ def collect_pipeline_metrics() -> dict[str, int]:
     return json.loads(metrics_line.removeprefix(marker))
 
 
-def _run_verifier_fixture(response_payload: dict[str, Any]):
+def _run_verifier_fixture(
+    response_payload: dict[str, Any], state: dict[str, Any] | None = None
+):
     recorder = BenchmarkRecorder(
         SimpleNamespace(content=json.dumps(response_payload, ensure_ascii=False))
     )
@@ -355,7 +358,7 @@ def _run_verifier_fixture(response_payload: dict[str, Any]):
         )
         monkeypatch.setattr(verifier_module, "invoke_llm", capture_verifier_prompt)
         update = verifier_module.verifier(
-            VERIFIER_PASS_STATE,
+            state or VERIFIER_PASS_STATE,
             {"configurable": {"use_llm": True}},
         )
     return recorder, update
@@ -371,7 +374,7 @@ def _verifier_prompt_measurement_inputs(
     groups = {
         "task_contract": ("task_name", "task_requirements"),
         "worker_result": ("worker_result",),
-        "claim_payload": ("claim_evidence_pairs",),
+        "claim_payload": ("claims", "evidence_catalog"),
         "worker_assets": ("worker_assets",),
         "other_deterministic_context": (
             "deterministic_checks",
@@ -420,6 +423,34 @@ def collect_verifier_pass_metrics() -> dict[str, int]:
         line for line in reversed(result.stdout.splitlines()) if line.startswith(marker)
     )
     return json.loads(metrics_line.removeprefix(marker))
+
+
+def collect_shared_e3_catalog_metrics() -> dict[str, int]:
+    """Measure catalog serialization for repeated references to one E3 excerpt."""
+
+    state = deepcopy(VERIFIER_PASS_STATE)
+    excerpt = "氢气用量影响熔融指数，温度变化也会改变产品指标。"
+    state["current_result"].update(
+        {
+            "text_output": "氢气影响熔指。[E3] 温度影响指标。[E3] 两者需要联合排查。[E3]",
+            "citations": [
+                {
+                    "evidence_id": "E3",
+                    "title": "聚乙烯质量控制手册",
+                    "locator": "section 3.2",
+                    "supporting_text": excerpt,
+                }
+            ],
+            "report_sources": ["聚乙烯质量控制手册"],
+        }
+    )
+    recorder, update = _run_verifier_fixture(PASS_VERIFIER_RESPONSE, state)
+    assert update["assessment"]["status"] == "PASS"
+    template, values, _ = _verifier_prompt_measurement_inputs(recorder.prompt_values)
+    return {
+        "semantic_llm_calls": len(recorder.calls),
+        "serialized_e3_excerpt_count": template.format(**values).count(excerpt),
+    }
 
 
 def test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call():
@@ -488,6 +519,43 @@ def test_verifier_pass_benchmark_records_exact_snapshot_comparison():
     assert comparison["optimized"]["serialized_prompt_chars"] < (
         comparison["baseline"]["serialized_prompt_chars"]
     )
+
+
+def test_optimized_verifier_controls_snapshot_preserves_frozen_baseline():
+    artifact_path = (
+        Path(__file__).parents[1]
+        / "docs/benchmarks/2026-08-29-verifier-controls-baseline.json"
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    optimized = artifact["optimized"]
+    baseline_components = artifact["verifier_prompt_components"]
+
+    assert optimized["verifier_prompt_components"] == collect_verifier_pass_metrics()
+    assert optimized["verifier_prompt_components"]["semantic_llm_calls"] == 1
+    assert optimized["semantic_catalog"] == collect_shared_e3_catalog_metrics()
+    assert optimized["semantic_catalog"]["serialized_e3_excerpt_count"] == 1
+    assert optimized["request_mapping"] == {
+        "model": "deepseek-v4-flash",
+        "max_tokens": 1600,
+        "max_completion_tokens": None,
+        "reasoning_effort": None,
+        "thinking_present": False,
+    }
+    assert optimized["provider_tokens"] is None
+    assert optimized["online_latency_seconds"] is None
+    assert optimized["online_latency_remeasured"] is False
+    assert optimized["requires_real_run"] is True
+    assert optimized["verifier_prompt_components"]["verifier_prompt_total_chars"] < (
+        baseline_components["verifier_prompt_total_chars"]
+    )
+    component_total = sum(
+        value
+        for key, value in optimized["verifier_prompt_components"].items()
+        if key not in {"verifier_prompt_total_chars", "serialized_prompt_chars", "mock_completion_chars", "semantic_llm_calls"}
+    )
+    assert component_total == optimized["verifier_prompt_components"][
+        "verifier_prompt_total_chars"
+    ]
 
 
 def test_worker_benchmark_fake_requires_completed_prefetch_inventory():

@@ -11,7 +11,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 
-from .config import get_llm_settings, missing_key_message
+from .config import get_app_config, get_llm_settings, missing_key_message
 
 
 logger = logging.getLogger("src.llm.observability")
@@ -60,6 +60,14 @@ def completion_budget(purpose: str, *, task_description: str | None = None) -> i
     return _PURPOSE_COMPLETION_BUDGETS.get(normalized, 2048)
 
 
+def _deepseek_extra_body(
+    existing: Mapping[str, Any] | None, *, max_tokens: int
+) -> dict[str, Any]:
+    """Keep DeepSeek completion budgets in its supported request body."""
+
+    return {**dict(existing or {}), "max_tokens": int(max_tokens)}
+
+
 def with_completion_budget(
     runnable: Any, purpose: str, *, task_description: str | None = None
 ) -> tuple[Any, int]:
@@ -72,7 +80,15 @@ def with_completion_budget(
         and _model_name(runnable) != "-"
         and not isinstance(getattr(runnable, "steps", None), (list, tuple))
     ):
-        return binder(max_tokens=budget), budget
+        existing_extra_body = getattr(runnable, "extra_body", None)
+        return (
+            binder(
+                extra_body=_deepseek_extra_body(
+                    existing_extra_body, max_tokens=budget
+                )
+            ),
+            budget,
+        )
     return runnable, budget
 
 
@@ -271,10 +287,18 @@ def get_llm(
     model_kwargs = {}
     if json_mode:
         model_kwargs["response_format"] = {"type": "json_object"}
+    budget = settings.pop("max_tokens", 2048)
     if purpose:
-        settings["max_tokens"] = completion_budget(
-            purpose, task_description=task_description
-        )
+        budget = completion_budget(purpose, task_description=task_description)
+    if purpose == "assessment":
+        verifier_settings = get_app_config()
+        if verifier_settings.verifier_model:
+            settings["model_name"] = verifier_settings.verifier_model
+        if verifier_settings.verifier_reasoning_effort:
+            settings["reasoning_effort"] = verifier_settings.verifier_reasoning_effort
+    settings["extra_body"] = _deepseek_extra_body(
+        settings.pop("extra_body", None), max_tokens=int(budget)
+    )
 
     return ChatOpenAI(
         api_key=api_key,

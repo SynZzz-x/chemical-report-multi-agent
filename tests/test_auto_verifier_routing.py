@@ -812,8 +812,10 @@ def test_verifier_receives_full_task_and_asset_context(monkeypatch):
     ]
     assert assets["tables"] == [{"title": "质量指标"}]
     assert "actual_length" in assets
-    claim_pairs = json.loads(captured["claim_evidence_pairs"])
-    assert claim_pairs[0]["evidence"][0]["semantic_evidence_excerpt"] == (
+    claims = json.loads(captured["claims"])
+    evidence_catalog = json.loads(captured["evidence_catalog"])
+    assert claims[0]["evidence_ids"] == ["E1"]
+    assert evidence_catalog["E1"]["semantic_evidence_excerpt"] == (
         "温度升高会提高熔融指数。"
     )
     assert "supporting_text" not in captured["worker_assets"]

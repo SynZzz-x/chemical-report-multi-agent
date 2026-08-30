@@ -27,7 +27,7 @@
     }
   },
   "optimized": {
-    "method": "The same fixed offline fixtures after claim grounding, Worker prefetch reuse, compact Verifier output, and Intake/Planner prompt compression. The current optimized measurement includes the required adjacent-citation grounding contract added to Worker prompts; serialized prompt characters increase from the prior 12201 snapshot to 13109. Prompt and full-response character counts are deterministic proxies, not provider tokens.",
+    "method": "The same fixed offline fixtures after claim grounding, Worker prefetch reuse, compact Verifier output, and Intake/Planner prompt compression. The current optimized measurement includes the required adjacent-citation grounding contract added to Worker prompts and the semantic evidence catalog; serialized prompt characters increase from the prior 12201 snapshot to 13121. Prompt and full-response character counts are deterministic proxies, not provider tokens.",
     "metrics": {
       "intake_llm_calls": 1,
       "planner_llm_calls": 1,
@@ -42,7 +42,7 @@
       "duplicate_retrieval_executions": 0,
       "failed_semantic_verifier_issues": 1,
       "total_llm_calls": 5,
-      "serialized_prompt_chars": 13109,
+      "serialized_prompt_chars": 13121,
       "mock_completion_chars": 1503
     },
     "offline_local_execution": {
@@ -64,7 +64,7 @@
       "semantic_llm_calls": 1
     },
     "optimized": {
-      "serialized_prompt_chars": 3353,
+      "serialized_prompt_chars": 3340,
       "mock_completion_chars": 144,
       "semantic_llm_calls": 1
     }

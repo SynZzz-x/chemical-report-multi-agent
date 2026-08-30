@@ -89,6 +89,8 @@ class AppConfig:
     deepseek_api_key: str | None = field(repr=False)
     deepseek_base_url: str
     deepseek_model: str
+    verifier_model: str | None
+    verifier_reasoning_effort: str | None
     length_rewrite_safety_ratio: float
     rag_settings: RAGSettings
     concept_graph_settings: ConceptGraphSettings
@@ -186,6 +188,15 @@ def _bool_from_env(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value.")
 
 
+def _optional_reasoning_effort_from_env(name: str) -> str | None:
+    value = str(get_env(name) or "").strip().lower()
+    if not value:
+        return None
+    if value not in {"low", "high", "max"}:
+        raise ValueError(f"{name} must be one of: low, high, max")
+    return value
+
+
 @lru_cache(maxsize=1)
 def get_app_config() -> AppConfig:
     """Load model-provider settings once for consistent process-wide access."""
@@ -225,6 +236,10 @@ def get_app_config() -> AppConfig:
         deepseek_model=(
             get_env("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
             or DEFAULT_DEEPSEEK_MODEL
+        ),
+        verifier_model=get_env("VERIFIER_MODEL"),
+        verifier_reasoning_effort=_optional_reasoning_effort_from_env(
+            "VERIFIER_REASONING_EFFORT"
         ),
         length_rewrite_safety_ratio=_bounded_ratio_from_env(
             "LENGTH_REWRITE_SAFETY_RATIO", DEFAULT_LENGTH_REWRITE_SAFETY_RATIO

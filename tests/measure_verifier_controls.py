@@ -20,7 +20,10 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI as RealChatOpenAI
 
 from src.llm import get_llm, with_completion_budget
-from tests.test_offline_pipeline_benchmark import collect_verifier_pass_metrics
+from tests.test_offline_pipeline_benchmark import (
+    collect_shared_e3_catalog_metrics,
+    collect_verifier_pass_metrics,
+)
 
 
 def capture_request(env: dict[str, str]) -> dict[str, object]:
@@ -101,32 +104,28 @@ def run_verifier_control_probe(env: dict[str, str]) -> dict[str, object]:
     return json.loads(line.removeprefix(marker))
 
 
-def _baseline_artifact() -> dict[str, object]:
+def _optimized_artifact() -> dict[str, object]:
     first = run_verifier_control_probe({})
     second = run_verifier_control_probe({})
     first_components = collect_verifier_pass_metrics()
     second_components = collect_verifier_pass_metrics()
+    first_catalog = collect_shared_e3_catalog_metrics()
+    second_catalog = collect_shared_e3_catalog_metrics()
     assert first == second
     assert first_components == second_components
-    assert first["max_completion_tokens"] == 1600
-    assert first["max_tokens"] is None
+    assert first_catalog == second_catalog
+    assert first["max_tokens"] == 1600
+    assert first["max_completion_tokens"] is None
     assert first["reasoning_effort"] is None
     assert first["thinking_present"] is False
     return {
-        "baseline_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip(),
-        "offline_only": True,
-        "character_metrics_are_provider_tokens": False,
+        "verifier_prompt_components": first_components,
+        "semantic_catalog": first_catalog,
+        "request_mapping": first,
+        "provider_tokens": None,
+        "online_latency_seconds": None,
         "online_latency_remeasured": False,
         "requires_real_run": True,
-        "verifier_prompt_components": first_components,
-        "request_mapping": {
-            "expected_provider_field": "max_tokens",
-            "observed_budget_field_before_fix": "max_completion_tokens",
-            "reasoning_effort_configured": False,
-            "thinking_controlled": False,
-        },
     }
 
 
@@ -145,12 +144,13 @@ def main() -> None:
     if args.output is None:
         parser.error("--output is required unless --capture is used")
 
-    artifact = _baseline_artifact()
+    artifact = json.loads(args.output.read_text(encoding="utf-8"))
+    artifact["optimized"] = _optimized_artifact()
     args.output.write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(artifact["request_mapping"], sort_keys=True))
+    print(json.dumps(artifact["optimized"]["request_mapping"], sort_keys=True))
 
 
 if __name__ == "__main__":

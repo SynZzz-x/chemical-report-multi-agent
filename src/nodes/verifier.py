@@ -14,7 +14,10 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
 from src.evidence.citations import extract_inline_evidence_ids
-from src.evidence.claims import derive_claims, find_uncited_material_claims
+from src.evidence.claims import (
+    build_semantic_claim_payload,
+    find_uncited_material_claims,
+)
 from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm, invoke_llm, with_completion_budget
 from src.evidence.projection import project_report_sources
@@ -216,9 +219,14 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             current_task = tasks[cursor] if 0 <= cursor < len(tasks) else {}
             content = current_result.get("content") or current_result.get("text_output") or ""
             citations = current_result.get("citations") or []
-            claim_evidence_pairs = json.dumps(
-                derive_claims(str(content), citations),
+            semantic_payload = build_semantic_claim_payload(str(content), citations)
+            claims = json.dumps(
+                semantic_payload["claims"], ensure_ascii=False, separators=(",", ":")
+            )
+            evidence_catalog = json.dumps(
+                semantic_payload["evidence_catalog"],
                 ensure_ascii=False,
+                separators=(",", ":"),
             )
             actual_length = count_report_length(str(content))
             length_target = parse_length_target(
@@ -270,7 +278,7 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                 "web_authorized": web_authorized,
                 "web_allowed": effective_web_allowed(current_task, web_authorized),
             }
-            model = get_llm(config, json_mode=True)
+            model = get_llm(config, json_mode=True, purpose="assessment")
             model, assessment_budget = with_completion_budget(model, "assessment")
             chain = ChatPromptTemplate.from_messages([("system", template)]) | model
             response = invoke_llm(
@@ -282,7 +290,8 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
                     ),
                     "worker_result": content,
                     "worker_assets": worker_assets,
-                    "claim_evidence_pairs": claim_evidence_pairs,
+                    "claims": claims,
+                    "evidence_catalog": evidence_catalog,
                     "deterministic_checks": json.dumps(
                         _deterministic_issues(state), ensure_ascii=False
                     ),

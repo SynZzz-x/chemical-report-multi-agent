@@ -264,3 +264,25 @@ def derive_claims(content: str, citations: Sequence[Mapping[str, Any]]) -> list[
             }
         )
     return claims
+
+
+def build_semantic_claim_payload(
+    content: str, citations: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Separate cited claim references from the semantic evidence catalog."""
+
+    claims = derive_claims(content, citations)
+    catalog: dict[str, dict[str, Any]] = {}
+    compact_claims: list[dict[str, Any]] = []
+    for claim in claims:
+        compact_claims.append(
+            {
+                "claim_id": claim["claim_id"],
+                "text": claim["text"],
+                "claim_type": claim["claim_type"],
+                "evidence_ids": list(claim["evidence_ids"]),
+            }
+        )
+        for evidence in claim["evidence"]:
+            catalog.setdefault(evidence["evidence_id"], dict(evidence))
+    return {"claims": compact_claims, "evidence_catalog": catalog}

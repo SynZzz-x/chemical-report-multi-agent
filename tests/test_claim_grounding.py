@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.evidence.claims import derive_claims, find_uncited_material_claims
+from src.evidence.claims import (
+    build_semantic_claim_payload,
+    derive_claims,
+    find_uncited_material_claims,
+)
 from src.evidence.text_projection import (
     normalize_evidence_text,
     presentation_evidence_excerpt,
@@ -250,7 +254,7 @@ def test_existing_e6_does_not_make_unsupported_claim_pass(claim, fake_verifier):
         "CLAIM_UNSUPPORTED",
         "CLAIM_EVIDENCE_MISMATCH",
     }
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
     assert claim in fake_verifier.calls[-1]
     assert E6_TREND_EVIDENCE["supporting_text"] in fake_verifier.calls[-1]
 
@@ -270,8 +274,8 @@ def test_supported_factual_claim_is_sent_as_a_claim_evidence_pair(fake_verifier)
     )
 
     assert result["assessment"]["status"] == "PASS"
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
-    assert '"claim_type": "factual"' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
+    assert '"claim_type":"factual"' in fake_verifier.calls[-1]
     assert citation["supporting_text"] in fake_verifier.calls[-1]
     assert all(
         code in fake_verifier.calls[-1]
@@ -282,6 +286,88 @@ def test_supported_factual_claim_is_sent_as_a_claim_evidence_pair(fake_verifier)
             "UNLABELED_INFERENCE",
         )
     )
+
+
+def test_semantic_payload_serializes_shared_evidence_once(fake_verifier):
+    evidence = {
+        "evidence_id": "E3",
+        "title": "聚乙烯质量控制手册",
+        "locator": "section 3.2",
+        "supporting_text": "氢气用量影响熔融指数，温度变化也会改变产品指标。",
+    }
+    content = "氢气影响熔指。[E3] 温度影响指标。[E3] 两者需要联合排查。[E3]"
+
+    result = fake_verifier.run(content, [evidence], _assessment())
+    prompt = fake_verifier.calls[-1]
+
+    assert result["assessment"]["status"] == "PASS"
+    assert prompt.count(evidence["supporting_text"]) == 1
+    assert prompt.count('"E3"') >= 4
+    assert len(fake_verifier.calls) == 1
+
+
+def test_semantic_catalog_prompt_uses_compact_json_without_changing_payload(
+    fake_verifier,
+):
+    evidence = {
+        "evidence_id": "E3",
+        "title": "聚乙烯质量控制手册",
+        "locator": "section 3.2",
+        "supporting_text": "氢气用量影响熔融指数，温度变化也会改变产品指标。",
+    }
+    content = "氢气影响熔指。[E3] 温度影响指标。[E3]"
+    payload = build_semantic_claim_payload(content, [evidence])
+    compact_claims = json.dumps(
+        payload["claims"], ensure_ascii=False, separators=(",", ":")
+    )
+    compact_catalog = json.dumps(
+        payload["evidence_catalog"], ensure_ascii=False, separators=(",", ":")
+    )
+
+    result = fake_verifier.run(content, [evidence], _assessment())
+    prompt = fake_verifier.calls[-1]
+
+    assert result["assessment"]["status"] == "PASS"
+    assert json.loads(compact_claims) == payload["claims"]
+    assert json.loads(compact_catalog) == payload["evidence_catalog"]
+    assert len(compact_claims) < len(json.dumps(payload["claims"], ensure_ascii=False))
+    assert len(compact_catalog) < len(
+        json.dumps(payload["evidence_catalog"], ensure_ascii=False)
+    )
+    assert compact_claims in prompt
+    assert compact_catalog in prompt
+
+
+def test_catalog_preserves_late_e3_and_e6_support(fake_verifier):
+    e3_support = "氢气用量的变化会影响熔融指数。"
+    e6_support = "反应温度变化会改变产品指标。"
+    citations = [
+        {
+            "evidence_id": "E3",
+            "title": "质量控制手册",
+            "locator": "3.2",
+            "supporting_text": "背景" * 2000 + e3_support,
+        },
+        {
+            "evidence_id": "E6",
+            "title": "工艺操作手册",
+            "locator": "4.1",
+            "supporting_text": "背景" * 2000 + e6_support,
+        },
+    ]
+
+    result = fake_verifier.run(
+        "氢气影响熔融指数。[E3] 温度影响产品指标。[E6]",
+        citations,
+        _assessment(),
+    )
+    prompt = fake_verifier.calls[-1]
+
+    assert result["assessment"]["status"] == "PASS"
+    assert e3_support in prompt
+    assert e6_support in prompt
+    assert prompt.count(semantic_evidence_excerpt(citations[0])) == 1
+    assert prompt.count(semantic_evidence_excerpt(citations[1])) == 1
 
 
 def test_explicit_inference_is_labeled_in_the_semantic_prompt(fake_verifier):
@@ -299,8 +385,8 @@ def test_explicit_inference_is_labeled_in_the_semantic_prompt(fake_verifier):
     )
 
     assert result["assessment"]["status"] == "PASS"
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
-    assert '"claim_type": "inference"' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
+    assert '"claim_type":"inference"' in fake_verifier.calls[-1]
 
 
 def test_factual_looking_derived_conclusion_preserves_unlabeled_inference_code(
@@ -321,7 +407,7 @@ def test_factual_looking_derived_conclusion_preserves_unlabeled_inference_code(
 
     assert result["assessment"]["issues"][0]["code"] == "UNLABELED_INFERENCE"
     assert result["assessment"]["issues"][0]["category"] == "EVIDENCE_GAP"
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
 
 
 def test_evidence_gap_disclosure_without_citation_reaches_semantic_prompt(
@@ -332,9 +418,9 @@ def test_evidence_gap_disclosure_without_citation_reaches_semantic_prompt(
     result = fake_verifier.run(disclosure, [], _assessment())
 
     assert result["assessment"]["status"] == "PASS"
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
-    assert '"claim_type": "evidence_gap"' in fake_verifier.calls[-1]
-    assert '"evidence_ids": []' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
+    assert '"claim_type":"evidence_gap"' in fake_verifier.calls[-1]
+    assert '"evidence_ids":[]' in fake_verifier.calls[-1]
 
 
 def test_temperature_mechanism_can_remain_partially_supported(fake_verifier):
@@ -355,7 +441,7 @@ def test_temperature_mechanism_can_remain_partially_supported(fake_verifier):
         "CLAIM_PARTIALLY_SUPPORTED"
     )
     assert result["assessment"]["issues"][0]["category"] == "EVIDENCE_GAP"
-    assert '"claim_id": "C1"' in fake_verifier.calls[-1]
+    assert '"claim_id":"C1"' in fake_verifier.calls[-1]
 
 
 def test_invented_identity_preflight_makes_zero_semantic_model_calls(
@@ -363,7 +449,7 @@ def test_invented_identity_preflight_makes_zero_semantic_model_calls(
 ):
     monkeypatch.setattr(
         auto_verifier_module,
-        "derive_claims",
+        "build_semantic_claim_payload",
         lambda *_args, **_kwargs: pytest.fail(
             "citation identity preflight must run before claim derivation"
         ),
@@ -391,7 +477,7 @@ def test_malformed_citation_identity_preflight_fails_without_semantic_call(
 ):
     monkeypatch.setattr(
         auto_verifier_module,
-        "derive_claims",
+        "build_semantic_claim_payload",
         lambda *_args, **_kwargs: pytest.fail(
             "malformed citation preflight must run before claim derivation"
         ),
@@ -437,7 +523,7 @@ def test_e_prefixed_tokens_with_digits_are_malformed_citation_intent(
 ):
     monkeypatch.setattr(
         auto_verifier_module,
-        "derive_claims",
+        "build_semantic_claim_payload",
         lambda *_args, **_kwargs: pytest.fail(
             "malformed digit-bearing evidence token must fail in preflight"
         ),
