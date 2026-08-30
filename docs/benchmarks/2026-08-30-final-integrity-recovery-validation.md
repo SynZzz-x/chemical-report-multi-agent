@@ -99,11 +99,16 @@ The verifier-only compact-JSON comparison uses the same frozen single-claim fixt
 | Serialized prompt characters | 3353 | 3340 | -13 characters |
 | Template prompt characters | 3184 | 3168 | -16 characters |
 | Semantic LLM calls | 1 | 1 | unchanged |
+
+The separate semantic-catalog deduplication comparison uses its repeated-evidence fixture:
+
+| Metric | Before dedupe | Current optimized | Difference |
+| --- | ---: | ---: | ---: |
 | Serialized shared E3 excerpt occurrences | 3 | 1 | -2 |
 
-The 13-character serialized reduction is a minor serialization/label-encoding effect, not an additional model-call reduction. The semantic evidence catalog still emits one shared E3 excerpt, and the output schema remains the existing five-field PASS shape. `test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call`, `test_verifier_pass_benchmark_records_exact_snapshot_comparison`, `test_optimized_verifier_controls_snapshot_preserves_frozen_baseline`, and `test_catalog_preserves_late_e3_and_e6_support` provide the regression evidence.
+The 13-character serialized reduction is a minor serialization/label-encoding effect, not an additional model-call reduction. The semantic catalog comparison also remains one semantic call and emits one shared E3 excerpt; the output schema remains the existing five-field PASS shape. `test_compact_verifier_pass_and_failed_outputs_keep_one_semantic_call`, `test_verifier_pass_benchmark_records_exact_snapshot_comparison`, `test_optimized_verifier_controls_snapshot_preserves_frozen_baseline`, and `test_catalog_preserves_late_e3_and_e6_support` provide the regression evidence.
 
-Do not blend the measurements: the full-pipeline artifact compares a real 7-call baseline run with a fixed offline 6-call fixture, while the verifier-only artifact compares a one-call baseline fixture with a one-call optimized fixture. The fixed offline pipeline fixture separately records 6 total LLM calls before versus 5 after, 3 versus 2 Worker calls/generations/loop iterations, and 1 versus 0 duplicate query requests/guard rejections. Those are deterministic offline fixture values, not a re-run of the real online path.
+There is no cross-lane comparison. The historical real online reference run reported 7 calls and is context only; the full-pipeline 6→5 total-call comparison uses fixed offline fixtures on both sides (3→2 Worker calls/generations/loop iterations and 1→0 duplicate query requests/guard rejections). The verifier-only artifact separately compares a one-call baseline fixture with a one-call optimized fixture. None of these offline fixture values is a re-run of the real online path.
 
 Frozen online reference values remain `provider_total_tokens=42961`, `verifier_provider_tokens=17717`, `llm_latency_seconds=172.2`, and `verifier_latency_seconds=84.7`. The optimized provider token and online latency fields are null, `online_latency_remeasured=false`, and `requires_real_run=true`. No provider-token or online-latency gain is claimed from mocks or character counts; real-run validation is still required.
 
@@ -111,11 +116,11 @@ Frozen online reference values remain `provider_total_tokens=42961`, `verifier_p
 
 `format_grouped_evidence_appendix()` now emits grouped evidence blocks rather than a narrow four-column table. The Task 7 long-evidence PDF fixture was rendered and inspected by the root agent with Poppler: full-width blocks, readable Chinese glyphs, no overlap/clipping, and no narrow columns. Existing pagination may split long entries; PDF/DOCX renderer implementations were not changed. The focused renderer suite passes 15 tests.
 
-Remaining risks are limited to real-provider behavior and renderer pagination on unusually long evidence entries. Python 3.14 direct real-wrapper probing emits the known Pydantic-v1 dependency warning; no dependency change is in scope.
+Remaining risks include real-provider behavior, the intentionally conservative uncited-material detector (it is not an exhaustive prose extractor), and renderer pagination on unusually long evidence entries. Python 3.14 direct real-wrapper probing emits the known Pydantic-v1 dependency warning; no dependency change is in scope.
 
 ## Changed files and commits
 
-Before adding the Task 8 reports, the requested production-baseline range (`cebebea8...` to `6b38d8f`) was 31 files, 4,324 insertions and 145 deletions. Task 8 adds exactly these two validation artifacts; the final range therefore contains 33 files (the two report files are documentation/test evidence only). The pre-existing archive is preserved in the original checkout at `/Users/synzzz/Documents/work_space/agent/agent-master/agent-master-clean-20260828.zip`; it is not a branch change.
+Before adding the Task 8 validation report, the requested production-baseline range (`cebebea8...` to `6b38d8f`) was 31 files, 4,324 insertions and 145 deletions. Task 8 adds one tracked validation artifact; the final range therefore contains 32 files. The companion `.superpowers/sdd/task-8-report.md` remains a local ignored scratch report and is intentionally not tracked. The pre-existing archive is preserved in the original checkout at `/Users/synzzz/Documents/work_space/agent/agent-master/agent-master-clean-20260828.zip`; it is not a branch change.
 
 The branch commits, in order, are:
 
