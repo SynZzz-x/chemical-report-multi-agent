@@ -8,18 +8,20 @@ Baseline production commit: `cebebea8fc38a5c7d9abff8512c9dee6d1d8d8cb`
 
 Branch start: `1e7ef1b5a1084f84c769661c8546c2d8d252d0e3`
 
-Initial Task 8 verification base: `6b38d8f` (`report: simplify evidence appendix projection`). Final-review correction base: `afdf678` (`docs: clarify final verification evidence`).
+Initial Task 8 verification base: `6b38d8f` (`report: simplify evidence appendix projection`). Initial final-review correction base: `afdf678` (`docs: clarify final verification evidence`). Follow-up correction base: `7409410` (`fix: preserve citation bindings through final assembly`).
 
 ## Final-review correction verification
 
 The four final-review findings were reproduced before production edits: the citation-integrity and Summarizer suites reported **11 failed, 51 passed**. Corrections now preserve inherited binding scope, check current per-section visible IDs before remapping, allocate collision-free unused report IDs without dropping raw records, and validate actual body slices from the single assembled Markdown independently of the appendix. Both removed unused-E2 fixtures have been restored.
 
+Re-review resolved those four findings but exposed one remaining raw-marker alias: body `已绑定结论 [E8]。未知结论 [E1]。` with only visible citation E8 could pass after E8 was allocated display E1. Six follow-up regressions first failed (**6 failed, 74 deselected in 10.66s**), covering all three body-field aliases, another section's E1 binding, and no-normalization/no-path/no-artifact delivery checks. Preflight now reuses `_section_body()` and the current section's visible citation IDs to emit `LOCAL_CITATION_BINDING_MISSING` for every unbound raw body marker. Origin and canonical-conflict checks remain unchanged; the allocator, assembly, and metadata contract are untouched by this follow-up.
+
 Fresh offline verification on 2026-08-31 used `/Users/synzzz/Documents/work_space/agent/agent-master/.venv/bin/python`:
 
 | Command | Result |
 | --- | --- |
-| `.../.venv/bin/python -m pytest -q tests/test_citation_integrity.py tests/test_report_evidence_integration.py tests/test_summarizer_deterministic.py tests/test_synthesis.py tests/test_evidence_pipeline.py tests/test_report_renderers.py` | **120 passed in 10.25s** |
-| `.../.venv/bin/python -m pytest -q` | **935 passed in 26.86s** |
+| `.../.venv/bin/python -m pytest -q tests/test_citation_integrity.py tests/test_report_evidence_integration.py tests/test_summarizer_deterministic.py tests/test_synthesis.py tests/test_evidence_pipeline.py tests/test_report_renderers.py` | **126 passed in 10.69s** |
+| `.../.venv/bin/python -m pytest -q` | **941 passed in 27.68s** |
 | `.../.venv/bin/python -m compileall -q src app.py run.py` | exit 0, silent |
 | `git diff --check` | exit 0, silent |
 | `git diff --exit-code cebebea8fc38a5c7d9abff8512c9dee6d1d8d8cb -- src/state.py src/persistence.py src/job_store.py src/graph.py` | exit 0, silent |
@@ -60,6 +62,7 @@ Each invariant has a passing regression and an exact authority function:
 | --- | --- | --- |
 | Local and global E-IDs cannot alias | `canonical_citation_identity()`, `citation_binding_key()`, `evidence_key()`, `validate_pre_remap_citation_integrity()`, `normalize_sections_evidence()`, and `validate_final_citation_integrity()` in `src/evidence/identity.py` and `src/evidence/integrity.py` | `test_pre_remap_scopes_same_local_id_by_task`, `test_normalized_synthesis_is_delivered_with_original_citation_scopes`, `test_visible_id_conflict_blocks_before_remap_and_delivery`, `test_unused_raw_ids_do_not_alias_allocated_display_ids_or_mutate_sources` |
 | Lossless registry reaches both validation phases | `validate_pre_remap_citation_integrity()` → `normalize_sections_evidence()` → `project_lossless_used_citations()` → `validate_final_citation_integrity()` | `test_pre_remap_rejects_same_task_local_id_with_two_identities`, `test_lossless_projection_retains_conflicting_entries`, `test_final_gate_rejects_registry_id_unused_by_body` |
+| Unknown raw body markers cannot acquire a binding from remapping or another section | `_section_body()` and current-section visible IDs in `validate_pre_remap_citation_integrity()` | `test_pre_remap_rejects_unknown_raw_marker_before_used_id_collision`, `test_pre_remap_rejects_unknown_raw_marker_despite_other_section_binding`, `test_unknown_raw_marker_blocks_before_normalization_paths_and_artifacts` |
 | Raw provenance is not mutated | `normalize_evidence_text()` and copy-based `normalize_sections_evidence()` / appendix projection | `test_text_projection_normalizes_noise_without_mutating_source_object`, `test_appendix_dedupes_only_exact_identity_without_mutation` |
 | Issue permutations choose the identical action and selected code | `_profile_assessment()` and `_set_decision()` in `src/recovery/policy.py` | `test_multi_issue_policy_is_order_independent` |
 | Degradable issues cannot absorb non-degradable issues | `_profile_assessment()`, `_can_commit_with_warning()`, `_commit_degraded_result()`, and `NON_DEGRADABLE_ISSUE_CODES` | `test_mixed_gap_and_semantic_issue_never_commits_warning`, `test_shared_warning_gate_rejects_semantic_issue_and_allows_waivable_gaps`, `test_shared_warning_gate_rejects_blocker_verifier_and_fatal_profiles` |
@@ -77,7 +80,7 @@ The initial Task 8 checklist missed four concrete defects; its green tests were 
 The final citation flow is invocation-local and lossless:
 
 1. `_ordered_sections()` selects admitted sections.
-2. `validate_pre_remap_citation_integrity()` checks all raw records, including unused ones, by the shared `citation_binding_key()` authority in their original inherited scope, and separately checks each current section's visible-ID canonical identities before remapping.
+2. `validate_pre_remap_citation_integrity()` checks all raw records, including unused ones, by the shared `citation_binding_key()` authority in their original inherited scope, separately checks each current section's visible-ID canonical identities, and requires every raw body marker to have a current-section visible binding before remapping. A binding in another section or an inherited local-ID field cannot satisfy this raw-body requirement.
 3. `normalize_sections_evidence()` deep-copies sections, assigns display IDs from task-scoped binding keys, coalesces only same-visible canonical duplicate aliases, and rewrites report-only fields. Unused records remain intact with deterministic noncolliding IDs; the public display map still describes used bindings.
 4. `_assemble_markdown()` creates one plain-string report projection and records body offsets in a local output list. No heading-name inference, reassembly, report markers, or persistent metadata are used. `project_lossless_used_citations()` retains every normalized citation record referenced by a body marker, including conflicting entries rather than overwriting by ID.
 5. `validate_final_citation_integrity()` slices the exact final Markdown at those offsets and independently checks actual final-body IDs, normalized-body IDs, lossless registry IDs, whole-Markdown pollution, remap aliases, identity conflicts, missing bindings, and unused bindings. Appendix IDs cannot satisfy the body-preservation check.
@@ -166,6 +169,7 @@ e6a7517 verifier: split ASCII claim boundaries
 6b38d8f report: simplify evidence appendix projection
 5249d95 report: record final integrity verification
 afdf678 docs: clarify final verification evidence
+7409410 fix: preserve citation bindings through final assembly
 ```
 
 The bounded citation-correction commit contains the current verification update; its independent final re-review is owned by the root agent.

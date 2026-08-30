@@ -37,6 +37,7 @@ def validate_pre_remap_citation_integrity(
     identities_by_key: dict[str, set[str]] = defaultdict(set)
     key_locations: dict[str, tuple[str, str]] = {}
     conflicts: set[tuple[str, str]] = set()
+    missing_bindings: set[tuple[str, str]] = set()
     for section in sections:
         if not isinstance(section, Mapping):
             continue
@@ -62,6 +63,11 @@ def validate_pre_remap_citation_integrity(
             for visible_id, identities in visible_identities.items()
             if len(identities) > 1
         )
+        missing_bindings.update(
+            (task_id, evidence_id)
+            for evidence_id in extract_inline_evidence_ids(_section_body(section))
+            - visible_identities.keys()
+        )
     conflicts.update(
         key_locations[key]
         for key, identities in identities_by_key.items()
@@ -76,6 +82,14 @@ def validate_pre_remap_citation_integrity(
             evidence_id=evidence_id,
         )
         for task_id, evidence_id in sorted(conflicts)
+    ) + tuple(
+        CitationIntegrityIssue(
+            code="LOCAL_CITATION_BINDING_MISSING",
+            description="原始正文证据编号在当前章节没有可见证据绑定。",
+            task_id=task_id,
+            evidence_id=evidence_id,
+        )
+        for task_id, evidence_id in sorted(missing_bindings)
     )
     return CitationIntegrityValidation(issues=issues)
 

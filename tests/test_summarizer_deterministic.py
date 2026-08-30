@@ -270,6 +270,51 @@ def test_visible_id_conflict_blocks_before_remap_and_delivery(monkeypatch, tmp_p
     assert not (tmp_path / "report").exists()
 
 
+@pytest.mark.parametrize("with_prior_section", [False, True])
+def test_unknown_raw_marker_blocks_before_normalization_paths_and_artifacts(
+    monkeypatch, tmp_path, with_prior_section
+):
+    state = _state(statuses={"T1": _status("VERIFIED_PASS")}, results=[{
+        "task_id": "T1",
+        "text_output": "已绑定结论 [E8]。未知结论 [E1]。",
+        "plan_revision": 1,
+        "task_revision": 1,
+        "citations": [{"evidence_id": "E8", "file_path": "/docs/a.docx",
+                       "supporting_text": "已绑定结论。"}],
+    }])
+    state["tasks"] = state["tasks"][:1]
+    if with_prior_section:
+        state["tasks"].insert(0, _task("T0", "前节"))
+        state["section_status"]["T0"] = _status("VERIFIED_PASS")
+        state["results"].insert(0, {
+            "task_id": "T0", "text_output": "前节结论 [E1]。",
+            "plan_revision": 1, "task_revision": 1,
+            "citations": [{"evidence_id": "E1", "file_path": "/docs/previous.docx",
+                           "supporting_text": "前节结论。"}],
+        })
+    calls = []
+    original_normalize = summarizer_v2.normalize_sections_evidence
+
+    def record_normalize(sections):
+        calls.append("normalize")
+        return original_normalize(sections)
+
+    monkeypatch.setattr(summarizer_v2, "normalize_sections_evidence", record_normalize)
+    _install_render_stubs(monkeypatch, tmp_path)
+    monkeypatch.setattr(summarizer_v2, "get_session_cache_dir", lambda *_args: (
+        calls.append("paths") or str(tmp_path)
+    ))
+
+    result = summarizer_v2.summarizer(state, {})["final_result"]
+
+    assert result["report_status"] == "BLOCKED"
+    assert result["attachments"] == []
+    assert result["path"] is None
+    assert "LOCAL_CITATION_BINDING_MISSING" in result["blocking_sections"][0]["issues"][0]["description"]
+    assert calls == []
+    assert not (tmp_path / "report").exists()
+
+
 def test_lost_body_marker_cannot_be_masked_by_surviving_appendix(monkeypatch, tmp_path):
     state = _state(statuses={"T1": _status("VERIFIED_PASS")}, results=[{
         "task_id": "T1", "text_output": "正文 [E1]。", "plan_revision": 1, "task_revision": 1,

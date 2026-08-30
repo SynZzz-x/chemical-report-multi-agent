@@ -123,6 +123,38 @@ def test_pre_remap_scopes_same_local_id_by_task():
     assert validate_pre_remap_citation_integrity(sections).is_valid is True
 
 
+@pytest.mark.parametrize("body_field", ["text", "content", "text_output"])
+def test_pre_remap_rejects_unknown_raw_marker_before_used_id_collision(body_field):
+    sections = [{
+        "task_id": "T1",
+        body_field: "已绑定结论 [E8]。未知结论 [E1]。",
+        "citations": [citation("/docs/a.docx", evidence_id="E8")],
+    }]
+
+    result = validate_pre_remap_citation_integrity(sections)
+
+    assert not result.is_valid
+    assert [(issue.code, issue.task_id, issue.evidence_id) for issue in result.issues] == [
+        ("LOCAL_CITATION_BINDING_MISSING", "T1", "E1")
+    ]
+
+
+def test_pre_remap_rejects_unknown_raw_marker_despite_other_section_binding():
+    sections = [
+        {"task_id": "T0", "text": "前节结论 [E1]。",
+         "citations": [citation("/docs/previous.docx", evidence_id="E1")]},
+        {"task_id": "T1", "text": "已绑定结论 [E8]。未知结论 [E1]。",
+         "citations": [citation("/docs/a.docx", evidence_id="E8")]},
+    ]
+
+    result = validate_pre_remap_citation_integrity(sections)
+
+    assert not result.is_valid
+    assert [(issue.code, issue.task_id, issue.evidence_id) for issue in result.issues] == [
+        ("LOCAL_CITATION_BINDING_MISSING", "T1", "E1")
+    ]
+
+
 def test_pre_remap_preserves_original_scope_of_inherited_bindings():
     raw = [
         {"task_id": task_id, "text": "正文 [E8]。", "citations": [citation(path)]}
