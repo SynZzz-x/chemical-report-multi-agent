@@ -50,6 +50,58 @@ def test_default_verifier_model_remains_global_model():
     assert payload["model"] == "deepseek-v4-flash"
 
 
+def test_assessment_budget_preserves_bound_extra_body_fields():
+    payload = run_verifier_control_probe(
+        {}, bound_kwargs={"extra_body": {"bound_flag": "retained"}}
+    )
+
+    assert payload["bound_flag"] == "retained"
+    assert payload["max_tokens"] == 1600
+    assert payload["max_completion_tokens"] is None
+
+
+def test_assessment_budget_replaces_stale_bound_budget_aliases():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "offline_probe",
+                "description": "offline only",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                    "required": [],
+                },
+            },
+        }
+    ]
+    payload = run_verifier_control_probe(
+        {},
+        bound_kwargs={
+            "extra_body": {"bound_flag": "retained", "max_completion_tokens": 2048},
+            "max_tokens": 2048,
+            "max_completion_tokens": 2048,
+            "tool_choice": "none",
+            "tools": tools,
+        },
+    )
+
+    assert payload["bound_flag"] == "retained"
+    assert payload["tool_choice"] == "none"
+    assert payload["tools"] == tools
+    assert payload["max_tokens"] == 1600
+    assert payload["max_completion_tokens"] is None
+
+
+def test_assessment_constructor_budget_uses_only_max_tokens():
+    payload = run_verifier_control_probe({}, apply_completion_budget=False)
+
+    assert payload["max_tokens"] == 1600
+    assert payload["max_completion_tokens"] is None
+
+
 class StubRunnable:
     model_name = "deepseek-chat"
 

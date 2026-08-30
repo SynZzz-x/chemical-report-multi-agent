@@ -26,7 +26,12 @@ from tests.test_offline_pipeline_benchmark import (
 )
 
 
-def capture_request(env: dict[str, str]) -> dict[str, object]:
+def capture_request(
+    env: dict[str, str],
+    *,
+    bound_kwargs: dict[str, object] | None = None,
+    apply_completion_budget: bool = True,
+) -> dict[str, object]:
     captured: dict[str, object] = {}
     probe_env = {
         "DEEPSEEK_API_KEY": "offline-test-key",
@@ -65,25 +70,47 @@ def capture_request(env: dict[str, str]) -> dict[str, object]:
         "src.llm.ChatOpenAI", functools.partial(RealChatOpenAI, http_client=client)
     ):
         model = get_llm({}, json_mode=True, purpose="assessment")
-        runnable, _ = with_completion_budget(model, "assessment")
+        runnable = model.bind(**bound_kwargs) if bound_kwargs else model
+        if apply_completion_budget:
+            runnable, _ = with_completion_budget(runnable, "assessment")
         runnable.invoke([HumanMessage(content="offline verifier probe")])
     return captured
 
 
-def _request_fields(payload: dict[str, object]) -> dict[str, object]:
-    return {
+def _request_fields(
+    payload: dict[str, object], *, include_bound_fields: bool = False
+) -> dict[str, object]:
+    fields = {
         "model": payload.get("model"),
         "max_tokens": payload.get("max_tokens"),
         "max_completion_tokens": payload.get("max_completion_tokens"),
         "reasoning_effort": payload.get("reasoning_effort"),
         "thinking_present": "thinking" in payload,
     }
+    if include_bound_fields:
+        fields.update(
+            {
+                "bound_flag": payload.get("bound_flag"),
+                "tool_choice": payload.get("tool_choice"),
+                "tools": payload.get("tools"),
+            }
+        )
+    return fields
 
 
-def run_verifier_control_probe(env: dict[str, str]) -> dict[str, object]:
+def run_verifier_control_probe(
+    env: dict[str, str],
+    *,
+    bound_kwargs: dict[str, object] | None = None,
+    apply_completion_budget: bool = True,
+) -> dict[str, object]:
     """Run the installed wrapper in a child process outside pytest's stubs."""
 
     command = [sys.executable, str(Path(__file__).resolve()), "--capture"]
+    if bound_kwargs:
+        command.extend(["--bound-json", json.dumps(bound_kwargs)])
+    if not apply_completion_budget:
+        command.append("--skip-completion-budget")
     safe_environment = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONUTF8": "1",
@@ -132,13 +159,26 @@ def _optimized_artifact() -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", action="store_true")
+    parser.add_argument("--bound-json")
+    parser.add_argument("--skip-completion-budget", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     if args.capture:
+        bound_kwargs = json.loads(args.bound_json) if args.bound_json else None
         print(
             "__OFFLINE_VERIFIER_CONTROL_CAPTURE__"
-            + json.dumps(_request_fields(capture_request({})), sort_keys=True)
+            + json.dumps(
+                _request_fields(
+                    capture_request(
+                        {},
+                        bound_kwargs=bound_kwargs,
+                        apply_completion_budget=not args.skip_completion_budget,
+                    ),
+                    include_bound_fields=bound_kwargs is not None,
+                ),
+                sort_keys=True,
+            )
         )
         return
     if args.output is None:

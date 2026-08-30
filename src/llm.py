@@ -32,6 +32,9 @@ _PURPOSE_COMPLETION_BUDGETS = {
     "chart_description_fallback": 800,
     "table_description": 800,
 }
+_BUDGET_PARAMETER_NAMES = frozenset(
+    {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+)
 
 
 def _maximum_length(description: str | None) -> int | None:
@@ -65,7 +68,46 @@ def _deepseek_extra_body(
 ) -> dict[str, Any]:
     """Keep DeepSeek completion budgets in its supported request body."""
 
-    return {**dict(existing or {}), "max_tokens": int(max_tokens)}
+    return {
+        **{
+            key: value
+            for key, value in dict(existing or {}).items()
+            if key not in _BUDGET_PARAMETER_NAMES
+        },
+        "max_tokens": int(max_tokens),
+    }
+
+
+def _split_bound_request_options(
+    runnable: Any,
+) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    """Return an unbound model plus effective request and config options."""
+
+    layers: list[Any] = []
+    base = runnable
+    while (
+        isinstance(getattr(base, "kwargs", None), Mapping)
+        and getattr(base, "bound", None) is not None
+    ):
+        layers.append(base)
+        base = base.bound
+
+    request_options: dict[str, Any] = {}
+    extra_body = dict(getattr(base, "extra_body", None) or {})
+    config: dict[str, Any] = {}
+    for layer in reversed(layers):
+        layer_options = dict(layer.kwargs)
+        extra_body.update(dict(layer_options.pop("extra_body", None) or {}))
+        request_options.update(
+            {
+                key: value
+                for key, value in layer_options.items()
+                if key not in _BUDGET_PARAMETER_NAMES
+            }
+        )
+        config.update(dict(getattr(layer, "config", None) or {}))
+    request_options["extra_body"] = extra_body
+    return base, request_options, config
 
 
 def with_completion_budget(
@@ -80,15 +122,14 @@ def with_completion_budget(
         and _model_name(runnable) != "-"
         and not isinstance(getattr(runnable, "steps", None), (list, tuple))
     ):
-        existing_extra_body = getattr(runnable, "extra_body", None)
-        return (
-            binder(
-                extra_body=_deepseek_extra_body(
-                    existing_extra_body, max_tokens=budget
-                )
-            ),
-            budget,
+        base, request_options, config = _split_bound_request_options(runnable)
+        request_options["extra_body"] = _deepseek_extra_body(
+            _mapping(request_options.get("extra_body")), max_tokens=budget
         )
+        bounded = base.bind(**request_options)
+        if config:
+            bounded = bounded.with_config(config)
+        return bounded, budget
     return runnable, budget
 
 
