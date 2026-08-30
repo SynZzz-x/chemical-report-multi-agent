@@ -12,7 +12,11 @@ from .text_projection import semantic_evidence_excerpt
 
 
 _PARAGRAPH_BOUNDARY = re.compile(r"(?:\r?\n\s*){2,}")
-_SENTENCE = re.compile(r".*?[。！？!?](?:\s*\[[^\]]+\])*|.+$", re.DOTALL)
+_ASCII_CJK_SENTENCE_END = r"(?<=[\u3400-\u9fff])\.(?=\s*(?:\[[^\]\r\n]+\]|[\u3400-\u9fff]|$))"
+_SENTENCE = re.compile(
+    rf".*?(?:[。！？!?]|{_ASCII_CJK_SENTENCE_END})(?:\s*\[[^\]]+\])*|.+$",
+    re.DOTALL,
+)
 _CLAIM_TEXT_LIMIT = 1000
 _EVIDENCE_GAP_MARKERS = (
     "未检出",
@@ -41,11 +45,13 @@ _INFERENCE_MARKERS = (
     "由此可见",
 )
 _FENCED_CODE_BLOCK = re.compile(
-    r"(?ms)^[ \t]*```[^\n]*\n.*?^[ \t]*```[^\n]*(?:\n|$)"
+    r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[^\n]*(?:\n|$)"
 )
+_INLINE_CODE = re.compile(r"`[^`\r\n]*`")
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_TABLE_LINE = re.compile(r"^\s*\|")
 _LABEL_ONLY = re.compile(r"^\s*(?:[-*+]\s*)?[^。！？!?\n:：]{1,40}[：:]\s*$")
 _MATERIAL_DOMAIN = re.compile(
     r"(?:氢气|乙烯|共聚单体|反应压力|反应温度|催化剂|链转移|"
@@ -58,6 +64,10 @@ _NOMINAL_MATERIAL_CONSTRUCTION = re.compile(
 _NOMINAL_ASSERTIVE_FORM = re.compile(r"(?:是|为|属于|构成).{0,60}")
 _CAUSAL_MATERIAL_CONSTRUCTION = re.compile(
     r"(?:主要由.{1,40}决定|直接决定|导致|使.{0,30}(?:升高|降低|提高|下降|扩大|缩小))"
+)
+_INFERENCE_MATERIAL_CONSTRUCTION = re.compile(
+    r"(?:会.{0,12}(?:显著)?(?:提高|降低|升高|下降|增加|减少|扩大|缩小)|"
+    r"显著(?:提高|降低|升高|下降|增加|减少|扩大|缩小))"
 )
 _ASSERTIVE_PREDICATE = re.compile(
     r"(?:是|为|决定|控制|导致|使|提高|降低|升高|下降|增加|减少|扩大|缩小|"
@@ -107,6 +117,24 @@ def _statements(content: str) -> list[str]:
     return statements
 
 
+def _mask_non_prose_content(content: str) -> str:
+    """Remove code and Markdown-only lines before sentence splitting."""
+
+    text = _INLINE_CODE.sub("", _FENCED_CODE_BLOCK.sub("", str(content or "")))
+    prose_lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if (
+            _MARKDOWN_HEADING.match(stripped)
+            or _TABLE_LINE.match(stripped)
+            or _TABLE_SEPARATOR.match(stripped)
+            or _LABEL_ONLY.match(stripped)
+        ):
+            continue
+        prose_lines.append(line)
+    return "".join(prose_lines)
+
+
 def _non_prose_statement(statement: str) -> bool:
     """Return whether a statement is Markdown structure rather than report prose."""
 
@@ -114,6 +142,7 @@ def _non_prose_statement(statement: str) -> bool:
     return bool(
         not text
         or "```" in text
+        or "~~~" in text
         or _MARKDOWN_HEADING.match(text)
         or _TABLE_ROW.match(text)
         or _TABLE_SEPARATOR.match(text)
@@ -132,7 +161,9 @@ def _requires_material_citation(statement: str) -> bool:
         statement
     ) and _NOMINAL_ASSERTIVE_FORM.search(statement):
         return True
-    if inference_wording(statement) and _ASSERTIVE_PREDICATE.search(statement):
+    if inference_wording(statement) and _INFERENCE_MATERIAL_CONSTRUCTION.search(
+        statement
+    ):
         return True
     return bool(
         _QUANTITATIVE_VALUE.search(statement)
@@ -145,7 +176,7 @@ def find_uncited_material_claims(content: str) -> list[dict[str, str]]:
     """Find uncited high-confidence material assertions without judging support."""
 
     findings: list[dict[str, str]] = []
-    prose_content = _FENCED_CODE_BLOCK.sub("", str(content or ""))
+    prose_content = _mask_non_prose_content(content)
     for statement in _statements(prose_content):
         if extract_inline_evidence_ids(statement):
             continue

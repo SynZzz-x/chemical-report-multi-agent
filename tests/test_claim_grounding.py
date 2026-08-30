@@ -44,9 +44,27 @@ def test_non_factual_or_non_prose_material_words_do_not_trigger(text):
     assert find_uncited_material_claims(text) == []
 
 
+@pytest.mark.parametrize("text", [
+    "| 参数 | 结论 |\n| --- | --- |\n| 共聚单体/乙烯比 | 是密度档位的核心控制变量。 |",
+    "~~~text\n共聚单体/乙烯比是密度档位的核心控制变量。\n~~~",
+    "`共聚单体/乙烯比是密度档位的核心控制变量。`",
+])
+def test_uncited_detector_masks_structural_and_code_content_before_splitting(text):
+    assert find_uncited_material_claims(text) == []
+
+
+def test_heading_is_masked_without_hiding_following_material_prose():
+    text = "### 核心控制变量\n共聚单体/乙烯比是密度档位的核心控制变量。"
+    assert find_uncited_material_claims(text) == [{"text": text.split("\n", 1)[1], "claim_type": "factual"}]
+
+
 def test_material_inference_requires_premise_citation():
     text = "据此可推测反应压力升高会显著扩大MWD。"
     assert find_uncited_material_claims(text) == [{"text": text, "claim_type": "inference"}]
+
+
+def test_generic_explicit_inference_without_strong_material_assertion_is_not_detected():
+    assert find_uncited_material_claims("综合来看，聚合反应是一个复杂过程。") == []
 
 
 def test_uncited_material_quantitative_assertion_is_detected():
@@ -60,6 +78,27 @@ def test_material_sentence_does_not_inherit_previous_citation():
         "text": "共聚单体/乙烯比是密度档位的核心控制变量。",
         "claim_type": "factual",
     }]
+
+
+def test_ascii_period_preserves_citation_adjacency_for_detector_and_claim_derivation():
+    citations = [{"evidence_id": "E1", "title": "趋势", "supporting_text": "氢气影响熔指。"}]
+    text = "氢气影响熔指.[E1] 共聚单体/乙烯比是密度档位的核心控制变量。"
+
+    assert find_uncited_material_claims(text) == [{
+        "text": "共聚单体/乙烯比是密度档位的核心控制变量。",
+        "claim_type": "factual",
+    }]
+    assert derive_claims(text, citations)[0]["text"] == "氢气影响熔指.[E1]"
+
+
+@pytest.mark.parametrize("text", [
+    "密度为 0.25 [E1]",
+    "来源为 https://example.com [E1]",
+])
+def test_ascii_sentence_handling_does_not_split_decimal_or_url_tokens(text):
+    citations = [{"evidence_id": "E1", "title": "来源", "supporting_text": "已知。"}]
+
+    assert derive_claims(text, citations)[0]["text"] == text
 
 
 def _assessment(*, code: str | None = None) -> dict:
