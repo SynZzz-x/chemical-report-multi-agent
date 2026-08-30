@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.evidence.claims import derive_claims
+from src.evidence.claims import derive_claims, find_uncited_material_claims
 from src.evidence.text_projection import (
     normalize_evidence_text,
     presentation_evidence_excerpt,
@@ -23,6 +23,43 @@ E6_TREND_EVIDENCE = {
         "但未记录实验设计、分析误差或公用工程波动。"
     ),
 }
+
+
+@pytest.mark.parametrize("text", [
+    "氢气/乙烯比是控制MFR档位最直接、最灵敏的调节手段。",
+    "共聚单体/乙烯比是密度档位的核心控制变量。",
+])
+def test_uncited_material_factual_assertion_is_detected(text):
+    assert find_uncited_material_claims(text) == [{"text": text, "claim_type": "factual"}]
+
+
+@pytest.mark.parametrize("text", [
+    "建议优先检查氢气比。",
+    "现有证据不足，因此不作判断。",
+    "### 核心控制变量",
+    "| 核心 | 变量 |",
+    "必须",
+])
+def test_non_factual_or_non_prose_material_words_do_not_trigger(text):
+    assert find_uncited_material_claims(text) == []
+
+
+def test_material_inference_requires_premise_citation():
+    text = "据此可推测反应压力升高会显著扩大MWD。"
+    assert find_uncited_material_claims(text) == [{"text": text, "claim_type": "inference"}]
+
+
+def test_uncited_material_quantitative_assertion_is_detected():
+    text = "催化剂浓度提高 10%。"
+    assert find_uncited_material_claims(text) == [{"text": text, "claim_type": "factual"}]
+
+
+def test_material_sentence_does_not_inherit_previous_citation():
+    text = "氢气影响熔指。[E1] 共聚单体/乙烯比是密度档位的核心控制变量。"
+    assert find_uncited_material_claims(text) == [{
+        "text": "共聚单体/乙烯比是密度档位的核心控制变量。",
+        "claim_type": "factual",
+    }]
 
 
 def _assessment(*, code: str | None = None) -> dict:

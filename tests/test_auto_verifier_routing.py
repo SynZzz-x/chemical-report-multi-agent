@@ -573,6 +573,63 @@ def test_valid_preflight_calls_semantic_verifier_once(monkeypatch):
     assert "verifier_retry_count" not in update
 
 
+def test_uncited_material_preflight_skips_semantic_model(monkeypatch):
+    state = _state()
+    state["current_result"].update(
+        {
+            "text_output": "共聚单体/乙烯比是密度档位的核心控制变量。",
+            "citations": [],
+        }
+    )
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        [json.dumps({"status": "PASS", "current_section": "引言", "issues": [], "requirements_met": [], "requirements_missing": []})],
+    )
+
+    assert update["assessment"]["issues"][0]["code"] == "UNCITED_MATERIAL_CLAIM"
+    assert update["assessment"]["issues"][0]["affected_claims"] == [{
+        "text": "共聚单体/乙烯比是密度档位的核心控制变量。",
+        "claim_type": "factual",
+    }]
+    assert len(model.calls) == 0
+
+
+def test_cited_material_claim_reaches_one_semantic_call(monkeypatch):
+    state = _state()
+    state["current_result"]["text_output"] = "共聚单体/乙烯比是密度档位的核心控制变量。[E1]"
+    update, model = _run_responses(
+        monkeypatch,
+        state,
+        [json.dumps({"status": "PASS", "current_section": "引言", "issues": [], "requirements_met": [], "requirements_missing": []})],
+    )
+
+    assert update["assessment"]["status"] == "PASS"
+    assert len(model.calls) == 1
+
+
+def test_uncited_issue_filters_invalid_requirement_ids(monkeypatch):
+    state = _state()
+    state["tasks"][0]["requirement_ids"] = ["REQ-ACTIVE", "REQ-WITHDRAWN"]
+    state["requirement_registry"] = [
+        {"requirement_id": "REQ-ACTIVE", "kind": "citation", "status": "active"},
+        {"requirement_id": "REQ-WITHDRAWN", "kind": "evidence", "status": "withdrawn"},
+    ]
+    state["current_result"].update(
+        {
+            "text_output": "共聚单体/乙烯比是密度档位的核心控制变量。",
+            "citations": [],
+        }
+    )
+    update, _model = _run_responses(
+        monkeypatch,
+        state,
+        [json.dumps({"status": "PASS", "current_section": "引言", "issues": [], "requirements_met": [], "requirements_missing": []})],
+    )
+
+    assert update["assessment"]["issues"][0]["requirement_ids"] == ["REQ-ACTIVE"]
+
+
 def test_exhausted_contract_failures_become_verifier_unavailable(monkeypatch):
     state = _state()
     state.update(

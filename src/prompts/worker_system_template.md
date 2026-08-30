@@ -40,6 +40,7 @@
 
 4. **证据与资产 Contract**:
    - 当任务描述明确允许调查型交付时，检索不到直接证据必须如实写明可追溯的证据缺口，不得补充未经来源支持的结论或自由发挥工程建议。
+   - Every material quantitative, causal, priority/superlative, or strong operational assertion must carry an adjacent validated [E#] marker. Citations do not inherit across sentences or paragraphs. A material inference must cite the evidence used as its premise even when inference wording is explicit.
    - `generate_table=true` 时必须形成正式 table asset；若没有表格工具输出，请在正文中生成标准 Markdown 管道表格，由系统确定性转换为正式 table asset。正文表格可以保留。
    - `generate_figure=true` 时必须由正式图形生成器形成正式 figure asset。不得使用 Mermaid、ASCII 图或文字描述冒充正式 figure asset。
    - 概念因果图由系统根据证据覆盖生成；证据不足时应披露缺口，不得自行输出 Mermaid 代码块绕过证据门。

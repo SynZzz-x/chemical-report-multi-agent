@@ -35,6 +35,21 @@ def test_worker_prefetch_and_tool_loop_share_query_identity_authority():
     assert ".casefold()" not in loop_source
 
 
+def test_worker_evidence_prompts_require_adjacent_material_claim_citations():
+    import inspect
+
+    template = (
+        Path(__file__).parents[1] / "src" / "prompts" / "worker_system_template.md"
+    ).read_text(encoding="utf-8")
+    context_source = inspect.getsource(AutonomousToolNode._evidence_context_for_generation)
+    binding_source = inspect.getsource(AutonomousToolNode._bind_claims_to_evidence)
+
+    required_phrase = "Every material quantitative, causal, priority/superlative, or strong operational assertion"
+    assert required_phrase in template
+    assert required_phrase in context_source
+    assert required_phrase in binding_source
+
+
 @pytest.mark.parametrize(
     ("name", "expected"),
     [

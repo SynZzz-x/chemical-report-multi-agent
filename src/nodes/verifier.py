@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config import get_app_config
 from src.evidence.citations import extract_inline_evidence_ids
-from src.evidence.claims import derive_claims
+from src.evidence.claims import derive_claims, find_uncited_material_claims
 from src.evidence_waivers import apply_evidence_gap_acceptance
 from src.llm import get_llm, invoke_llm, with_completion_budget
 from src.evidence.projection import project_report_sources
@@ -53,6 +53,7 @@ _CATEGORY_BY_CODE = {
     "CLAIM_PARTIALLY_SUPPORTED": "EVIDENCE_GAP",
     "CLAIM_EVIDENCE_MISMATCH": "EVIDENCE_GAP",
     "UNLABELED_INFERENCE": "EVIDENCE_GAP",
+    "UNCITED_MATERIAL_CLAIM": "CONTENT_DEFECT",
     "TOO_SHORT": "CONTENT_DEFECT",
     "TOO_LONG": "CONTENT_DEFECT",
     "MISSING_TABLE": "CONTENT_DEFECT",
@@ -147,6 +148,7 @@ _REQUIREMENT_KINDS_BY_CODE = {
     "CLAIM_PARTIALLY_SUPPORTED": {"citation", "evidence"},
     "CLAIM_EVIDENCE_MISMATCH": {"citation", "evidence"},
     "UNLABELED_INFERENCE": {"citation", "evidence"},
+    "UNCITED_MATERIAL_CLAIM": {"citation", "evidence"},
 }
 
 
@@ -602,6 +604,39 @@ def _malformed_inline_citation_markers(content: str) -> list[str]:
     return malformed
 
 
+def _failed_preflight_assessment(
+    assessment: dict[str, Any],
+    state: State,
+    *,
+    code: str,
+    category: str,
+    description: str,
+    suggestion: str,
+    affected_claims: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Attach a deterministic content failure using the canonical assessment shape."""
+
+    issue: dict[str, Any] = {
+        "code": code,
+        "category": category,
+        "description": description,
+        "suggestion": suggestion,
+        "severity": "major",
+        "affected_claims": affected_claims,
+    }
+    requirement_ids = _deterministic_requirement_ids(state, code)
+    if requirement_ids:
+        issue["requirement_ids"] = requirement_ids
+    updated = dict(assessment)
+    updated["status"] = "FAILED"
+    updated["issues"] = [*list(updated.get("issues") or []), issue]
+    updated["requirements_missing"] = [
+        *list(updated.get("requirements_missing") or []),
+        description,
+    ]
+    return _sanitize_assessment(updated, state)
+
+
 def _deterministic_issues(state: State) -> list[dict[str, Any]]:
     """Return facts that do not require semantic judgement by the LLM."""
 
@@ -812,6 +847,26 @@ def _deterministic_preflight(state: State) -> dict[str, Any]:
         state.get("current_result") or {},
         state,
     )
+    if assessment.get("status") == "FAILED":
+        return apply_evidence_gap_acceptance(assessment, state)
+    current_result = state.get("current_result") or {}
+    content = str(
+        current_result.get("content") or current_result.get("text_output") or ""
+    )
+    uncited = find_uncited_material_claims(content)
+    if uncited:
+        return apply_evidence_gap_acceptance(
+            _failed_preflight_assessment(
+                assessment,
+                state,
+                code="UNCITED_MATERIAL_CLAIM",
+                category="CONTENT_DEFECT",
+                description="Material assertion lacks an explicit inline evidence marker.",
+                suggestion="Add an adjacent validated citation or narrow/remove the assertion.",
+                affected_claims=uncited,
+            ),
+            state,
+        )
     assessment = _apply_deterministic_validation(assessment, state)
     return apply_evidence_gap_acceptance(assessment, state)
 
@@ -975,6 +1030,19 @@ def _sanitize_assessment(assessment: dict[str, Any], state: State) -> dict[str, 
             ]
             if retrieval_query:
                 normalized["retrieval_query"] = retrieval_query
+        if code == "UNCITED_MATERIAL_CLAIM" and isinstance(
+            issue.get("affected_claims"), list
+        ):
+            normalized["affected_claims"] = [
+                {
+                    "text": str(claim.get("text") or "").strip(),
+                    "claim_type": str(claim.get("claim_type") or "").strip(),
+                }
+                for claim in issue["affected_claims"]
+                if isinstance(claim, dict)
+                and str(claim.get("text") or "").strip()
+                and str(claim.get("claim_type") or "").strip()
+            ]
         if not web_allowed and _demands_unauthorized_web(issue):
             if code in _SEMANTIC_CLAIM_CODES:
                 normalized.pop("retrieval_query", None)
