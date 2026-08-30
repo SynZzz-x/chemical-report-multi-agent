@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from src.evidence.identity import canonical_citation_identity
+from src.evidence.identity import canonical_citation_identity, normalize_sections_evidence
 from src.evidence.integrity import (
     project_lossless_used_citations,
     validate_final_citation_integrity,
@@ -239,6 +239,34 @@ def test_final_gate_rejects_task_local_alias_after_remap():
     result = validate_final_citation_integrity(sections, "正文 [E8]。", registry)
 
     assert "FINAL_REMAP_ALIAS" in {issue.code for issue in result.issues}
+
+
+def test_final_gate_allows_display_id_that_matches_another_local_id():
+    raw_sections = [
+        {
+            "task_id": "T1",
+            "text_output": "工艺 [E1]。",
+            "citations": [citation("/docs/process.docx", evidence_id="E1")],
+        },
+        {
+            "task_id": "T2",
+            "text_output": "维护 [E1, E2]。",
+            "citations": [
+                citation("/docs/maintenance.docx", evidence_id="E1"),
+                citation("/docs/inspection.docx", evidence_id="E2"),
+            ],
+        },
+    ]
+    sections, _ = normalize_sections_evidence(raw_sections)
+    registry = project_lossless_used_citations(sections)
+
+    result = validate_final_citation_integrity(
+        sections, "工艺 [E1]。\n维护 [E2, E3]。", registry
+    )
+
+    assert sections[0]["text_output"] == "工艺 [E1]。"
+    assert sections[1]["text_output"] == "维护 [E2, E3]。"
+    assert result.is_valid is True
 
 
 def test_final_gate_accepts_grouped_markers():

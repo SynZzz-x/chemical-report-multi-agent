@@ -111,12 +111,23 @@ def validate_final_citation_integrity(
         for evidence_id in section_body_ids:
             body_ids.add(evidence_id)
             task_by_body_id.setdefault(evidence_id, task_id)
-        for citation in section.get("citations") or ():
-            if not isinstance(citation, Mapping):
-                continue
+        section_citations = [
+            citation
+            for citation in section.get("citations") or ()
+            if isinstance(citation, Mapping)
+        ]
+        section_display_ids = {
+            _citation_display_id(citation) for citation in section_citations
+        }
+        for citation in section_citations:
             display_id = _citation_display_id(citation)
             local_id = str(citation.get("local_evidence_id") or "").strip().upper()
-            if local_id and local_id != display_id and local_id in section_body_ids:
+            if (
+                local_id
+                and local_id != display_id
+                and local_id in section_body_ids
+                and local_id not in section_display_ids
+            ):
                 issues.append(
                     CitationIntegrityIssue(
                         code="FINAL_REMAP_ALIAS",

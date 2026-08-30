@@ -362,6 +362,12 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
                     "file_path": "/b/source_b.pdf",
                     "supporting_text": "b",
                 },
+                {
+                    "evidence_id": "E4",
+                    "source_type": "rag",
+                    "file_path": "/c/unused.txt",
+                    "supporting_text": "unused",
+                },
             ],
         },
         {
@@ -369,7 +375,14 @@ def test_reference_list_projects_only_actually_cited_evidence(monkeypatch, tmp_p
             "text_output": "本节没有证据引用。",
             "plan_revision": 1,
             "task_revision": 1,
-            "citations": [],
+            "citations": [
+                {
+                    "evidence_id": "E1",
+                    "source_type": "rag",
+                    "file_path": "/d/also_unused.docx",
+                    "supporting_text": "unused",
+                }
+            ],
         },
     ]
     state["messages"] = [
