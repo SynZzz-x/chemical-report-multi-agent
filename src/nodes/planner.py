@@ -2,6 +2,7 @@ import os
 import json
 import re
 import logging
+from openai import LengthFinishReasonError
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -893,19 +894,30 @@ def _invoke_plan_generation(
         raise PlannerGenerationError(f"{failure_label}: {exc}") from exc
 
     last_error: Exception | None = None
+    failure_reason = "plan_generation_failed"
     for attempt in range(1, 3):
         messages = list(base_messages)
         if last_error is not None:
-            messages.append(
-                HumanMessage(
-                    content=(
-                        "上一次输出未通过 Plan JSON 校验。请仅重新生成符合约束的 "
-                        '{"tasks": [...]} JSON 对象。校验错误：'
-                        f"{last_error}"
-                    )
+            if failure_reason == "plan_generation_truncated":
+                retry_guidance = (
+                    "上一次生成因输出长度上限被截断，未获得完整计划。"
+                    "请从头重新生成完整且符合原约束的 "
+                    '{"tasks": [...]} JSON 对象，不要续写截断片段。'
                 )
-            )
+            elif failure_reason == "plan_contract_invalid":
+                retry_guidance = (
+                    "上一次输出未通过 Plan JSON 校验。请仅重新生成符合约束的 "
+                    '{"tasks": [...]} JSON 对象。校验错误：'
+                    f"{last_error}"
+                )
+            else:
+                retry_guidance = (
+                    "上一次模型请求未正常完成。请重新生成符合原约束的 "
+                    '{"tasks": [...]} JSON 对象。'
+                )
+            messages.append(HumanMessage(content=retry_guidance))
         response_text = ""
+        response_received = False
         try:
             response = invoke_llm(
                 model,
@@ -917,6 +929,7 @@ def _invoke_plan_generation(
                 attempt=attempt,
                 json_mode=True,
             )
+            response_received = True
             response_text = str(response.content).strip()
             tasks = _parse_generated_plan_payload(
                 response_text,
@@ -927,12 +940,20 @@ def _invoke_plan_generation(
             return _ensure_use_resources_paths(tasks, resources)
         except Exception as exc:
             last_error = exc
+            if isinstance(exc, LengthFinishReasonError):
+                failure_reason = "plan_generation_truncated"
+            elif response_received:
+                failure_reason = "plan_contract_invalid"
+            else:
+                failure_reason = "plan_generation_failed"
             logger.warning(
-                "Planner generation validation failed: path=%s attempt=%s "
-                "error_type=%s reason=plan_contract_invalid",
+                "Planner generation failed: path=%s attempt=%s "
+                "error_type=%s reason=%s requested_max_completion_tokens=%s",
                 failure_label,
                 attempt,
                 type(exc).__name__,
+                failure_reason,
+                budget,
             )
 
     raise PlannerGenerationError(f"{failure_label}: {last_error}") from last_error

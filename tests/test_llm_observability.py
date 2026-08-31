@@ -287,8 +287,8 @@ def test_invoke_llm_logs_success_and_preserves_response_identity(caplog):
         "attempt=2",
         "iteration=-",
         "model=deepseek-chat",
-        "requested_max_completion_tokens=3500",
-        "max_completion_tokens=3500",
+        "requested_max_completion_tokens=16384",
+        "max_completion_tokens=16384",
         "json_mode=true",
     ):
         assert field in start

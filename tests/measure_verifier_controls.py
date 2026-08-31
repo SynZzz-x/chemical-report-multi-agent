@@ -29,6 +29,7 @@ from tests.test_offline_pipeline_benchmark import (
 def capture_request(
     env: dict[str, str],
     *,
+    purpose: str = "assessment",
     bound_kwargs: dict[str, object] | None = None,
     apply_completion_budget: bool = True,
     with_listener: bool = False,
@@ -71,7 +72,7 @@ def capture_request(
     with patch.dict(os.environ, probe_env, clear=False), patch(
         "src.llm.ChatOpenAI", functools.partial(RealChatOpenAI, http_client=client)
     ):
-        model = get_llm({}, json_mode=True, purpose="assessment")
+        model = get_llm({}, json_mode=True, purpose=purpose)
         runnable = model.bind(**bound_kwargs) if bound_kwargs else model
         listener_events: list[str] = []
         if with_listener:
@@ -90,7 +91,7 @@ def capture_request(
             runnable, "custom_output_type", None
         ).__name__ if getattr(runnable, "custom_output_type", None) else None
         if apply_completion_budget:
-            runnable, _ = with_completion_budget(runnable, "assessment")
+            runnable, _ = with_completion_budget(runnable, purpose)
         captured["config_factories_after"] = len(
             getattr(runnable, "config_factories", [])
         )
@@ -136,6 +137,7 @@ def _request_fields(
 def run_verifier_control_probe(
     env: dict[str, str],
     *,
+    purpose: str = "assessment",
     bound_kwargs: dict[str, object] | None = None,
     apply_completion_budget: bool = True,
     with_listener: bool = False,
@@ -143,7 +145,7 @@ def run_verifier_control_probe(
 ) -> dict[str, object]:
     """Run the installed wrapper in a child process outside pytest's stubs."""
 
-    command = [sys.executable, str(Path(__file__).resolve()), "--capture"]
+    command = [sys.executable, str(Path(__file__).resolve()), "--capture", "--purpose", purpose]
     if bound_kwargs:
         command.extend(["--bound-json", json.dumps(bound_kwargs)])
     if not apply_completion_budget:
@@ -205,6 +207,7 @@ def main() -> None:
     parser.add_argument("--with-listener", action="store_true")
     parser.add_argument("--with-types", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--purpose", default="assessment")
     args = parser.parse_args()
 
     if args.capture:
@@ -215,6 +218,7 @@ def main() -> None:
                 _request_fields(
                     capture_request(
                         {},
+                        purpose=args.purpose,
                         bound_kwargs=bound_kwargs,
                         apply_completion_budget=not args.skip_completion_budget,
                         with_listener=args.with_listener,

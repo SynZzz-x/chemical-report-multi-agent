@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
+from openai import LengthFinishReasonError
 
 from .config import get_app_config, get_llm_settings, missing_key_message
 
@@ -20,7 +21,6 @@ logger = logging.getLogger("src.llm.observability")
 
 _PURPOSE_COMPLETION_BUDGETS = {
     "canonical_intake_generation": 1200,
-    "plan_generation": 3500,
     "assessment": 1600,
     "assessment_contract_repair": 900,
     "concept_graph_extraction": 1200,
@@ -56,6 +56,8 @@ def completion_budget(purpose: str, *, task_description: str | None = None) -> i
     """Return a bounded output-token budget for one semantic purpose."""
 
     normalized = str(purpose or "").strip()
+    if normalized == "plan_generation":
+        return get_app_config().planner_max_completion_tokens
     maximum = _maximum_length(task_description)
     if normalized == "task_generation":
         return max(1200, min(4096, (maximum * 2 + 800) if maximum else 3200))
@@ -239,6 +241,26 @@ def extract_provider_token_usage(response: Any) -> ProviderTokenUsage:
         return ProviderTokenUsage()
 
 
+def extract_truncation_token_usage(error: LengthFinishReasonError) -> ProviderTokenUsage:
+    """Read SDK usage only, without inspecting content or inferring missing tokens."""
+
+    try:
+        usage = getattr(error.completion, "usage", None)
+        if callable(getattr(usage, "model_dump", None)):
+            usage = usage.model_dump()
+        usage = _mapping(usage)
+        details = _mapping(usage.get("completion_tokens_details"))
+        return ProviderTokenUsage(
+            provider_prompt_tokens=_token_value(usage, "prompt_tokens"),
+            provider_completion_tokens=_token_value(usage, "completion_tokens"),
+            provider_reasoning_tokens=_token_value(details, "reasoning_tokens"),
+            provider_total_tokens=_token_value(usage, "total_tokens"),
+        )
+    except Exception:
+        # Telemetry must never hide or replace the original SDK failure.
+        return ProviderTokenUsage()
+
+
 def extract_token_usage(response: Any) -> tuple[int | None, int | None, int | None]:
     """Compatibility adapter for the original input/output/total tuple."""
 
@@ -300,11 +322,21 @@ def invoke_llm(
             response = runnable.invoke(value, config=config)
     except Exception as exc:
         latency_ms = round((time.perf_counter() - started) * 1000)
+        usage_fields = ""
+        if isinstance(exc, LengthFinishReasonError):
+            usage = extract_truncation_token_usage(exc)
+            usage_fields = (
+                f" provider_prompt_tokens={_log_value(usage.provider_prompt_tokens)}"
+                f" provider_completion_tokens={_log_value(usage.provider_completion_tokens)}"
+                f" provider_reasoning_tokens={_log_value(usage.provider_reasoning_tokens)}"
+                f" provider_total_tokens={_log_value(usage.provider_total_tokens)}"
+            )
         logger.warning(
-            "LLM_CALL_ERROR %s latency_ms=%s error_type=%s",
+            "LLM_CALL_ERROR %s latency_ms=%s error_type=%s%s",
             common,
             latency_ms,
             _log_value(type(exc).__name__),
+            usage_fields,
         )
         raise
 

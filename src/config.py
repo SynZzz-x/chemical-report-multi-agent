@@ -14,6 +14,9 @@ from typing import Any
 
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+# Headroom above the observed ~10.2k Planner completion, including reasoning.
+# This is a request cap, not a guarantee that every plan fits.
+DEFAULT_PLANNER_MAX_COMPLETION_TOKENS = 16384
 DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBEDDING_MODEL_REVISION = "66e95e324bebb9453d3b5be447c898dca1ba0eb0"
@@ -91,6 +94,7 @@ class AppConfig:
     deepseek_model: str
     verifier_model: str | None
     verifier_reasoning_effort: str | None
+    planner_max_completion_tokens: int
     length_rewrite_safety_ratio: float
     rag_settings: RAGSettings
     concept_graph_settings: ConceptGraphSettings
@@ -240,6 +244,9 @@ def get_app_config() -> AppConfig:
         verifier_model=get_env("VERIFIER_MODEL"),
         verifier_reasoning_effort=_optional_reasoning_effort_from_env(
             "VERIFIER_REASONING_EFFORT"
+        ),
+        planner_max_completion_tokens=_positive_int_from_env(
+            "PLANNER_MAX_COMPLETION_TOKENS", DEFAULT_PLANNER_MAX_COMPLETION_TOKENS
         ),
         length_rewrite_safety_ratio=_bounded_ratio_from_env(
             "LENGTH_REWRITE_SAFETY_RATIO", DEFAULT_LENGTH_REWRITE_SAFETY_RATIO
