@@ -49,6 +49,7 @@ from src.runtime_config import execution_config
 from src.report_acceptance import delivery_path_candidates
 from src.report_preview import first_markdown_path, read_markdown_preview
 from src.ui_projection import summarize_step as _summarize_step
+from src.ui_projection import terminal_job_ui_state
 from src.utils.path_manager import get_session_cache_dir
 
 
@@ -224,6 +225,37 @@ def _snapshot_values() -> dict[str, Any]:
         return {}
 
 
+def _active_terminal_job_ui_state() -> dict[str, Any]:
+    """Use graph outcome as terminal authority, retaining durable fatal fallback."""
+
+    record = _current_job()
+    app = st.session_state.get("app")
+    if record is None or app is None:
+        return terminal_job_ui_state(record)
+
+    try:
+        snapshot = app.get_state(_graph_config())
+    except Exception:
+        # A persisted graph-owned fatal remains terminal if its checkpoint cannot
+        # currently be read. Runner failures deliberately remain resubmittable.
+        return terminal_job_ui_state(record)
+
+    values = dict(snapshot.values or {})
+    if not values:
+        return terminal_job_ui_state(record)
+
+    pending = interrupt_from_snapshot(snapshot) or st.session_state.get(
+        "pending_interrupt"
+    )
+    outcome = project_job_outcome(values, pending)
+    if (
+        record.get("status") != "failed"
+        or outcome["status"] != "completed"
+    ):
+        _update_job(**outcome)
+    return terminal_job_ui_state(record, outcome)
+
+
 def _start_new_job() -> None:
     st.session_state["active_job_id"] = _new_id("job")
     st.session_state["active_job_created_at"] = _utc_now_iso()
@@ -308,7 +340,12 @@ def _restore_job_from_sidebar(job_id: str) -> None:
         st.session_state["restore_error"] = str(exc)
         st.session_state.pop("restore_success", None)
     else:
-        st.session_state["restore_success"] = "任务已恢复。"
+        restored_ui_state = terminal_job_ui_state(_current_job())
+        st.session_state["restore_success"] = (
+            "任务已打开；该报告任务已停止。"
+            if restored_ui_state["is_terminal"]
+            else "任务已恢复。"
+        )
         st.session_state.pop("restore_error", None)
 
 
@@ -994,7 +1031,7 @@ with st.sidebar:
             ),
         )
         st.button(
-            "恢复选中任务",
+            "打开选中任务",
             use_container_width=True,
             on_click=_restore_job_from_sidebar,
             args=(selected_job_id,),
@@ -1026,6 +1063,10 @@ st.caption("Streamlit 只负责输入与渲染；LangGraph State 负责业务上
 _render_history()
 _render_report_preview()
 _render_report_downloads()
+terminal_ui_state = _active_terminal_job_ui_state()
+terminal_job = bool(terminal_ui_state["is_terminal"])
+if terminal_ui_state["message"]:
+    st.error(str(terminal_ui_state["message"]))
 pending_interrupt = st.session_state.get("pending_interrupt")
 has_blocker_actions = bool(
     blocker_choices(pending_interrupt) or blocker_forms(pending_interrupt)
@@ -1049,8 +1090,11 @@ chat_value = st.chat_input(
     ),
     accept_file="multiple",
     file_type=["csv", "pdf", "docx", "txt", "md"],
-    disabled=has_blocker_actions,
+    disabled=has_blocker_actions or terminal_job,
 )
+
+if terminal_job:
+    st.stop()
 
 if blocker_submission is not None or chat_value:
     # Streamlit 1.50 returns a ChatInputValue; keep dict compatibility as well.

@@ -2,7 +2,46 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+
+
+_SAFE_FATAL_SUMMARIES = {
+    "VERIFIER_UNAVAILABLE": "审核服务不可用",
+}
+
+
+def terminal_job_ui_state(
+    job: Mapping[str, Any] | None,
+    outcome: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project graph-terminal status while preserving runner resubmission."""
+
+    source = outcome if outcome is not None else job
+    if not isinstance(source, Mapping) or str(source.get("status") or "") != "failed":
+        return {"is_terminal": False, "message": None}
+
+    fatal = source.get("fatal_system_error") or {}
+    origin = str(fatal.get("origin") or "") if isinstance(fatal, Mapping) else ""
+    if origin != "graph":
+        return {
+            "is_terminal": False,
+            "message": "上次执行未完成，可以重新提交。" if origin == "runner" else None,
+        }
+
+    diagnostic_code = (
+        str(fatal.get("diagnostic_code") or "")
+        if isinstance(fatal, Mapping)
+        else ""
+    )
+    summary = _SAFE_FATAL_SUMMARIES.get(diagnostic_code, "系统工作流无法继续")
+    return {
+        "is_terminal": True,
+        "message": (
+            "当前报告任务已停止（"
+            f"{summary}）。请新建报告任务后继续。"
+        ),
+    }
 
 
 def summarize_step(node: str, delta: dict[str, Any]) -> str:
