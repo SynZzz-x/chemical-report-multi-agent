@@ -17,6 +17,9 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 # Headroom above the observed ~10.2k Planner completion, including reasoning.
 # This is a request cap, not a guarantee that every plan fits.
 DEFAULT_PLANNER_MAX_COMPLETION_TOKENS = 16384
+# Headroom above the observed 5-6k verifier reasoning completion. This is an
+# assessment request cap, not a guarantee that every verification fits.
+DEFAULT_VERIFIER_MAX_COMPLETION_TOKENS = 8192
 DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBEDDING_MODEL_REVISION = "66e95e324bebb9453d3b5be447c898dca1ba0eb0"
@@ -94,6 +97,7 @@ class AppConfig:
     deepseek_model: str
     verifier_model: str | None
     verifier_reasoning_effort: str | None
+    verifier_max_completion_tokens: int
     planner_max_completion_tokens: int
     length_rewrite_safety_ratio: float
     rag_settings: RAGSettings
@@ -244,6 +248,9 @@ def get_app_config() -> AppConfig:
         verifier_model=get_env("VERIFIER_MODEL"),
         verifier_reasoning_effort=_optional_reasoning_effort_from_env(
             "VERIFIER_REASONING_EFFORT"
+        ),
+        verifier_max_completion_tokens=_positive_int_from_env(
+            "VERIFIER_MAX_COMPLETION_TOKENS", DEFAULT_VERIFIER_MAX_COMPLETION_TOKENS
         ),
         planner_max_completion_tokens=_positive_int_from_env(
             "PLANNER_MAX_COMPLETION_TOKENS", DEFAULT_PLANNER_MAX_COMPLETION_TOKENS

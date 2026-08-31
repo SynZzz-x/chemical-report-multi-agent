@@ -184,7 +184,7 @@ def _optimized_artifact() -> dict[str, object]:
     assert first == second
     assert first_components == second_components
     assert first_catalog == second_catalog
-    assert first["max_tokens"] == 1600
+    assert first["max_tokens"] == 8192
     assert first["max_completion_tokens"] is None
     assert first["reasoning_effort"] is None
     assert first["thinking_present"] is False

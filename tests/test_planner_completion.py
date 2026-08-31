@@ -193,7 +193,7 @@ def test_actual_planner_request_uses_configured_max_tokens(override, expected, b
 
 @pytest.mark.parametrize("purpose, expected", [
     ("canonical_intake_generation", 1200), ("task_generation", 3200),
-    ("assessment", 1600), ("report_synthesis", 4000),
+    ("assessment", 8192), ("report_synthesis", 4000),
 ])
 def test_other_actual_request_budgets_unchanged_by_planner_override(purpose, expected):
     payload = run_verifier_control_probe({"PLANNER_MAX_COMPLETION_TOKENS": "20000"}, purpose=purpose)

@@ -31,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_deepseek_request_uses_max_tokens_not_max_completion_tokens():
     payload = run_verifier_control_probe({})
 
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
     assert payload["max_completion_tokens"] is None
     assert payload["reasoning_effort"] is None
     assert payload["thinking_present"] is False
@@ -41,7 +41,7 @@ def test_verifier_reasoning_effort_reaches_actual_request():
     payload = run_verifier_control_probe({"VERIFIER_REASONING_EFFORT": "low"})
 
     assert payload["reasoning_effort"] == "low"
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
 
 
 def test_default_verifier_model_remains_global_model():
@@ -56,7 +56,7 @@ def test_assessment_budget_preserves_bound_extra_body_fields():
     )
 
     assert payload["bound_flag"] == "retained"
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
     assert payload["max_completion_tokens"] is None
 
 
@@ -91,14 +91,14 @@ def test_assessment_budget_replaces_stale_bound_budget_aliases():
     assert payload["bound_flag"] == "retained"
     assert payload["tool_choice"] == "none"
     assert payload["tools"] == tools
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
     assert payload["max_completion_tokens"] is None
 
 
 def test_assessment_constructor_budget_uses_only_max_tokens():
     payload = run_verifier_control_probe({}, apply_completion_budget=False)
 
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
     assert payload["max_completion_tokens"] is None
 
 
@@ -115,7 +115,7 @@ def test_assessment_budget_preserves_bound_listener_and_type_semantics():
     assert payload["input_type_before"] == payload["input_type_after"] == "str"
     assert payload["output_type_before"] == payload["output_type_after"] == "str"
     assert payload["bound_flag"] == "retained"
-    assert payload["max_tokens"] == 1600
+    assert payload["max_tokens"] == 8192
     assert payload["max_completion_tokens"] is None
 
 

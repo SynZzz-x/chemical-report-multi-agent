@@ -21,7 +21,6 @@ logger = logging.getLogger("src.llm.observability")
 
 _PURPOSE_COMPLETION_BUDGETS = {
     "canonical_intake_generation": 1200,
-    "assessment": 1600,
     "assessment_contract_repair": 900,
     "concept_graph_extraction": 1200,
     "citation_binding": 1600,
@@ -58,6 +57,8 @@ def completion_budget(purpose: str, *, task_description: str | None = None) -> i
     normalized = str(purpose or "").strip()
     if normalized == "plan_generation":
         return get_app_config().planner_max_completion_tokens
+    if normalized == "assessment":
+        return get_app_config().verifier_max_completion_tokens
     maximum = _maximum_length(task_description)
     if normalized == "task_generation":
         return max(1200, min(4096, (maximum * 2 + 800) if maximum else 3200))

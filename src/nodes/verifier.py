@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
+from openai import LengthFinishReasonError
 
 from src.config import get_app_config
 from src.evidence.citations import extract_inline_evidence_ids
@@ -41,6 +42,28 @@ logger = logging.getLogger(__name__)
 MAX_VERIFIER_CONTRACT_RETRIES = 1
 _MAX_CONTRACT_RESPONSE_CHARS = 4000
 _MAX_CONTRACT_ERROR_CHARS = 1000
+
+
+def _log_verifier_generation_truncated(
+    error: LengthFinishReasonError,
+    *,
+    task_id: str | None,
+    attempt: int,
+    purpose: str,
+    max_completion_tokens: int,
+) -> None:
+    """Record a safe, purpose-specific truncation diagnostic."""
+
+    logger.warning(
+        "AutoVerifier generation truncated: task=%s attempt=%s purpose=%s "
+        "requested_max_completion_tokens=%s error_type=%s "
+        "reason=verifier_generation_truncated",
+        task_id,
+        attempt,
+        purpose,
+        max_completion_tokens,
+        type(error).__name__,
+    )
 
 _CATEGORY_BY_CODE = {
     "EVIDENCE_GAP": "EVIDENCE_GAP",
@@ -281,37 +304,47 @@ def verifier(state: State, config: RunnableConfig, **kwargs) -> dict[str, Any]:
             model = get_llm(config, json_mode=True, purpose="assessment")
             model, assessment_budget = with_completion_budget(model, "assessment")
             chain = ChatPromptTemplate.from_messages([("system", template)]) | model
-            response = invoke_llm(
-                chain,
-                {
-                    "task_name": _task_name(tasks, cursor),
-                    "task_requirements": json.dumps(
-                        current_task, ensure_ascii=False, indent=2
-                    ),
-                    "worker_result": content,
-                    "worker_assets": worker_assets,
-                    "claims": claims,
-                    "evidence_catalog": evidence_catalog,
-                    "deterministic_checks": json.dumps(
-                        _deterministic_issues(state), ensure_ascii=False
-                    ),
-                    "source_policy": json.dumps(
-                        source_policy, ensure_ascii=False
-                    ),
-                    "synthesis_context": json.dumps(
-                        synthesis_context, ensure_ascii=False, default=str
-                    ),
-                    "format_instructions": format_instructions,
-                },
-                node="Verifier",
+            try:
+                response = invoke_llm(
+                    chain,
+                    {
+                        "task_name": _task_name(tasks, cursor),
+                        "task_requirements": json.dumps(
+                            current_task, ensure_ascii=False, indent=2
+                        ),
+                        "worker_result": content,
+                        "worker_assets": worker_assets,
+                        "claims": claims,
+                        "evidence_catalog": evidence_catalog,
+                        "deterministic_checks": json.dumps(
+                            _deterministic_issues(state), ensure_ascii=False
+                        ),
+                        "source_policy": json.dumps(
+                            source_policy, ensure_ascii=False
+                        ),
+                        "synthesis_context": json.dumps(
+                            synthesis_context, ensure_ascii=False, default=str
+                        ),
+                        "format_instructions": format_instructions,
+                    },
+                    node="Verifier",
                     purpose="assessment",
                     max_completion_tokens=assessment_budget,
-                task_id=task_id,
-                job_id=state.get("job_id"),
-                plan_revision=state.get("plan_revision"),
-                task_revision=(state.get("task_revisions") or {}).get(task_id),
-                json_mode=True,
-            )
+                    task_id=task_id,
+                    job_id=state.get("job_id"),
+                    plan_revision=state.get("plan_revision"),
+                    task_revision=(state.get("task_revisions") or {}).get(task_id),
+                    json_mode=True,
+                )
+            except LengthFinishReasonError as exc:
+                _log_verifier_generation_truncated(
+                    exc,
+                    task_id=task_id,
+                    attempt=1,
+                    purpose="assessment",
+                    max_completion_tokens=assessment_budget,
+                )
+                raise
             raw_response = str(response.content)
             assessment_model: VerifierAssessment | None = None
             contract_error: AssessmentContractError | None = None
@@ -481,29 +514,39 @@ def _invoke_contract_repair(
     repair_model, repair_budget = with_completion_budget(
         model, "assessment_contract_repair"
     )
-    response = invoke_llm(
-        repair_prompt | repair_model,
-        {
-            "schema": json.dumps(
-                VerifierAssessment.model_json_schema(),
-                ensure_ascii=False,
-            ),
-            "previous_response": str(previous_response)[
-                :_MAX_CONTRACT_RESPONSE_CHARS
-            ],
-            "validation_error": _bounded_contract_error(error),
-        },
-        config=config,
-        node="Verifier",
-        purpose="assessment_contract_repair",
-        max_completion_tokens=repair_budget,
-        task_id=task_id,
-        job_id=job_id,
-        plan_revision=plan_revision,
-        task_revision=task_revision,
-        attempt=attempt,
-        json_mode=True,
-    )
+    try:
+        response = invoke_llm(
+            repair_prompt | repair_model,
+            {
+                "schema": json.dumps(
+                    VerifierAssessment.model_json_schema(),
+                    ensure_ascii=False,
+                ),
+                "previous_response": str(previous_response)[
+                    :_MAX_CONTRACT_RESPONSE_CHARS
+                ],
+                "validation_error": _bounded_contract_error(error),
+            },
+            config=config,
+            node="Verifier",
+            purpose="assessment_contract_repair",
+            max_completion_tokens=repair_budget,
+            task_id=task_id,
+            job_id=job_id,
+            plan_revision=plan_revision,
+            task_revision=task_revision,
+            attempt=attempt,
+            json_mode=True,
+        )
+    except LengthFinishReasonError as exc:
+        _log_verifier_generation_truncated(
+            exc,
+            task_id=task_id,
+            attempt=attempt,
+            purpose="assessment_contract_repair",
+            max_completion_tokens=repair_budget,
+        )
+        raise
     return str(response.content)
 
 
