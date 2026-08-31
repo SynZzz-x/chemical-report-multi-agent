@@ -177,6 +177,55 @@ def test_active_terminal_state_uses_snapshot_projection_without_mutating_state()
     assert graph_state == original_state
 
 
+def test_active_terminal_state_fail_closes_legacy_authoritative_fatal_outcome():
+    from src.job_outcome import project_job_outcome
+    from src.ui_projection import terminal_job_ui_state
+
+    graph_state = {
+        "workflow_action": "FATAL_SYSTEM",
+        "fatal_system_error": {
+            "failure_id": "fatal-legacy",
+            "subtype": "VERIFIER_UNAVAILABLE",
+        },
+    }
+    outcome = project_job_outcome(graph_state, None)
+    assert outcome["status"] == "failed"
+    assert outcome["fatal_system_error"] is not None
+    assert "origin" not in outcome["fatal_system_error"]
+
+    writes: list[dict[str, Any]] = []
+
+    class Snapshot:
+        values = graph_state
+
+    class App:
+        def get_state(self, config):
+            return Snapshot()
+
+    class FakeSt:
+        session_state = {"app": App(), "pending_interrupt": None}
+
+    active_state = _app_function(
+        "_active_terminal_job_ui_state",
+        {
+            "Any": Any,
+            "st": FakeSt(),
+            "_current_job": lambda: {"status": "running"},
+            "_graph_config": lambda: {},
+            "_update_job": lambda **changes: writes.append(changes),
+            "interrupt_from_snapshot": lambda snapshot: None,
+            "project_job_outcome": project_job_outcome,
+            "terminal_job_ui_state": terminal_job_ui_state,
+        },
+    )
+
+    assert active_state() == {
+        "is_terminal": True,
+        "message": "当前报告任务已停止（审核服务不可用）。请新建报告任务后继续。",
+    }
+    assert writes == [outcome]
+
+
 def test_active_terminal_state_preserves_failed_to_completed_restore_protection():
     from src.job_outcome import project_job_outcome
     from src.ui_projection import terminal_job_ui_state

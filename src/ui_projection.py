@@ -17,20 +17,21 @@ def terminal_job_ui_state(
 ) -> dict[str, Any]:
     """Project graph-terminal status while preserving runner resubmission."""
 
-    source = outcome if outcome is not None else job
+    authoritative_outcome = outcome is not None
+    source = outcome if authoritative_outcome else job
     if not isinstance(source, Mapping) or str(source.get("status") or "") != "failed":
         return {"is_terminal": False, "message": None}
 
     fatal = source.get("fatal_system_error") or {}
     origin = str(fatal.get("origin") or "") if isinstance(fatal, Mapping) else ""
-    if origin != "graph":
+    if origin == "runner" or (not authoritative_outcome and origin != "graph"):
         return {
             "is_terminal": False,
             "message": "上次执行未完成，可以重新提交。" if origin == "runner" else None,
         }
 
     diagnostic_code = (
-        str(fatal.get("diagnostic_code") or "")
+        str(fatal.get("diagnostic_code") or fatal.get("subtype") or "")
         if isinstance(fatal, Mapping)
         else ""
     )
