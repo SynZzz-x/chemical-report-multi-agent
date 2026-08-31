@@ -68,6 +68,45 @@ _DATA_ANALYSIS_MARKERS = (
     "定量操作窗口",
 )
 _DATA_RESOURCE_SUFFIXES = (".csv",)
+_SAFE_VALIDATION_TASK_ID = re.compile(r"T[1-9]\d{0,8}")
+
+
+def _safe_validation_task_id(value: Any) -> str | None:
+    """Return a bounded canonical generated task ID for internal telemetry."""
+
+    task_id = str(value or "").strip()
+    return task_id if _SAFE_VALIDATION_TASK_ID.fullmatch(task_id) else None
+
+
+def _annotate_validation_error(
+    error: ValueError,
+    *,
+    stage: str,
+    code: str,
+    task_id: Any = None,
+) -> ValueError:
+    """Attach safe internal diagnostics without changing the repair exception."""
+
+    if getattr(error, "validation_stage", None) is None:
+        error.validation_stage = stage
+        error.validation_code = code
+        error.validation_task_id = _safe_validation_task_id(task_id)
+    return error
+
+
+def _validation_error(
+    message: str,
+    *,
+    stage: str,
+    code: str,
+    task_id: Any = None,
+) -> ValueError:
+    return _annotate_validation_error(
+        ValueError(message),
+        stage=stage,
+        code=code,
+        task_id=task_id,
+    )
 
 
 def _is_atomic_concept(value: str) -> bool:
@@ -198,38 +237,55 @@ def _validate_task_dependencies(
 
     task_ids = [str(task.get("task_id") or "").strip() for task in tasks]
     if any(not task_id for task_id in task_ids) or len(task_ids) != len(set(task_ids)):
-        raise ValueError("task dependencies require unique non-empty task IDs")
+        raise _validation_error(
+            "task dependencies require unique non-empty task IDs",
+            stage="requirement_dependency",
+            code="invalid_dependency",
+        )
     known = set(task_ids)
     positions = {task_id: index for index, task_id in enumerate(task_ids)}
     graph: dict[str, list[str]] = {}
     for index, task in enumerate(tasks):
         task_id = task_ids[index]
-        dependencies = task.get("depends_on_task_ids")
-        _validate_unique_string_list(dependencies, "depends_on_task_ids")
-        normalized = [dependency.strip() for dependency in dependencies]
-        unknown = [dependency for dependency in normalized if dependency not in known]
-        if unknown:
-            raise ValueError(
-                f"unknown dependency for {task_id}: {', '.join(unknown)}"
-            )
-        if task_id in normalized:
-            raise ValueError(f"task {task_id} cannot depend on itself")
-        if require_prior and any(positions[dependency] >= index for dependency in normalized):
-            raise ValueError(f"task {task_id} dependencies must reference an earlier task")
-        if str(task.get("task_type") or "") == "synthesis":
-            expected = set(task_ids[:index])
-            if set(normalized) != expected:
+        try:
+            dependencies = task.get("depends_on_task_ids")
+            _validate_unique_string_list(dependencies, "depends_on_task_ids")
+            normalized = [dependency.strip() for dependency in dependencies]
+            unknown = [dependency for dependency in normalized if dependency not in known]
+            if unknown:
                 raise ValueError(
-                    f"synthesis dependencies for {task_id} must include every prior task"
+                    f"unknown dependency for {task_id}: {', '.join(unknown)}"
                 )
-        graph[task_id] = normalized
+            if task_id in normalized:
+                raise ValueError(f"task {task_id} cannot depend on itself")
+            if require_prior and any(positions[dependency] >= index for dependency in normalized):
+                raise ValueError(f"task {task_id} dependencies must reference an earlier task")
+            if str(task.get("task_type") or "") == "synthesis":
+                expected = set(task_ids[:index])
+                if set(normalized) != expected:
+                    raise ValueError(
+                        f"synthesis dependencies for {task_id} must include every prior task"
+                    )
+            graph[task_id] = normalized
+        except ValueError as exc:
+            raise _annotate_validation_error(
+                exc,
+                stage="requirement_dependency",
+                code="invalid_dependency",
+                task_id=task_id,
+            )
 
     visiting: set[str] = set()
     visited: set[str] = set()
 
     def visit(task_id: str) -> None:
         if task_id in visiting:
-            raise ValueError("task dependency graph contains a cycle")
+            raise _validation_error(
+                "task dependency graph contains a cycle",
+                stage="requirement_dependency",
+                code="invalid_dependency",
+                task_id=task_id,
+            )
         if task_id in visited:
             return
         visiting.add(task_id)
@@ -342,60 +398,80 @@ def _validate_generated_task_schema(
 ) -> None:
     """Validate the exact model-facing task contract without legacy fields."""
     if not isinstance(candidate_tasks, list) or not candidate_tasks:
-        raise ValueError("Planner tasks must be a non-empty list")
+        raise _validation_error(
+            "Planner tasks must be a non-empty list",
+            stage="json_envelope",
+            code="invalid_tasks",
+        )
     if len(candidate_tasks) > MAX_PLAN_TASKS:
-        raise ValueError(f"Planner plan exceeds {MAX_PLAN_TASKS} tasks")
+        raise _validation_error(
+            f"Planner plan exceeds {MAX_PLAN_TASKS} tasks",
+            stage="task_schema",
+            code="task_limit_exceeded",
+        )
 
     for task in candidate_tasks:
-        if not isinstance(task, dict):
-            raise ValueError("Planner tasks must be objects")
-        if set(task) != _GENERATED_TASK_REQUIRED_FIELDS:
-            missing = sorted(_GENERATED_TASK_REQUIRED_FIELDS - set(task))
-            extra = sorted(set(task) - _GENERATED_TASK_REQUIRED_FIELDS)
-            raise ValueError(
-                "Planner task fields must exactly match the generated contract; "
-                f"missing={missing}, extra={extra}"
+        task_id = task.get("task_id") if isinstance(task, dict) else None
+        try:
+            if not isinstance(task, dict):
+                raise ValueError("Planner tasks must be objects")
+            if set(task) != _GENERATED_TASK_REQUIRED_FIELDS:
+                missing = sorted(_GENERATED_TASK_REQUIRED_FIELDS - set(task))
+                extra = sorted(set(task) - _GENERATED_TASK_REQUIRED_FIELDS)
+                raise ValueError(
+                    "Planner task fields must exactly match the generated contract; "
+                    f"missing={missing}, extra={extra}"
+                )
+            for field in ("task_id", "task_name", "task_description"):
+                if not isinstance(task[field], str) or not task[field].strip():
+                    raise ValueError(f"{field} must be a non-empty string")
+            if (
+                not isinstance(task["task_type"], str)
+                or task["task_type"] not in _REPLACEMENT_TASK_TYPES
+            ):
+                raise ValueError(
+                    "task_type must be analysis, summary, inference, or synthesis"
+                )
+            for field in _GENERATED_TASK_BOOLEAN_FIELDS:
+                if not isinstance(task[field], bool):
+                    raise ValueError(f"{field} must be a boolean")
+            if not isinstance(task["query"], str):
+                raise ValueError("query must be a string")
+            _validate_string_list(task["use_resources"], "use_resources")
+            _validate_string_list(task["covers_sections"], "covers_sections")
+            _validate_unique_string_list(task["requirement_ids"], "requirement_ids")
+            _validate_unique_string_list(
+                task["depends_on_task_ids"], "depends_on_task_ids"
             )
-        for field in ("task_id", "task_name", "task_description"):
-            if not isinstance(task[field], str) or not task[field].strip():
-                raise ValueError(f"{field} must be a non-empty string")
-        if (
-            not isinstance(task["task_type"], str)
-            or task["task_type"] not in _REPLACEMENT_TASK_TYPES
-        ):
-            raise ValueError(
-                "task_type must be analysis, summary, inference, or synthesis"
-            )
-        for field in _GENERATED_TASK_BOOLEAN_FIELDS:
-            if not isinstance(task[field], bool):
-                raise ValueError(f"{field} must be a boolean")
-        if not isinstance(task["query"], str):
-            raise ValueError("query must be a string")
-        _validate_string_list(task["use_resources"], "use_resources")
-        _validate_string_list(task["covers_sections"], "covers_sections")
-        _validate_unique_string_list(task["requirement_ids"], "requirement_ids")
-        _validate_unique_string_list(
-            task["depends_on_task_ids"], "depends_on_task_ids"
-        )
-        valid_ids = valid_requirement_ids or set()
-        unknown_requirements = [
-            requirement_id
-            for requirement_id in task["requirement_ids"]
-            if requirement_id not in valid_ids
-        ]
-        if unknown_requirements:
-            raise ValueError(
-                "unknown requirement_id: " + ", ".join(unknown_requirements)
-            )
-        if not task["covers_sections"]:
-            raise ValueError("covers_sections must contain at least one section")
+            valid_ids = valid_requirement_ids or set()
+            unknown_requirements = [
+                requirement_id
+                for requirement_id in task["requirement_ids"]
+                if requirement_id not in valid_ids
+            ]
+            if unknown_requirements:
+                raise _validation_error(
+                    "unknown requirement_id: " + ", ".join(unknown_requirements),
+                    stage="requirement_dependency",
+                    code="unknown_requirement",
+                    task_id=task_id,
+                )
+            if not task["covers_sections"]:
+                raise ValueError("covers_sections must contain at least one section")
 
-        _validate_synthesis_task(task)
+            _validate_synthesis_task(task)
 
-        visualization = task["visualization"]
-        if visualization is None:
-            continue
-        _validate_visualization_contract(visualization)
+            visualization = task["visualization"]
+            if visualization is None:
+                continue
+            _validate_visualization_contract(visualization)
+        except ValueError as exc:
+            raise _annotate_validation_error(
+                exc,
+                stage="task_schema",
+                code="invalid_task_schema",
+                task_id=task_id,
+            )
     _validate_task_dependencies(candidate_tasks, require_prior=True)
 
 
@@ -765,69 +841,111 @@ def _validate_generated_task_semantics(
     web_authorized = policy_context.get("web_authorized") is True
 
     for task_index, task in enumerate(tasks):
+        task_id = task.get("task_id")
         task_text = " ".join(
             str(task.get(field) or "")
             for field in ("task_name", "task_description", "query")
         )
         normalized = task_text.casefold()
         if task.get("use_rag") is True and not str(task.get("query") or "").strip():
-            raise ValueError(
-                f"task {task.get('task_id')} sets use_rag=true but has an empty query"
+            raise _validation_error(
+                f"task {task.get('task_id')} sets use_rag=true but has an empty query",
+                stage="task_semantics",
+                code="rag_query_consistency",
+                task_id=task_id,
             )
         if task.get("use_rag") is False and task.get("query") != "":
-            raise ValueError(
-                f"task {task.get('task_id')} sets use_rag=false but query is not empty"
+            raise _validation_error(
+                f"task {task.get('task_id')} sets use_rag=false but query is not empty",
+                stage="task_semantics",
+                code="rag_query_consistency",
+                task_id=task_id,
             )
         synthesis_error = synthesis_semantic_error(
             task, has_prior_task=task_index > 0
         )
         if synthesis_error:
-            raise ValueError(synthesis_error)
+            raise _validation_error(
+                synthesis_error,
+                stage="task_semantics",
+                code="synthesis_semantics",
+                task_id=task_id,
+            )
 
-        assigned_resources = _resolve_assigned_resources(task, resources)
+        try:
+            assigned_resources = _resolve_assigned_resources(task, resources)
+        except ValueError as exc:
+            raise _annotate_validation_error(
+                exc,
+                stage="resource_policy",
+                code="invalid_resource_assignment",
+                task_id=task_id,
+            )
         requires_data = _requires_data_resource(normalized)
         if requires_data and not _task_has_data_resource(assigned_resources):
-            raise ValueError(
-                f"task {task.get('task_id')} requires a real assigned data resource"
+            raise _validation_error(
+                f"task {task.get('task_id')} requires a real assigned data resource",
+                stage="resource_policy",
+                code="data_resource_required",
+                task_id=task_id,
             )
 
         visualization = task.get("visualization")
         if visualization is not None and task.get("generate_figure") is not True:
-            raise ValueError(
+            raise _validation_error(
                 f"task {task.get('task_id')} has visualization but "
-                "generate_figure is false"
+                "generate_figure is false",
+                stage="task_semantics",
+                code="visualization_semantics",
+                task_id=task_id,
             )
         if (
             visualization is not None
             and task.get("use_rag") is not True
             and not task_allows_web(task)
         ):
-            raise ValueError(
+            raise _validation_error(
                 f"task {task.get('task_id')} concept visualization requires an "
-                "active RAG or authorized Web evidence channel"
+                "active RAG or authorized Web evidence channel",
+                stage="tool_policy",
+                code="evidence_channel_required",
+                task_id=task_id,
             )
         if (
             task.get("generate_figure") is True
             and visualization is None
             and not _task_has_data_resource(assigned_resources)
         ):
-            raise ValueError(
+            raise _validation_error(
                 f"task {task.get('task_id')} ordinary figure requires a real "
-                "assigned CSV data resource with a usable path"
+                "assigned CSV data resource with a usable path",
+                stage="resource_policy",
+                code="figure_data_resource_required",
+                task_id=task_id,
             )
         has_web_queries = bool(
             isinstance(visualization, dict) and visualization.get("web_queries")
         )
         if (task_allows_web(task) or has_web_queries) and not web_authorized:
-            raise ValueError(
-                f"task {task.get('task_id')} requires explicit web authorization"
+            raise _validation_error(
+                f"task {task.get('task_id')} requires explicit web authorization",
+                stage="tool_policy",
+                code="web_authorization_required",
+                task_id=task_id,
             )
 
 def _validate_initial_section_coverage(
     tasks: List[Dict[str, Any]],
     sections: List[Any] | None,
 ) -> None:
-    validate_task_coverage(tasks, sections)
+    try:
+        validate_task_coverage(tasks, sections)
+    except ValueError as exc:
+        raise _annotate_validation_error(
+            exc,
+            stage="section_coverage",
+            code="invalid_section_coverage",
+        )
 
 
 def _parse_generated_plan_payload(
@@ -836,17 +954,36 @@ def _parse_generated_plan_payload(
     policy_context: Dict[str, Any],
     expected_sections: List[Any] | None = None,
 ) -> List[Dict[str, Any]]:
-    payload = json.loads(_clean_json_fences(str(content).strip()))
+    try:
+        payload = json.loads(_clean_json_fences(str(content).strip()))
+    except json.JSONDecodeError as exc:
+        raise _annotate_validation_error(
+            exc,
+            stage="json_envelope",
+            code="invalid_json",
+        )
     if not isinstance(payload, dict) or set(payload) != {"tasks"}:
-        raise ValueError("Planner output must be a JSON object containing only tasks")
+        raise _validation_error(
+            "Planner output must be a JSON object containing only tasks",
+            stage="json_envelope",
+            code="invalid_envelope",
+        )
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
-        raise ValueError("Planner tasks must be a non-empty list")
+        raise _validation_error(
+            "Planner tasks must be a non-empty list",
+            stage="json_envelope",
+            code="invalid_tasks",
+        )
 
     normalized_tasks: List[Dict[str, Any]] = []
     for raw_task in tasks:
         if not isinstance(raw_task, dict):
-            raise ValueError("Planner tasks must be objects")
+            raise _validation_error(
+                "Planner tasks must be objects",
+                stage="task_schema",
+                code="non_object_task",
+            )
         normalized_tasks.append(dict(raw_task))
 
     valid_requirement_ids = {
@@ -859,9 +996,11 @@ def _parse_generated_plan_payload(
     expected_ids = [f"T{index}" for index in range(1, len(normalized_tasks) + 1)]
     actual_ids = [task["task_id"] for task in normalized_tasks]
     if actual_ids != expected_ids:
-        raise ValueError(
+        raise _validation_error(
             "Planner task IDs must be sequential "
-            f"{expected_ids}; actual={actual_ids}"
+            f"{expected_ids}; actual={actual_ids}",
+            stage="task_schema",
+            code="non_sequential_task_ids",
         )
     _validate_generated_task_semantics(
         normalized_tasks,
@@ -946,15 +1085,30 @@ def _invoke_plan_generation(
                 failure_reason = "plan_contract_invalid"
             else:
                 failure_reason = "plan_generation_failed"
-            logger.warning(
-                "Planner generation failed: path=%s attempt=%s "
-                "error_type=%s reason=%s requested_max_completion_tokens=%s",
-                failure_label,
-                attempt,
-                type(exc).__name__,
-                failure_reason,
-                budget,
-            )
+            if failure_reason == "plan_contract_invalid":
+                logger.warning(
+                    "Planner generation failed: path=%s attempt=%s "
+                    "error_type=%s reason=%s requested_max_completion_tokens=%s "
+                    "validation_stage=%s validation_code=%s task_id=%s",
+                    failure_label,
+                    attempt,
+                    type(exc).__name__,
+                    failure_reason,
+                    budget,
+                    getattr(exc, "validation_stage", "contract_validation"),
+                    getattr(exc, "validation_code", "unclassified"),
+                    getattr(exc, "validation_task_id", None) or "-",
+                )
+            else:
+                logger.warning(
+                    "Planner generation failed: path=%s attempt=%s "
+                    "error_type=%s reason=%s requested_max_completion_tokens=%s",
+                    failure_label,
+                    attempt,
+                    type(exc).__name__,
+                    failure_reason,
+                    budget,
+                )
 
     raise PlannerGenerationError(f"{failure_label}: {last_error}") from last_error
 

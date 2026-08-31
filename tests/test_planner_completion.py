@@ -123,6 +123,123 @@ def test_complete_invalid_response_keeps_contract_retry(monkeypatch, caplog, pay
     assert "上一次输出未通过 Plan JSON 校验" in model.calls[1][-1].content
 
 
+@pytest.mark.parametrize(
+    ("payload", "intake", "stage", "code", "task_id", "error_type"),
+    [
+        (
+            "not-json PRIVATE_MODEL_OUTPUT",
+            _intake_summary(user_intent="PRIVATE_USER_REQUEST"),
+            "json_envelope",
+            "invalid_json",
+            "-",
+            "JSONDecodeError",
+        ),
+        (
+            json.dumps({"tasks": [_task(task_id="PRIVATE_TASK_ID", use_rag="yes")]}),
+            _intake_summary(),
+            "task_schema",
+            "invalid_task_schema",
+            "-",
+            "ValueError",
+        ),
+        (
+            json.dumps({"tasks": [_task(requirement_ids=["REQ-404"])]}),
+            _intake_summary(requirements=[{"requirement_id": "REQ-001"}]),
+            "requirement_dependency",
+            "unknown_requirement",
+            "T1",
+            "ValueError",
+        ),
+        (
+            json.dumps({"tasks": [
+                _task(task_id="T1"),
+                _task(task_id="T2", depends_on_task_ids=["T404"]),
+            ]}),
+            _intake_summary(sections=[]),
+            "requirement_dependency",
+            "invalid_dependency",
+            "T2",
+            "ValueError",
+        ),
+        (
+            json.dumps({"tasks": [_task(use_rag=False, query="unexpected")]}),
+            _intake_summary(),
+            "task_semantics",
+            "rag_query_consistency",
+            "T1",
+            "ValueError",
+        ),
+    ],
+)
+def test_contract_invalid_logging_uses_safe_validation_metadata(
+    monkeypatch,
+    caplog,
+    payload,
+    intake,
+    stage,
+    code,
+    task_id,
+    error_type,
+):
+    model = _model(monkeypatch, [payload, payload])
+
+    with caplog.at_level("WARNING", logger="src.nodes.planner"):
+        with pytest.raises(planner_module.PlannerGenerationError):
+            planner_module._build_tasks_with_llm(intake, {})
+
+    logs = [record.message for record in caplog.records if record.name == "src.nodes.planner"]
+    assert len(logs) == len(model.calls) == 2
+    for log in logs:
+        assert "reason=plan_contract_invalid" in log
+        assert f"error_type={error_type}" in log
+        assert f"validation_stage={stage}" in log
+        assert f"validation_code={code}" in log
+        assert f"task_id={task_id}" in log
+        assert "PRIVATE_MODEL_OUTPUT" not in log
+        assert "PRIVATE_USER_REQUEST" not in log
+        assert "PRIVATE_TASK_ID" not in log
+
+    if error_type == "JSONDecodeError":
+        assert "Expecting value" in model.calls[1][-1].content
+
+
+def test_contract_invalid_telemetry_does_not_prevent_recovery(monkeypatch, caplog):
+    invalid = json.dumps({"tasks": [_task(use_rag=False, query="unexpected")]})
+    model = _model(monkeypatch, [invalid, json.dumps({"tasks": [_task()]})])
+
+    with caplog.at_level("WARNING", logger="src.nodes.planner"):
+        assert planner_module._build_tasks_with_llm(_intake_summary(), {}) == [_task()]
+
+    logs = [record.message for record in caplog.records if record.name == "src.nodes.planner"]
+    assert len(logs) == 1
+    assert "reason=plan_contract_invalid" in logs[0]
+    assert "validation_stage=task_semantics" in logs[0]
+    assert "validation_code=rag_query_consistency" in logs[0]
+    assert "task_id=T1" in logs[0]
+    assert len(model.calls) == 2
+
+
+def test_truncation_log_does_not_reuse_prior_contract_validation_metadata(
+    monkeypatch,
+    caplog,
+):
+    invalid = json.dumps({"tasks": [_task(use_rag=False, query="unexpected")]})
+    model = _model(monkeypatch, [invalid, _truncated()])
+
+    with caplog.at_level("WARNING", logger="src.nodes.planner"):
+        with pytest.raises(planner_module.PlannerGenerationError):
+            planner_module._build_tasks_with_llm(_intake_summary(), {})
+
+    logs = [record.message for record in caplog.records if record.name == "src.nodes.planner"]
+    assert len(logs) == len(model.calls) == 2
+    assert "reason=plan_contract_invalid" in logs[0]
+    assert "validation_stage=task_semantics" in logs[0]
+    assert "reason=plan_generation_truncated" in logs[1]
+    assert "validation_stage=" not in logs[1]
+    assert "validation_code=" not in logs[1]
+    assert "task_id=" not in logs[1]
+
+
 def test_truncation_can_retry_to_valid_plan_without_changing_contract(monkeypatch, caplog):
     monkeypatch.setenv("PLANNER_MAX_COMPLETION_TOKENS", "20000")
     model = _model(monkeypatch, [_truncated(), json.dumps({"tasks": [_task()]})])
