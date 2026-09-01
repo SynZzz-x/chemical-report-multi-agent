@@ -360,11 +360,51 @@ def test_restore_sidebar_labels_graph_terminal_as_stopped_not_resumable():
                 "status": "failed",
                 "fatal_system_error": {"origin": "graph"},
             },
+            "_active_terminal_job_ui_state": lambda: terminal_job_ui_state(
+                {
+                    "status": "failed",
+                    "fatal_system_error": {"origin": "graph"},
+                }
+            ),
             "terminal_job_ui_state": terminal_job_ui_state,
         },
     )
 
     restore_sidebar("job-fatal")
+
+    assert FakeSt.session_state["restore_success"] == "任务已打开；该报告任务已停止。"
+
+
+def test_restore_sidebar_uses_authoritative_legacy_fatal_outcome_for_stopped_toast():
+    from src.ui_projection import terminal_job_ui_state
+
+    stored_record = {
+        "status": "failed",
+        "fatal_system_error": {"diagnostic_code": "VERIFIER_UNAVAILABLE"},
+    }
+    authoritative_outcome = {
+        "status": "failed",
+        "fatal_system_error": {"diagnostic_code": "VERIFIER_UNAVAILABLE"},
+    }
+
+    class FakeSt:
+        session_state: dict[str, Any] = {}
+
+    restore_sidebar = _app_function(
+        "_restore_job_from_sidebar",
+        {
+            "Any": Any,
+            "st": FakeSt(),
+            "_restore_job": lambda job_id: None,
+            "_current_job": lambda: stored_record,
+            "_active_terminal_job_ui_state": lambda: terminal_job_ui_state(
+                stored_record, authoritative_outcome
+            ),
+            "terminal_job_ui_state": terminal_job_ui_state,
+        },
+    )
+
+    restore_sidebar("job-legacy-fatal")
 
     assert FakeSt.session_state["restore_success"] == "任务已打开；该报告任务已停止。"
 

@@ -340,7 +340,7 @@ def _restore_job_from_sidebar(job_id: str) -> None:
         st.session_state["restore_error"] = str(exc)
         st.session_state.pop("restore_success", None)
     else:
-        restored_ui_state = terminal_job_ui_state(_current_job())
+        restored_ui_state = _active_terminal_job_ui_state()
         st.session_state["restore_success"] = (
             "任务已打开；该报告任务已停止。"
             if restored_ui_state["is_terminal"]
