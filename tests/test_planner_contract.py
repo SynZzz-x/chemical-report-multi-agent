@@ -87,6 +87,18 @@ def test_replacement_dependency_graph_rejects_cycle():
         planner_module._validate_task_dependencies(tasks, require_prior=False)
 
 
+def test_legacy_dependency_validation_does_not_attach_generation_telemetry():
+    tasks = [
+        _task(task_id="T1"),
+        _task(task_id="T2", depends_on_task_ids=["T404"]),
+    ]
+
+    with pytest.raises(ValueError, match="unknown dependency") as raised:
+        planner_module._validate_task_dependencies(tasks, require_prior=False)
+
+    assert not hasattr(raised.value, "validation_stage")
+
+
 def test_synthesis_explicitly_depends_on_every_consumed_prior_task():
     tasks = [
         _task(task_id="T1"),

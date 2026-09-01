@@ -135,7 +135,7 @@ def test_complete_invalid_response_keeps_contract_retry(monkeypatch, caplog, pay
             "JSONDecodeError",
         ),
         (
-            json.dumps({"tasks": [_task(task_id="PRIVATE_TASK_ID", use_rag="yes")]}),
+            json.dumps({"tasks": [_task(task_id="T999999999", use_rag="yes")]}),
             _intake_summary(),
             "task_schema",
             "invalid_task_schema",
@@ -197,7 +197,7 @@ def test_contract_invalid_logging_uses_safe_validation_metadata(
         assert f"task_id={task_id}" in log
         assert "PRIVATE_MODEL_OUTPUT" not in log
         assert "PRIVATE_USER_REQUEST" not in log
-        assert "PRIVATE_TASK_ID" not in log
+        assert "T999999999" not in log
 
     if error_type == "JSONDecodeError":
         assert "Expecting value" in model.calls[1][-1].content

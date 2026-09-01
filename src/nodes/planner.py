@@ -232,16 +232,13 @@ def _validate_task_dependencies(
     tasks: List[Dict[str, Any]],
     *,
     require_prior: bool,
+    validation_task_ids: List[str | None] | None = None,
 ) -> None:
     """Validate explicit task dependencies independently of requirements."""
 
     task_ids = [str(task.get("task_id") or "").strip() for task in tasks]
     if any(not task_id for task_id in task_ids) or len(task_ids) != len(set(task_ids)):
-        raise _validation_error(
-            "task dependencies require unique non-empty task IDs",
-            stage="requirement_dependency",
-            code="invalid_dependency",
-        )
+        raise ValueError("task dependencies require unique non-empty task IDs")
     known = set(task_ids)
     positions = {task_id: index for index, task_id in enumerate(task_ids)}
     graph: dict[str, list[str]] = {}
@@ -268,24 +265,21 @@ def _validate_task_dependencies(
                     )
             graph[task_id] = normalized
         except ValueError as exc:
-            raise _annotate_validation_error(
-                exc,
-                stage="requirement_dependency",
-                code="invalid_dependency",
-                task_id=task_id,
-            )
+            if validation_task_ids is not None:
+                raise _annotate_validation_error(
+                    exc,
+                    stage="requirement_dependency",
+                    code="invalid_dependency",
+                    task_id=validation_task_ids[index],
+                )
+            raise
 
     visiting: set[str] = set()
     visited: set[str] = set()
 
     def visit(task_id: str) -> None:
         if task_id in visiting:
-            raise _validation_error(
-                "task dependency graph contains a cycle",
-                stage="requirement_dependency",
-                code="invalid_dependency",
-                task_id=task_id,
-            )
+            raise ValueError("task dependency graph contains a cycle")
         if task_id in visited:
             return
         visiting.add(task_id)
@@ -410,8 +404,13 @@ def _validate_generated_task_schema(
             code="task_limit_exceeded",
         )
 
-    for task in candidate_tasks:
+    validation_task_ids: List[str | None] = []
+    for task_index, task in enumerate(candidate_tasks, start=1):
         task_id = task.get("task_id") if isinstance(task, dict) else None
+        validation_task_id = (
+            f"T{task_index}" if task_id == f"T{task_index}" else None
+        )
+        validation_task_ids.append(validation_task_id)
         try:
             if not isinstance(task, dict):
                 raise ValueError("Planner tasks must be objects")
@@ -454,7 +453,7 @@ def _validate_generated_task_schema(
                     "unknown requirement_id: " + ", ".join(unknown_requirements),
                     stage="requirement_dependency",
                     code="unknown_requirement",
-                    task_id=task_id,
+                    task_id=validation_task_id,
                 )
             if not task["covers_sections"]:
                 raise ValueError("covers_sections must contain at least one section")
@@ -470,9 +469,20 @@ def _validate_generated_task_schema(
                 exc,
                 stage="task_schema",
                 code="invalid_task_schema",
-                task_id=task_id,
+                task_id=validation_task_id,
             )
-    _validate_task_dependencies(candidate_tasks, require_prior=True)
+    try:
+        _validate_task_dependencies(
+            candidate_tasks,
+            require_prior=True,
+            validation_task_ids=validation_task_ids,
+        )
+    except ValueError as exc:
+        raise _annotate_validation_error(
+            exc,
+            stage="requirement_dependency",
+            code="invalid_dependency",
+        )
 
 
 def _validate_replacement_task_schema(candidate_tasks: Any) -> None:
